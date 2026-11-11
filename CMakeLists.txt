@@ -51,6 +51,7 @@ add_library(wiitls STATIC
     src/wtls_core.c
     src/wtls_entropy.c
     src/wtls_jitter.c
+    src/wtls_time.c
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
@@ -63,6 +64,9 @@ target_link_libraries(wiitls PUBLIC mbedtls mbedx509 tfpsacrypto)
 # static-link cycle so linkers that do not rescan archives still resolve it.
 target_link_libraries(tfpsacrypto INTERFACE wiitls)
 target_compile_options(wiitls PRIVATE -Wall -Wextra)
+# Lower bound of the clock sanity check (honours SOURCE_DATE_EPOCH for reproducible builds).
+string(TIMESTAMP WTLS_BUILD_UNIX_TIME "%s" UTC)
+target_compile_definitions(wiitls PRIVATE WTLS_BUILD_UNIX_TIME=${WTLS_BUILD_UNIX_TIME}LL)
 if(WTLS_PLATFORM STREQUAL "host")
     target_compile_definitions(wiitls PRIVATE WTLS_PLATFORM_HOST)
     if(WIN32)
@@ -99,6 +103,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
 
     wtls_host_test(test_smoke)
     wtls_host_test(test_jitter)
+    wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
 endif()
 

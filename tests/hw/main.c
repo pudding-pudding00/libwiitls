@@ -53,8 +53,7 @@ static const struct {
     void (*fn)(void);
 } k_suites[] = {
     {"selftest", run_selftest},
-    {"spike", wtls_suite_spike},
-    WTLS_HW_SUITES
+#include "suites.inc"
 };
 
 static void video_init(void) {
