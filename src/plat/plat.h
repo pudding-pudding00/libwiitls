@@ -1,12 +1,35 @@
-/* Platform abstraction: Wii (libogc) or host (POSIX/Winsock, tests only). */
+/* Platform abstraction: Wii (libogc) or host (POSIX/Winsock, tests only).
+ * All returns are WTLS_* status codes or byte counts. Sockets are always
+ * non-blocking after wtls_plat_connect. */
 #ifndef WTLS_PLAT_H
 #define WTLS_PLAT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
+/* Largest single net_send/net_recv handed to IOS (shared 64 KiB IPC heap). */
+#define WTLS_PLAT_MAX_CHUNK 16384
+
 /* Fills out with OS entropy. Host: BCryptGenRandom/getrandom. Wii: WTLS_ERR_ENTROPY. */
 int wtls_plat_os_entropy(uint8_t *out, size_t len);
+
+int      wtls_plat_init(void);                                         /* OK | ERR_NET */
+int      wtls_plat_resolve(const char *host, uint32_t *ipv4_be);       /* OK | ERR_DNS */
+int      wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms,
+                           int *fd_out);                               /* OK | ERR_CONNECT | ERR_TIMEOUT */
+int      wtls_plat_send(int fd, const uint8_t *buf, size_t len);       /* >0 | WANT_WRITE | ERR_IO */
+int      wtls_plat_recv(int fd, uint8_t *buf, size_t len);             /* >0 | 0 (EOF) | WANT_READ | ERR_IO */
+int      wtls_plat_poll(int fd, bool rd, bool wr, uint32_t timeout_ms);/* 1 ready | 0 timeout | ERR_IO */
+void     wtls_plat_close(int fd);
+int      wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, size_t req_len,
+                                uint8_t *resp, size_t resp_cap,
+                                uint32_t timeout_ms);                  /* bytes | ERR_TIMEOUT | ERR_IO */
+uint64_t wtls_plat_now_ms(void);                                       /* monotonic */
+
+/* Strict dotted-quad IPv4 literal ("a.b.c.d", each 0..255, no leading '+'/space).
+ * Returns true and stores the address in network byte order. */
+bool wtls_plat_parse_ipv4(const char *s, uint32_t *ipv4_be);
 
 #if defined(WTLS_PLATFORM_OGC)
 /* One timebase-jitter sample: delta of mftb across the disturbance chosen in

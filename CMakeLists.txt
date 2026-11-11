@@ -51,6 +51,7 @@ add_library(wiitls STATIC
     src/wtls_core.c
     src/wtls_entropy.c
     src/wtls_jitter.c
+    src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
 set_target_properties(wiitls PROPERTIES OUTPUT_NAME wiitls PREFIX lib)
@@ -82,8 +83,23 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         add_test(NAME ${name} COMMAND ${name})
         set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "WTLS-TEST DONE pass=[0-9]+ fail=0")
     endfunction()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # Test that needs tests/host/tls_test_server.py; the fixed ports force serial runs.
+    function(wtls_host_server_test name)
+        add_executable(${name} tests/host/${name}.c ${ARGN})
+        target_include_directories(${name} PRIVATE tests/common src)
+        target_link_libraries(${name} PRIVATE wiitls)
+        add_test(NAME ${name}
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/host/run_with_server.py
+                         $<TARGET_FILE:${name}>)
+        set_tests_properties(${name} PROPERTIES
+            PASS_REGULAR_EXPRESSION "WTLS-TEST DONE pass=[0-9]+ fail=0"
+            RESOURCE_LOCK tls_test_server)
+    endfunction()
+
     wtls_host_test(test_smoke)
     wtls_host_test(test_jitter)
+    wtls_host_server_test(test_plat tests/common/plat_tests.c)
 endif()
 
 if(WTLS_PLATFORM STREQUAL "ogc")

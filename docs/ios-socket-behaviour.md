@@ -26,6 +26,8 @@ _(paste the `spike` output here)_
 | `time(NULL)` − PC time | pending | — |
 | Jitter variant (a / b / c) and MCV min-entropy `H` of the low byte | pending | *provisional:* variant (b), `WTLS_JITTER_BITS_PER_SAMPLE = 1` |
 
+| IOS error numbers returned by `net_connect`/`net_send`/`net_recv` | pending | *provisional:* alphabetical SUSv3 order as in Dolphin's IOS emulation: `EAGAIN`=6, `EALREADY`=7, `EINPROGRESS`=26, `EISCONN`=30 (`src/plat/plat_ogc.c`). The spike's "net_connect =" / "second net_connect =" lines confirm or correct them. |
+
 `WTLS_JITTER_BITS_PER_SAMPLE` = floor(H/2), minimum 1. If `H < 2` for every
 variant, the timebase is unusable as an entropy source and the design must be
 revisited.
