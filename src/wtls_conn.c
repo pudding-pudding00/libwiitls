@@ -11,6 +11,8 @@
 
 #include "plat/plat.h"
 #include "wtls_castore.h"
+#include "wtls_dns.h"
+#include "wtls_scache.h"
 #include "wtls_internal.h"
 #include "wtls_time.h"
 
@@ -19,6 +21,9 @@
 #define DEF_IO_MS 15000u
 
 static uint32_t s_last_verify_flags;
+
+/* Serialized session scratch (single-threaded API; keeps 4 KiB off LWP stacks). */
+static uint8_t s_blob[WTLS_SESSION_BLOB_MAX];
 
 uint32_t wtls_last_verify_flags(void) { return s_last_verify_flags; }
 
@@ -99,6 +104,31 @@ static void conn_free(wtls_conn *c) {
     mbedtls_free(c);
 }
 
+/* Offers a cached ticket for host:port. Any failure just means a full handshake. */
+static void offer_ticket(wtls_conn *c) {
+    size_t len;
+    if (wtls_scache_take(c->host, c->port, s_blob, sizeof s_blob, &len, wtls_plat_now_ms()) != WTLS_OK) return;
+    mbedtls_ssl_session sess;
+    mbedtls_ssl_session_init(&sess);
+    if (mbedtls_ssl_session_load(&sess, s_blob, len) == 0 && mbedtls_ssl_set_session(&c->ssl, &sess) == 0)
+        c->offered_ticket = true;
+    mbedtls_ssl_session_free(&sess);
+    mbedtls_platform_zeroize(s_blob, len);
+}
+
+/* Called after MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET. */
+static void store_ticket(wtls_conn *c) {
+    if (c->no_resumption) return;
+    mbedtls_ssl_session sess;
+    mbedtls_ssl_session_init(&sess);
+    size_t len = 0;
+    if (mbedtls_ssl_get_session(&c->ssl, &sess) == 0 &&
+        mbedtls_ssl_session_save(&sess, s_blob, sizeof s_blob, &len) == 0)
+        wtls_scache_put(c->host, c->port, s_blob, len, wtls_plat_now_ms());
+    mbedtls_ssl_session_free(&sess);
+    mbedtls_platform_zeroize(s_blob, sizeof s_blob);
+}
+
 /* ---- public API --------------------------------------------------------- */
 
 wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const wtls_options *opt) {
@@ -117,7 +147,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
 
     uint32_t ip;
     bool literal = wtls_plat_parse_ipv4(name, &ip);
-    if (!literal && wtls_plat_resolve(name, &ip) != WTLS_OK) return WTLS_ERR_DNS;
+    if (!literal && wtls_dns_lookup(name, &ip, wtls_plat_now_ms()) != WTLS_OK) return WTLS_ERR_DNS;
 
     wtls_conn *c = mbedtls_calloc(1, sizeof *c);
     if (!c) return WTLS_ERR_NOMEM;
@@ -128,6 +158,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     c->port = port;
     c->ip_literal = literal;
     c->ipv4_be = ip;
+    c->no_resumption = opt->no_resumption;
     c->io_timeout_ms = opt->io_timeout_ms ? opt->io_timeout_ms : DEF_IO_MS;
 
     int st = wtls_plat_connect(ip, port, opt->connect_timeout_ms ? opt->connect_timeout_ms : DEF_CONNECT_MS,
@@ -135,6 +166,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     if (st != WTLS_OK) {
         c->fd = -1;
         conn_free(c);
+        if (!literal) wtls_dns_invalidate(name); /* the address may have moved */
         return (wtls_status)st;
     }
     uint64_t t0 = wtls_plat_now_ms();
@@ -149,6 +181,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     }
     if (literal && !opt->insecure_skip_verify) mbedtls_ssl_set_verify(&c->ssl, verify_ip_san, c);
     mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
+    if (!opt->no_resumption) offer_ticket(c);
 
     c->lookups_before = wtls_castore_lookups;
     uint64_t deadline = t0 + (opt->handshake_timeout_ms ? opt->handshake_timeout_ms : DEF_HANDSHAKE_MS);
@@ -187,7 +220,8 @@ int wtls_read(wtls_conn *c, void *buf, size_t len) {
             if (r != WTLS_OK) return r;
             continue;
         case MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET:
-            continue; /* stored from Task 8 on */
+            store_ticket(c);
+            continue;
         case MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY:
             return WTLS_ERR_CLOSED;
         case 0: /* transport EOF without close_notify */
@@ -218,7 +252,10 @@ int wtls_write(wtls_conn *c, const void *buf, size_t len) {
             if (st != WTLS_OK) return off ? (int)off : st;
             continue;
         }
-        if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+        if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+            store_ticket(c);
+            continue;
+        }
         if (off) return (int)off;
         return r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ? WTLS_ERR_CLOSED : (c->bio_err ? c->bio_err : WTLS_ERR_IO);
     }

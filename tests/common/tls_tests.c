@@ -12,6 +12,7 @@
 #include "check.h"
 #include "env.h"
 #include "plat/plat.h"
+#include "wtls_scache.h"
 
 #define PLAIN_PORT 4430
 #define P_TLS13_ECDSA 4431
@@ -296,6 +297,41 @@ static void test_connect_refuses_with_bad_clock(void) {
     CHECK_EQ_INT(after, before + 1);
 }
 
+/* Connects to 4431, does one PING (tickets arrive with the first read) and
+ * returns info.resumed; -1 on failure. */
+static int ping_resumed(bool no_resumption) {
+    wtls_options o = {0};
+    o.no_resumption = no_resumption;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (!c) return -1;
+    expect_line(c, "PING\n", "PING");
+    wtls_conn_info info;
+    CHECK_EQ_INT(wtls_get_info(c, &info), WTLS_OK);
+    TLOG("  resumed=%d handshake %u ms\n", info.resumed, (unsigned)info.handshake_ms);
+    wtls_close(c);
+    return info.resumed ? 1 : 0;
+}
+
+static void test_resumption(void) {
+    wtls_scache_clear();
+    CHECK_EQ_INT(ping_resumed(false), 0);
+    CHECK_EQ_INT(ping_resumed(false), 1);
+}
+
+static void test_no_resumption_flag(void) {
+    wtls_scache_clear();
+    CHECK_EQ_INT(ping_resumed(false), 0);
+    CHECK_EQ_INT(ping_resumed(true), 0);
+    CHECK_EQ_INT(ping_resumed(false), 1); /* the flag neither used nor dropped the ticket */
+}
+
+static void test_ticket_chain(void) {
+    wtls_scache_clear();
+    CHECK_EQ_INT(ping_resumed(false), 0);
+    CHECK_EQ_INT(ping_resumed(false), 1);
+    CHECK_EQ_INT(ping_resumed(false), 1); /* ticket stored by the resumed connection */
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -320,6 +356,9 @@ void wtls_suite_tls(void) {
     RUN(test_read_timeout);
     RUN(test_connect_refused);
     RUN(test_connect_args);
+    RUN(test_resumption);
+    RUN(test_no_resumption_flag);
+    RUN(test_ticket_chain);
     if (!g_env.is_hw) {
         RUN(test_hostname_normalization);
         RUN(test_ip_literal_no_sni);

@@ -21,6 +21,7 @@ struct wtls_conn {
     uint32_t handshake_ms;
     bool ip_literal;
     uint32_t ipv4_be;
+    bool no_resumption;
     int bio_err;             /* WTLS_ERR_IO once the transport failed */
 };
 

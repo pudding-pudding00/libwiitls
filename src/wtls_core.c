@@ -32,6 +32,8 @@ const char *wtls_strerror(int status) {
 
 #include "plat/plat.h"
 #include "wtls_castore.h"
+#include "wtls_dns.h"
+#include "wtls_scache.h"
 #include "wtls_time.h"
 
 static bool s_initialized;
@@ -73,6 +75,8 @@ wtls_status wtls_init(void) {
 void wtls_shutdown(void) {
     if (!s_initialized) return;
     wtls_castore_free();
+    wtls_scache_clear(); /* holds resumption secrets */
+    wtls_dns_clear();
     mbedtls_psa_crypto_free();
     s_initialized = false;
 }

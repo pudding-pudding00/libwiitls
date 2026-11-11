@@ -74,6 +74,8 @@ add_library(wiitls STATIC
     src/wtls_time.c
     src/wtls_castore.c
     src/wtls_conn.c
+    src/wtls_scache.c
+    src/wtls_dns.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -146,6 +148,8 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
     wtls_host_test(test_castore)
+    wtls_host_test(test_scache)
+    wtls_host_test(test_dns)
     add_dependencies(test_castore wtls_test_certs)
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"
