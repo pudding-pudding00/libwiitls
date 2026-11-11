@@ -176,7 +176,7 @@ itself (and verifies the SHA-256); otherwise it uses the checked-in
 
 ## Licenses
 
-- libwiitls itself: no license has been chosen yet (no `LICENSE` file).
+- libwiitls itself: [Apache-2.0](LICENSE), Copyright 2026 pudding-pudding00.
 - [Mbed TLS / TF-PSA-Crypto](https://github.com/Mbed-TLS/mbedtls): Apache-2.0
   (fetched at build time, statically linked).
 - Mozilla CA certificate bundle (`data/cacert.pem`, `src/gen/ca_bundle.c`):
