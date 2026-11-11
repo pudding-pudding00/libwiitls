@@ -8,5 +8,6 @@ void wtls_suite_entropy(void);
 void wtls_suite_plat(void);
 void wtls_suite_time(void);
 void wtls_suite_tls(void);
+void wtls_suite_realworld(void);
 
 #endif

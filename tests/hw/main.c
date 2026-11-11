@@ -3,7 +3,7 @@
  * Arguments (via wiiload): logip=<a.b.c.d> logport=<n> suite=<name>
  *                          server=<a.b.c.d> pctime=<unix>
  * Every line goes to the console AND to the TCP log at logip:logport.
- * The last line is always "WTLS-HWTEST DONE pass=P fail=F".
+ * The last line is always "WTLS-HWTEST DONE pass=P fail=F skip=S".
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -122,7 +122,8 @@ int main(int argc, char **argv) {
         wtls_hw_printf("unknown suite or no network: %s\n", suite);
         wtls_t_fail++;
     }
-    wtls_hw_printf("WTLS-HWTEST DONE pass=%d fail=%d\n", wtls_t_pass, wtls_t_fail);
+    wtls_hw_printf("WTLS-HWTEST DONE pass=%d fail=%d skip=%d\n", wtls_t_pass, wtls_t_fail,
+                   wtls_t_skip);
     if (g_log_fd >= 0) net_close(g_log_fd);
 
     for (int i = 0; i < 60 * 3; i++) VIDEO_WaitVSync(); /* keep the result visible */

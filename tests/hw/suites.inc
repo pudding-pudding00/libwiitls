@@ -4,3 +4,4 @@
 {"plat", wtls_suite_plat},
 {"time", wtls_suite_time},
 {"tls", wtls_suite_tls},
+{"realworld", wtls_suite_realworld},

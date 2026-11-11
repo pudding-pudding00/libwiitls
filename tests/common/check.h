@@ -19,7 +19,10 @@ int wtls_hw_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 extern int wtls_t_pass;
 extern int wtls_t_fail;
 extern int wtls_t_cur_failed;
-#define WTLS_CHECK_DEFINE_COUNTERS int wtls_t_pass, wtls_t_fail, wtls_t_cur_failed
+extern int wtls_t_skip;
+extern int wtls_t_cur_skipped;
+#define WTLS_CHECK_DEFINE_COUNTERS \
+    int wtls_t_pass, wtls_t_fail, wtls_t_cur_failed, wtls_t_skip, wtls_t_cur_skipped
 
 /* Formatted log line through the runner's printf (console + TCP log on the Wii). */
 #define TLOG(...) WTLS_TEST_PRINTF(__VA_ARGS__)
@@ -51,14 +54,26 @@ extern int wtls_t_cur_failed;
         }                                                                    \
     } while (0)
 
+/* Marks the running test as skipped (counted neither as pass nor as fail).
+ * A CHECK failure in the same test still wins. */
+#define SKIP(reason)                                                         \
+    do {                                                                     \
+        WTLS_TEST_PRINTF("  SKIP: %s\n", (reason));                          \
+        wtls_t_cur_skipped = 1;                                              \
+    } while (0)
+
 #define RUN(fn)                                                              \
     do {                                                                     \
         wtls_t_cur_failed = 0;                                               \
+        wtls_t_cur_skipped = 0;                                              \
         WTLS_TEST_PRINTF("RUN  %s\n", #fn);                                  \
         fn();                                                                \
         if (wtls_t_cur_failed) {                                             \
             wtls_t_fail++;                                                   \
             WTLS_TEST_PRINTF("FAIL %s\n", #fn);                              \
+        } else if (wtls_t_cur_skipped) {                                     \
+            wtls_t_skip++;                                                   \
+            WTLS_TEST_PRINTF("SKIP %s\n", #fn);                              \
         } else {                                                             \
             wtls_t_pass++;                                                   \
             WTLS_TEST_PRINTF("OK   %s\n", #fn);                              \
@@ -67,7 +82,8 @@ extern int wtls_t_cur_failed;
 
 /* Prints the summary line parsed by CTest and tools/hwtest.py. */
 #define CHECK_DONE()                                                         \
-    (WTLS_TEST_PRINTF("WTLS-TEST DONE pass=%d fail=%d\n", wtls_t_pass, wtls_t_fail), \
+    (WTLS_TEST_PRINTF("WTLS-TEST DONE pass=%d fail=%d skip=%d\n", wtls_t_pass, \
+                      wtls_t_fail, wtls_t_skip),                             \
      wtls_t_fail > 0 ? 1 : 0)
 
 #endif

@@ -1,0 +1,5 @@
+# https_get example: https_get.dol (Wii only)
+add_executable(https_get main.c)
+target_link_libraries(https_get PRIVATE wiitls)
+target_compile_options(https_get PRIVATE -Wall -Wextra)
+ogc_create_dol(https_get)
