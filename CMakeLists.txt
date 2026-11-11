@@ -46,12 +46,34 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # ---------------------------------------------------------------------------
+# Embedded Mozilla CA bundle: regenerated from data/cacert.pem when Python 3 is
+# available (SHA-256 checked), otherwise the checked-in src/gen/ca_bundle.c is used.
+find_package(Python3 COMPONENTS Interpreter)
+set(WTLS_CA_PEM ${CMAKE_CURRENT_SOURCE_DIR}/data/cacert.pem)
+set(WTLS_CA_GEN ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_ca_bundle.py)
+if(Python3_Interpreter_FOUND)
+    set(WTLS_CA_BUNDLE_C ${CMAKE_BINARY_DIR}/gen/ca_bundle.c)
+    add_custom_command(
+        OUTPUT ${WTLS_CA_BUNDLE_C}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/gen
+        COMMAND ${Python3_EXECUTABLE} ${WTLS_CA_GEN} --pem ${WTLS_CA_PEM}
+                --sha256 ${WTLS_CA_PEM}.sha256 --out ${WTLS_CA_BUNDLE_C}
+        DEPENDS ${WTLS_CA_PEM} ${WTLS_CA_PEM}.sha256 ${WTLS_CA_GEN}
+        COMMENT "Generating CA bundle from data/cacert.pem"
+        VERBATIM)
+else()
+    set(WTLS_CA_BUNDLE_C ${CMAKE_CURRENT_SOURCE_DIR}/src/gen/ca_bundle.c)
+endif()
+
+# ---------------------------------------------------------------------------
 # libwiitls
 add_library(wiitls STATIC
     src/wtls_core.c
     src/wtls_entropy.c
     src/wtls_jitter.c
     src/wtls_time.c
+    src/wtls_castore.c
+    ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
@@ -87,7 +109,24 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         add_test(NAME ${name} COMMAND ${name})
         set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "WTLS-TEST DONE pass=[0-9]+ fail=0")
     endfunction()
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    if(NOT Python3_Interpreter_FOUND)
+        message(FATAL_ERROR "Host tests need Python 3 (test servers, certificate generation)")
+    endif()
+    # Test PKI (tests/host/make_certs.py, OpenSSL CLI) in ${CMAKE_BINARY_DIR}/certs.
+    find_program(WTLS_OPENSSL openssl REQUIRED)
+    set(WTLS_TEST_CERT_DIR ${CMAKE_BINARY_DIR}/certs)
+    add_custom_command(
+        OUTPUT ${WTLS_TEST_CERT_DIR}/test-ca.pem
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/host/make_certs.py
+                --out ${WTLS_TEST_CERT_DIR} --openssl ${WTLS_OPENSSL}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/host/make_certs.py
+        COMMENT "Generating test certificates"
+        VERBATIM)
+    add_custom_target(wtls_test_certs DEPENDS ${WTLS_TEST_CERT_DIR}/test-ca.pem)
+    # The checked-in fallback bundle must match data/cacert.pem.
+    add_test(NAME ca_bundle_fallback_current
+             COMMAND ${CMAKE_COMMAND} -E compare_files
+                     ${CMAKE_CURRENT_SOURCE_DIR}/src/gen/ca_bundle.c ${WTLS_CA_BUNDLE_C})
     # Test that needs tests/host/tls_test_server.py; the fixed ports force serial runs.
     function(wtls_host_server_test name)
         add_executable(${name} tests/host/${name}.c ${ARGN})
@@ -105,6 +144,11 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_jitter)
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
+    wtls_host_test(test_castore)
+    add_dependencies(test_castore wtls_test_certs)
+    target_compile_definitions(test_castore PRIVATE
+        WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"
+        WTLS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/host/fixtures")
 endif()
 
 if(WTLS_PLATFORM STREQUAL "ogc")
