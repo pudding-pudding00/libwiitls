@@ -3,8 +3,10 @@
 #define WTLS_HW_SUITES_H
 
 void wtls_suite_spike(void);
+void wtls_suite_entropy(void);
 
 /* Extra {name, fn} rows for the runner's suite table. */
-#define WTLS_HW_SUITES
+#define WTLS_HW_SUITES \
+    {"entropy", wtls_suite_entropy},
 
 #endif

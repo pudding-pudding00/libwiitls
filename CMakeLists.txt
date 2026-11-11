@@ -50,6 +50,7 @@ endif()
 add_library(wiitls STATIC
     src/wtls_core.c
     src/wtls_entropy.c
+    src/wtls_jitter.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
 set_target_properties(wiitls PROPERTIES OUTPUT_NAME wiitls PREFIX lib)
@@ -82,6 +83,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "WTLS-TEST DONE pass=[0-9]+ fail=0")
     endfunction()
     wtls_host_test(test_smoke)
+    wtls_host_test(test_jitter)
 endif()
 
 if(WTLS_PLATFORM STREQUAL "ogc")
