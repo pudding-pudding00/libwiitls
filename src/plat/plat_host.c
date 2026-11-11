@@ -50,6 +50,17 @@ uint64_t wtls_plat_now_ms(void) {
     return (uint64_t)(now.QuadPart / (freq.QuadPart / 1000));
 }
 
+uint64_t wtls_plat_now_us(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    /* split to avoid overflowing now * 1e6 */
+    uint64_t s = (uint64_t)(now.QuadPart / freq.QuadPart);
+    uint64_t rem = (uint64_t)(now.QuadPart % freq.QuadPart);
+    return s * 1000000u + rem * 1000000u / (uint64_t)freq.QuadPart;
+}
+
 #else /* POSIX */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -103,7 +114,15 @@ uint64_t wtls_plat_now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
+
+uint64_t wtls_plat_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
 #endif
+
+uint64_t wtls_plat_poll_wait_us;
 
 static bool is_wouldblock(int e) {
 #if !defined(_WIN32) && defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
@@ -210,7 +229,10 @@ int wtls_plat_recv(int fd, uint8_t *buf, size_t len) {
 
 int wtls_plat_poll(int fd, bool rd, bool wr, uint32_t timeout_ms) {
     short ev = (short)((rd ? POLLIN : 0) | (wr ? POLLOUT : 0));
-    return poll_one((sock_t)fd, ev, timeout_ms, NULL);
+    uint64_t t0 = wtls_plat_now_us();
+    int r = poll_one((sock_t)fd, ev, timeout_ms, NULL);
+    wtls_plat_poll_wait_us += wtls_plat_now_us() - t0;
+    return r;
 }
 
 void wtls_plat_close(int fd) {

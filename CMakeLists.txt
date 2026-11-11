@@ -24,6 +24,32 @@ option(WTLS_BUILD_TESTS "Build libwiitls tests" ${WTLS_BUILD_TESTS_DEFAULT})
 
 # ---------------------------------------------------------------------------
 # Mbed TLS 4.1.1 LTS (release tarball contains all generated files: no Python needed)
+# Crypto tuning knobs (Task 11, measured with bench/). They reach the Mbed TLS /
+# TF-PSA-Crypto configs as WTLS_CFG_* defines, so they apply to every target
+# below, including the fetched Mbed TLS.
+option(WTLS_BN_ASM "PPC32 bignum assembly (MBEDTLS_HAVE_ASM)" ON)
+option(WTLS_P256M "p256-m driver for P-256 (fails to build with 4.1.1 + PK)" OFF)
+option(WTLS_EVEREST "X25519 via Everest/HACL* (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED)" OFF)
+set(WTLS_OPT O2 CACHE STRING "Optimisation level for library and Mbed TLS: O2 or O3")
+set_property(CACHE WTLS_OPT PROPERTY STRINGS O2 O3)
+if(NOT WTLS_OPT MATCHES "^O[23]$")
+    message(FATAL_ERROR "WTLS_OPT must be O2 or O3, got '${WTLS_OPT}'")
+endif()
+if(NOT WTLS_BN_ASM)
+    add_compile_definitions(WTLS_CFG_NO_BN_ASM)
+endif()
+if(WTLS_P256M)
+    # Checked: tf_psa_crypto_check_config.h #errors ("Unsupported partial support
+    # for ECC curves acceleration") because PK needs P-384/X25519 builtin as well.
+    message(FATAL_ERROR "WTLS_P256M=ON does not build with Mbed TLS 4.1.1: p256-m "
+            "would accelerate only P-256, and partial ECC acceleration together with "
+            "PK is rejected (docs/benchmarks.md).")
+endif()
+if(WTLS_EVEREST)
+    add_compile_definitions(WTLS_CFG_EVEREST)
+endif()
+add_compile_options(-${WTLS_OPT}) # after CMAKE_C_FLAGS_<CONFIG>: the last -O wins
+
 include(FetchContent)
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -157,12 +183,29 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_server_test(test_tls tests/common/tls_tests.c)
     add_dependencies(test_tls wtls_test_certs)
     set_tests_properties(test_tls PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+
+    # Benchmarks on the host: proves every benchmark runs; the numbers are the PC's.
+    add_executable(test_bench bench/host_main.c bench/bench_core.c)
+    target_include_directories(test_bench PRIVATE bench tests/common src)
+    target_link_libraries(test_bench PRIVATE wiitls)
+    add_dependencies(test_bench wtls_test_certs)
+    add_test(NAME test_bench
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/host/run_with_server.py
+                     $<TARGET_FILE:test_bench>)
+    set_tests_properties(test_bench PROPERTIES
+        PASS_REGULAR_EXPRESSION "WTLS-TEST DONE pass=[0-9]+ fail=0"
+        RESOURCE_LOCK tls_test_server
+        ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
 endif()
 
 if(WTLS_PLATFORM STREQUAL "ogc")
     option(WTLS_BUILD_HWTEST "Build the Wii hardware test runner" ON)
     if(WTLS_BUILD_HWTEST)
         add_subdirectory(tests/hw)
+    endif()
+    option(WTLS_BUILD_BENCH "Build the Wii benchmark runner" ON)
+    if(WTLS_BUILD_BENCH)
+        add_subdirectory(bench)
     endif()
     option(WTLS_BUILD_EXAMPLES "Build the Wii example programs" ON)
     if(WTLS_BUILD_EXAMPLES)

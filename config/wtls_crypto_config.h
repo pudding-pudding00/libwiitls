@@ -1629,7 +1629,10 @@
  * The Everest code is provided under the Apache 2.0 license only; therefore enabling this
  * option is not compatible with taking the library under the GPL v2.0-or-later license.
  */
-//#define MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED
+/* CMake option WTLS_EVEREST (default OFF). */
+#if defined(WTLS_CFG_EVEREST)
+#define MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED
+#endif
 
 /**
  * \def MBEDTLS_ECP_NIST_OPTIM
@@ -1730,7 +1733,10 @@
  *
  * Comment to disable the use of assembly code.
  */
+/* CMake option WTLS_BN_ASM (default ON). */
+#if !defined(WTLS_CFG_NO_BN_ASM)
 #define MBEDTLS_HAVE_ASM
+#endif
 
 /**
  * \def MBEDTLS_HAVE_SSE2
@@ -1827,7 +1833,10 @@
  *       #MBEDTLS_PK_PARSE_EC_EXTENDED as those currently require a subset of
  *       the built-in ECC implementation, see docs/driver-only-builds.md.
  */
-//#define MBEDTLS_PSA_P256M_DRIVER_ENABLED
+/* CMake option WTLS_P256M (default OFF: 4.1.1 rejects partial ECC acceleration with PK). */
+#if defined(WTLS_CFG_P256M)
+#define MBEDTLS_PSA_P256M_DRIVER_ENABLED
+#endif
 
 /**
  * \def MBEDTLS_RSA_NO_CRT

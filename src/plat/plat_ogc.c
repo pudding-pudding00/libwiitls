@@ -45,6 +45,9 @@ mbedtls_ms_time_t mbedtls_ms_time(void) {
 }
 
 uint64_t wtls_plat_now_ms(void) { return (uint64_t)ticks_to_millisecs(gettime()); }
+uint64_t wtls_plat_now_us(void) { return (uint64_t)ticks_to_microsecs(gettime()); }
+
+uint64_t wtls_plat_poll_wait_us;
 
 static mutex_t g_dns_mutex = LWP_MUTEX_NULL;
 
@@ -153,7 +156,10 @@ int wtls_plat_recv(int fd, uint8_t *buf, size_t len) {
 }
 
 int wtls_plat_poll(int fd, bool rd, bool wr, uint32_t timeout_ms) {
-    return poll_one(fd, (rd ? IOS_POLLIN : 0) | (wr ? IOS_POLLOUT : 0), timeout_ms);
+    uint64_t t0 = wtls_plat_now_us();
+    int r = poll_one(fd, (rd ? IOS_POLLIN : 0) | (wr ? IOS_POLLOUT : 0), timeout_ms);
+    wtls_plat_poll_wait_us += wtls_plat_now_us() - t0;
+    return r;
 }
 
 void wtls_plat_close(int fd) {

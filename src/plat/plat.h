@@ -26,6 +26,10 @@ int      wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *
                                 uint8_t *resp, size_t resp_cap,
                                 uint32_t timeout_ms);                  /* bytes | ERR_TIMEOUT | ERR_IO */
 uint64_t wtls_plat_now_ms(void);                                       /* monotonic */
+uint64_t wtls_plat_now_us(void);                                       /* monotonic, microseconds */
+/* Total microseconds spent blocked inside wtls_plat_poll since start-up. The
+ * benchmark derives CPU time as wall time minus this wait time. */
+extern uint64_t wtls_plat_poll_wait_us;
 int64_t  wtls_plat_unix_time(void);                 /* time(NULL) + offset */
 void     wtls_plat_set_unix_time_offset(int64_t delta_s);
 

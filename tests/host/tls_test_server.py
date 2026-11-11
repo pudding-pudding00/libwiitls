@@ -39,12 +39,11 @@ def pattern(n, offset=0):
 
 
 def send_big(write, n):
-    chunk = 16384
-    sent = 0
-    while sent < n:
-        k = min(chunk, n - sent)
-        write(pattern(k, sent))
-        sent += k
+    # Built up front (like the TLS BIG) so the benchmark compares links, not
+    # Python generator speed.
+    data = pattern(n)
+    for k in range(0, n, 16384):
+        write(data[k:k + 16384])
 
 
 class LineConn:

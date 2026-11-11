@@ -83,6 +83,23 @@ static void test_poll_timeout_duration(void) {
     wtls_plat_close(fd);
 }
 
+/* Benchmark support: µs clock and the time blocked in wtls_plat_poll. */
+static void test_poll_wait_accounting(void) {
+    int fd = connect_echo();
+    if (fd < 0) return;
+    CHECK(send_str(fd, "SILENT\n"));
+    uint64_t ms0 = wtls_plat_now_ms(), us0 = wtls_plat_now_us();
+    uint64_t w0 = wtls_plat_poll_wait_us;
+    CHECK_EQ_INT(wtls_plat_poll(fd, true, false, 100), 0);
+    uint64_t waited = wtls_plat_poll_wait_us - w0;
+    uint64_t dus = wtls_plat_now_us() - us0, dms = wtls_plat_now_ms() - ms0;
+    TLOG("    poll(100): wait counter %u us, us clock %u us, ms clock %u ms\n", (unsigned)waited,
+         (unsigned)dus, (unsigned)dms);
+    CHECK(waited >= 90000 && waited <= dus);
+    CHECK(dus / 1000 + 2 >= dms && dms + 2 >= dus / 1000); /* both clocks agree */
+    wtls_plat_close(fd);
+}
+
 static void test_eof_after_bye(void) {
     int fd = connect_echo();
     if (fd < 0) return;
@@ -168,6 +185,7 @@ void wtls_suite_plat(void) {
     RUN(test_echo_roundtrip);
     RUN(test_recv_without_data_wants_read);
     RUN(test_poll_timeout_duration);
+    RUN(test_poll_wait_accounting);
     RUN(test_eof_after_bye);
     RUN(test_connect_refused);
     RUN(test_resolve_ip_literal_and_garbage);
