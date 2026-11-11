@@ -102,7 +102,13 @@ static void test_unix_time_offset(void) {
     CHECK(m - wtls_plat_unix_time() <= 1 && wtls_plat_unix_time() - m <= 1);
 }
 
+/* SNTP needs PSA (nonce); without wtls_init nobody would free that state. */
+static void test_sntp_needs_init(void) {
+    CHECK_EQ_INT(wtls_time_sync_sntp("127.0.0.1", 100), WTLS_ERR_STATE);
+}
+
 int main(void) {
+    RUN(test_sntp_needs_init);
     RUN(test_time_check_bounds);
     RUN(test_sntp_request_layout);
     RUN(test_sntp_parse_valid);

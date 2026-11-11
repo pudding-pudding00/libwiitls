@@ -17,6 +17,7 @@ WTLS_TEST_CERT_DIR environment variable):
   4433 TLS 1.2 only, ECDHE-ECDSA-CHACHA20-POLY1305
   4434 expired certificate        4435 untrusted CA
   4436 certificate for other.test
+  4437 certificate without the serverAuth extended key usage
 TLS commands: PING, SNI (received SNI or "-"), BIG n (byte i = i & 0xFF),
 CLOSE (close_notify), TRUNC (TCP close without close_notify), SILENT,
 CONNS (TCP connections accepted on this port so far).
@@ -185,6 +186,7 @@ def tls_listeners(bind):
         (4434, dict(leaf="expired")),
         (4435, dict(leaf="untrusted")),
         (4436, dict(leaf="wronghost")),
+        (4437, dict(leaf="clientonly")),
     ]
     return [serve(bind, port, tls_handler(tls_context(**kw), Counter())) for port, kw in specs]
 

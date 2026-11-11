@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <mbedtls/x509.h>
 #include <wiitls/wiitls.h>
@@ -21,6 +22,7 @@
 #define P_EXPIRED 4434
 #define P_UNTRUSTED 4435
 #define P_WRONGHOST 4436
+#define P_BAD_EKU 4437
 #define P_CLOSED 4499
 
 static const char *const k_alpn[] = {"http/1.1", NULL};
@@ -163,6 +165,8 @@ static void test_tls12_chacha(void) {
 static void test_expired_cert(void) { expect_cert_error(P_EXPIRED, MBEDTLS_X509_BADCERT_EXPIRED); }
 static void test_untrusted_ca(void) { expect_cert_error(P_UNTRUSTED, MBEDTLS_X509_BADCERT_NOT_TRUSTED); }
 static void test_wrong_host(void) { expect_cert_error(P_WRONGHOST, MBEDTLS_X509_BADCERT_CN_MISMATCH); }
+/* Rejected by the key-usage check, not by chain verification: still a CERT error. */
+static void test_bad_eku(void) { expect_cert_error(P_BAD_EKU, MBEDTLS_X509_BADCERT_EXT_KEY_USAGE); }
 
 static void test_insecure_skip_verify(void) {
     wtls_options o = {0};
@@ -272,8 +276,19 @@ static void test_hostname_normalization(void) {
     wtls_close(c);
 }
 
+/* "host." is the same name as "host"; "host.." is not a valid name at all. */
+static void test_host_extra_dots_rejected(void) {
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, "localhost..", P_TLS13_ECDSA, NULL), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+    CHECK_EQ_INT(wtls_connect(&c, ".", P_TLS13_ECDSA, NULL), WTLS_ERR_ARG);
+}
+
+/* IPv4 literal of the test server: on the Wii server_host already is one. */
+static const char *server_ip_literal(void) { return g_env.is_hw ? g_env.server_host : "127.0.0.1"; }
+
 static void test_ip_literal_no_sni(void) {
-    wtls_conn *c = open_tls("127.0.0.1", P_TLS13_ECDSA, NULL);
+    wtls_conn *c = open_tls(server_ip_literal(), P_TLS13_ECDSA, NULL);
     if (!c) return;
     expect_line(c, "SNI\n", "-");
     wtls_close(c);
@@ -282,7 +297,7 @@ static void test_ip_literal_no_sni(void) {
 /* The IP-SAN check must reject a leaf without a matching iPAddress SAN. */
 static void test_ip_literal_wrong_san(void) {
     wtls_conn *c = (wtls_conn *)1;
-    CHECK_EQ_INT(wtls_connect(&c, "127.0.0.1", P_WRONGHOST, NULL), WTLS_ERR_CERT);
+    CHECK_EQ_INT(wtls_connect(&c, server_ip_literal(), P_WRONGHOST, NULL), WTLS_ERR_CERT);
     CHECK(c == NULL);
     CHECK(wtls_last_verify_flags() & MBEDTLS_X509_BADCERT_CN_MISMATCH);
 }
@@ -299,11 +314,13 @@ static int conns_on_4431(void) {
 
 static void test_connect_refuses_with_bad_clock(void) {
     int before = conns_on_4431();
-    wtls_plat_set_unix_time_offset(-30LL * 365 * 86400);
+    /* Keep the current offset: on the Wii it may come from an earlier SNTP sync. */
+    int64_t saved = wtls_plat_unix_time() - (int64_t)time(NULL);
+    wtls_plat_set_unix_time_offset(saved - 30LL * 365 * 86400);
     wtls_conn *c = (wtls_conn *)1;
     CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, NULL), WTLS_ERR_CLOCK);
     CHECK(c == NULL);
-    wtls_plat_set_unix_time_offset(0);
+    wtls_plat_set_unix_time_offset(saved);
     int after = conns_on_4431();
     /* "after" includes its own connection: exactly one more than "before". */
     CHECK(before > 0);
@@ -411,6 +428,7 @@ void wtls_suite_tls(void) {
     RUN(test_expired_cert);
     RUN(test_untrusted_ca);
     RUN(test_wrong_host);
+    RUN(test_bad_eku);
     RUN(test_insecure_skip_verify);
     RUN(test_insecure_ticket_not_reused);
     RUN(test_big_records);
@@ -426,13 +444,11 @@ void wtls_suite_tls(void) {
     RUN(test_nonblocking_poll_then_read);
     RUN(test_pending_counts_buffered);
     RUN(test_set_nonblocking_null_is_arg_error);
-    if (!g_env.is_hw) {
-        RUN(test_hostname_normalization);
-        RUN(test_ip_literal_no_sni);
-        RUN(test_ip_literal_wrong_san);
-        RUN(test_connect_refuses_with_bad_clock);
-    } else {
-        TLOG("SKIP host-only tests (hostname normalization, IP literal, bad clock)\n");
-    }
+    RUN(test_host_extra_dots_rejected);
+    RUN(test_ip_literal_no_sni);
+    RUN(test_ip_literal_wrong_san);
+    RUN(test_connect_refuses_with_bad_clock);
+    if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
+    else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();
 }

@@ -18,6 +18,7 @@
 #include <ogc/lwp.h>
 #include <ogc/mutex.h>
 
+#include <mbedtls/x509.h> /* MBEDTLS_X509_BADCERT_* */
 #include <wiitls/wiitls.h>
 
 #define NET_STACK_SIZE (64 * 1024)
@@ -66,9 +67,14 @@ static int connect_with_clock_fix(wtls_conn **c) {
     wtls_options opt = {0};
     opt.alpn = alpn;
     int r = wtls_connect(c, s_host, s_port, &opt);
-    if (r == WTLS_ERR_CLOCK) {
-        /* The Wii RTC is often wrong; certificates cannot be checked without a clock. */
-        LOCKED_PRINTF("Clock not plausible, syncing via SNTP...\n");
+    /* The Wii RTC is often wrong; certificates cannot be checked without a
+     * clock. A clock off by only a few years shows up as an expired or
+     * not-yet-valid certificate instead of WTLS_ERR_CLOCK. */
+    static bool synced;
+    bool time_flags = wtls_last_verify_flags() & (MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE);
+    if (!synced && (r == WTLS_ERR_CLOCK || (r == WTLS_ERR_CERT && time_flags))) {
+        synced = true;
+        LOCKED_PRINTF("Clock looks wrong, syncing via SNTP...\n");
         int s = wtls_time_sync_sntp(NULL, 3000);
         LOCKED_PRINTF("SNTP: %s\n", wtls_strerror(s));
         if (s == WTLS_OK) r = wtls_connect(c, s_host, s_port, &opt);
@@ -121,7 +127,12 @@ static void fetch(int round) {
         }
         LWP_MutexUnlock(s_con);
     }
-    if (r != WTLS_ERR_CLOSED && r != WTLS_ERR_IO) LOCKED_PRINTF("\nread: %s\n", wtls_strerror(r));
+    if (r == WTLS_ERR_IO)
+        /* Many HTTP servers just drop TCP after "Connection: close"; a TLS client
+         * still cannot tell that from an attacker cutting the response short. */
+        LOCKED_PRINTF("\n(stream ended without close_notify: the response may be truncated)\n");
+    else if (r != WTLS_ERR_CLOSED)
+        LOCKED_PRINTF("\nread: %s\n", wtls_strerror(r));
 
     wtls_conn_info info;
     if (wtls_get_info(c, &info) == WTLS_OK)

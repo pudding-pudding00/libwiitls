@@ -11,6 +11,7 @@ Writes into DIR (each cert as .pem and .der, each key as .key):
   expired       leaf, P-256, notAfter 2021-01-01
   wronghost     leaf, P-256, SAN DNS:other.test
   untrusted     leaf, P-256, signed by untrusted-ca
+  clientonly    leaf, P-256, same SANs, extendedKeyUsage clientAuth only
 """
 import argparse
 import os
@@ -36,7 +37,7 @@ commonName = supplied
 [ v3_leaf ]
 basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
+extendedKeyUsage = {eku}
 subjectAltName = {san}
 """
 
@@ -67,7 +68,7 @@ def make_ca(openssl, out, name, cn):
     to_der(openssl, pem, os.path.join(out, name + ".der"))
 
 
-def make_leaf(openssl, out, name, ca, kind, san, start=None, end=None):
+def make_leaf(openssl, out, name, ca, kind, san, start=None, end=None, eku="serverAuth"):
     key = os.path.join(out, name + ".key")
     pem = os.path.join(out, name + ".pem")
     keygen(openssl, key, kind)
@@ -78,7 +79,7 @@ def make_leaf(openssl, out, name, ca, kind, san, start=None, end=None):
             f.write(os.urandom(8).hex() + "\n")
         cnf = os.path.join(db, "ca.cnf")
         with open(cnf, "w") as f:
-            f.write(CA_CNF.format(db=dbp, san=san))
+            f.write(CA_CNF.format(db=dbp, san=san, eku=eku))
         csr = os.path.join(db, "leaf.csr")
         run(openssl, "req", "-new", "-key", key, "-out", csr, "-subj", "/CN=" + name + ".test")
         dates = ["-startdate", start, "-enddate", end] if start else ["-days", "3650"]
@@ -106,6 +107,7 @@ def main():
         make_leaf(o, out, "expired", "test-ca", "ec", san, "200101000000Z", "210101000000Z")
         make_leaf(o, out, "wronghost", "test-ca", "ec", "DNS:other.test")
         make_leaf(o, out, "untrusted", "untrusted-ca", "ec", san)
+        make_leaf(o, out, "clientonly", "test-ca", "ec", san, eku="clientAuth")
     except subprocess.CalledProcessError as e:
         sys.stderr.write(e.stderr.decode(errors="replace"))
         return 1

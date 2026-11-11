@@ -60,7 +60,9 @@ typedef struct {
     uint32_t connect_timeout_ms;    /**< 0 => 5000  */
     uint32_t handshake_timeout_ms;  /**< 0 => 10000 */
     uint32_t io_timeout_ms;         /**< 0 => 15000, blocking read/write */
-    const char *const *alpn;        /**< NULL-terminated list, e.g. {"http/1.1", NULL}; NULL = no ALPN */
+    const char *const *alpn;        /**< NULL-terminated list, e.g. {"http/1.1", NULL}; NULL = no ALPN.
+                                         Stored by pointer, not copied: the list and its strings
+                                         must stay valid until wtls_close() */
     bool no_resumption;             /**< neither use nor store session tickets */
     bool insecure_skip_verify;      /**< TESTS ONLY: disables certificate verification; implies no_resumption */
 } wtls_options;
@@ -69,7 +71,7 @@ typedef struct {
 typedef struct {
     const char *tls_version;   /**< "TLSv1.3" | "TLSv1.2" */
     const char *ciphersuite;   /**< Mbed TLS suite name */
-    const char *alpn;          /**< NULL if not negotiated */
+    const char *alpn;          /**< NULL if not negotiated; points into the caller's opt->alpn strings */
     bool        resumed;       /**< ticket offered AND no chain verification was needed */
     uint32_t    handshake_ms;  /**< TCP connected -> handshake done */
 } wtls_conn_info;
@@ -117,6 +119,11 @@ wtls_status wtls_add_trusted_ca(const uint8_t *buf, size_t len);
  *         with wtls_time_sync_sntp() and retry); WTLS_ERR_DNS, WTLS_ERR_CONNECT,
  *         WTLS_ERR_TIMEOUT, WTLS_ERR_HANDSHAKE, WTLS_ERR_CERT (details in
  *         wtls_last_verify_flags()), WTLS_ERR_STATE, WTLS_ERR_ARG, WTLS_ERR_NOMEM.
+ *
+ * WTLS_ERR_CLOCK only catches clocks before the library's build date or more
+ * than 20 years after it. A clock that is off by a smaller amount shows up as
+ * WTLS_ERR_CERT with MBEDTLS_X509_BADCERT_EXPIRED or _FUTURE: if the clock
+ * has not been synced yet, sync it with wtls_time_sync_sntp() and retry once.
  */
 wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port,
                          const wtls_options *opt);
@@ -137,11 +144,14 @@ int         wtls_read(wtls_conn *c, void *buf, size_t len);
 /**
  * Encrypts and sends application data.
  *
- * Blocking mode sends everything or fails. Non-blocking mode may return fewer
- * bytes; after WTLS_WANT_WRITE/WTLS_WANT_READ call again with the same buffer.
+ * Blocking mode sends everything unless io_timeout_ms expires or the
+ * connection fails part way: then it returns the bytes sent so far (a short
+ * count) and the next call reports the error. Non-blocking mode may return
+ * fewer bytes; after WTLS_WANT_WRITE/WTLS_WANT_READ call again with the same
+ * buffer.
  *
- * @return blocking: @p len; otherwise the number of bytes written so far, or a
- *         ::wtls_status when nothing was written.
+ * @return the number of bytes written (blocking: @p len unless interrupted as
+ *         above), or a ::wtls_status when nothing was written.
  */
 int         wtls_write(wtls_conn *c, const void *buf, size_t len);
 
@@ -164,8 +174,9 @@ int         wtls_get_fd(const wtls_conn *c);
 size_t      wtls_pending(const wtls_conn *c);
 
 /**
- * Fills @p out with facts about the connection. The strings are owned by the
- * connection and valid until wtls_close().
+ * Fills @p out with facts about the connection. tls_version and ciphersuite
+ * are static strings; alpn points into the caller's opt->alpn list (see
+ * wtls_options::alpn). Use them only until wtls_close().
  *
  * @return WTLS_OK, or WTLS_ERR_ARG for NULL.
  */

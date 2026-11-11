@@ -50,11 +50,12 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len) {
 
 /* ---- helpers ------------------------------------------------------------ */
 
-/* Lower case, one trailing dot removed. false if empty or too long. */
+/* Lower case, one trailing dot (the DNS root) removed. false if empty, too
+ * long, or still ending in a dot ("host.." has an empty label). */
 static bool normalize_host(const char *in, char out[256]) {
     size_t n = strlen(in);
     if (n > 0 && in[n - 1] == '.') n--;
-    if (n == 0 || n > 253) return false;
+    if (n == 0 || n > 253 || in[n - 1] == '.') return false;
     for (size_t i = 0; i < n; i++) out[i] = (char)tolower((unsigned char)in[i]);
     out[n] = 0;
     return true;
@@ -72,6 +73,12 @@ static int verify_ip_san(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *
     }
     *flags |= MBEDTLS_X509_BADCERT_CN_MISMATCH;
     return 0;
+}
+
+/* true if verification ran and set flags (0xFFFFFFFF: it did not run). */
+static bool cert_rejected(const wtls_conn *c) {
+    uint32_t f = mbedtls_ssl_get_verify_result(&c->ssl);
+    return f != 0 && f != UINT32_MAX;
 }
 
 static int map_mbedtls(const wtls_conn *c, int r) {
@@ -193,7 +200,9 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
             st = wait_io(c, r, deadline);
             if (st == WTLS_OK) continue;
-        } else if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+        } else if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED || cert_rejected(c)) {
+            /* The second case: rejected by the key-usage checks (e.g. a leaf
+             * without serverAuth), which fail as BAD_CERTIFICATE but set flags. */
             s_last_verify_flags = mbedtls_ssl_get_verify_result(&c->ssl);
             st = WTLS_ERR_CERT;
         } else {

@@ -149,7 +149,7 @@ buffered while the socket is not readable.
 | `WTLS_ERR_IO` | -34 | TCP reset, or stream ended without close_notify (truncation) |
 | `WTLS_ERR_CLOSED` | -35 | peer closed cleanly (close_notify): normal end of stream |
 | `WTLS_ERR_HANDSHAKE` | -40 | TLS handshake failed |
-| `WTLS_ERR_CERT` | -41 | certificate rejected; `wtls_last_verify_flags()` has the `MBEDTLS_X509_BADCERT_*` bits |
+| `WTLS_ERR_CERT` | -41 | certificate rejected; `wtls_last_verify_flags()` has the `MBEDTLS_X509_BADCERT_*` bits. `EXPIRED`/`FUTURE` on an unsynced Wii usually means a wrong clock: sync with SNTP and retry once |
 | `WTLS_ERR_INTERNAL` | -99 | unexpected library error |
 
 `wtls_strerror(code)` gives a short text. The full API documentation is in

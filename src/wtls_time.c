@@ -55,6 +55,7 @@ mbedtls_time_t wtls_mbedtls_time(mbedtls_time_t *t) {
 wtls_status wtls_time_sync_sntp(const char *server, uint32_t timeout_ms) {
     if (!server) server = "pool.ntp.org";
     if (timeout_ms == 0) return WTLS_ERR_ARG;
+    if (!wtls_core_initialized()) return WTLS_ERR_STATE; /* PSA state is owned by wtls_init */
     uint64_t nonce;
     /* An unpredictable nonce stops off-path spoofed replies. */
     if (psa_crypto_init() != PSA_SUCCESS ||
