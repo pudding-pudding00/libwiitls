@@ -332,6 +332,55 @@ static void test_ticket_chain(void) {
     CHECK_EQ_INT(ping_resumed(false), 1); /* ticket stored by the resumed connection */
 }
 
+static void test_nonblocking_read_wants_read(void) {
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    if (!c) return;
+    expect_line(c, "PING\n", "PING"); /* tickets consumed, connection idle */
+    CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
+    char b[16];
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_read(c, b, sizeof b), WTLS_WANT_READ);
+    CHECK(wtls_plat_now_ms() - t0 < 50);
+    wtls_close(c);
+}
+
+static void test_nonblocking_poll_then_read(void) {
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    if (!c) return;
+    expect_line(c, "PING\n", "PING");
+    CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
+    CHECK_EQ_INT(wtls_write(c, "PING\n", 5), 5);
+    char b[16];
+    size_t got = 0;
+    uint64_t deadline = wtls_plat_now_ms() + 1000;
+    while (got < 5 && wtls_plat_now_ms() < deadline) {
+        int r = wtls_read(c, b + got, sizeof b - got);
+        if (r > 0) got += (size_t)r;
+        else if (r == WTLS_WANT_READ) wtls_plat_poll(wtls_get_fd(c), true, false, 100);
+        else break;
+    }
+    CHECK_EQ_INT(got, 5);
+    CHECK_MEM(b, "PING\n", 5);
+    wtls_close(c);
+}
+
+static void test_pending_counts_buffered(void) {
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    if (!c) return;
+    expect_line(c, "PING\n", "PING");
+    char b[10];
+    if (send_str(c, "BIG 100\n")) {
+        CHECK_EQ_INT(wtls_read(c, b, sizeof b), 10);
+        CHECK_EQ_INT(wtls_pending(c), 90);
+    }
+    wtls_close(c);
+}
+
+static void test_set_nonblocking_null_is_arg_error(void) {
+    CHECK_EQ_INT(wtls_set_nonblocking(NULL, true), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_pending(NULL), 0);
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -359,6 +408,10 @@ void wtls_suite_tls(void) {
     RUN(test_resumption);
     RUN(test_no_resumption_flag);
     RUN(test_ticket_chain);
+    RUN(test_nonblocking_read_wants_read);
+    RUN(test_nonblocking_poll_then_read);
+    RUN(test_pending_counts_buffered);
+    RUN(test_set_nonblocking_null_is_arg_error);
     if (!g_env.is_hw) {
         RUN(test_hostname_normalization);
         RUN(test_ip_literal_no_sni);

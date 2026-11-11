@@ -279,3 +279,11 @@ void wtls_close(wtls_conn *c) {
     if (!c->bio_err) mbedtls_ssl_close_notify(&c->ssl); /* best effort, one attempt */
     conn_free(c);
 }
+
+wtls_status wtls_set_nonblocking(wtls_conn *c, bool on) {
+    if (!c) return WTLS_ERR_ARG;
+    c->nonblocking = on;
+    return WTLS_OK;
+}
+
+size_t wtls_pending(const wtls_conn *c) { return c ? mbedtls_ssl_get_bytes_avail(&c->ssl) : 0; }
