@@ -6,12 +6,23 @@
 #include <string.h>
 
 #ifndef WTLS_TEST_PRINTF
+#if defined(GEKKO)
+int wtls_hw_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#define WTLS_TEST_PRINTF wtls_hw_printf
+#else
 #define WTLS_TEST_PRINTF printf
 #endif
+#endif
 
-static int wtls_t_pass;
-static int wtls_t_fail;
-static int wtls_t_cur_failed;
+/* Counters are shared by all suites of one runner: exactly one translation
+ * unit per executable writes WTLS_CHECK_DEFINE_COUNTERS at file scope. */
+extern int wtls_t_pass;
+extern int wtls_t_fail;
+extern int wtls_t_cur_failed;
+#define WTLS_CHECK_DEFINE_COUNTERS int wtls_t_pass, wtls_t_fail, wtls_t_cur_failed
+
+/* Formatted log line through the runner's printf (console + TCP log on the Wii). */
+#define TLOG(...) WTLS_TEST_PRINTF(__VA_ARGS__)
 
 #define CHECK(cond)                                                          \
     do {                                                                     \

@@ -6,6 +6,8 @@
 
 #include "check.h"
 
+WTLS_CHECK_DEFINE_COUNTERS;
+
 static void test_psa_init_and_sha256(void) {
     CHECK_EQ_INT(psa_crypto_init(), PSA_SUCCESS);
     uint8_t h[32];
