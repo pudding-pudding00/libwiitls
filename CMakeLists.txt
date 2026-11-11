@@ -73,6 +73,7 @@ add_library(wiitls STATIC
     src/wtls_jitter.c
     src/wtls_time.c
     src/wtls_castore.c
+    src/wtls_conn.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -149,6 +150,9 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"
         WTLS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/host/fixtures")
+    wtls_host_server_test(test_tls tests/common/tls_tests.c)
+    add_dependencies(test_tls wtls_test_certs)
+    set_tests_properties(test_tls PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
 endif()
 
 if(WTLS_PLATFORM STREQUAL "ogc")

@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,8 +61,13 @@ def main():
     ls.listen(1)
     ls.settimeout(args.timeout)
 
+    # Test PKI whose leaf certificates also carry this PC's IP as iPAddress SAN.
+    cert_dir = tempfile.mkdtemp(prefix="wtls-hwcerts-")
+    subprocess.run([sys.executable, os.path.join(ROOT, "tests", "host", "make_certs.py"),
+                    "--out", cert_dir, "--extra-ip", my_ip], check=True)
     server = subprocess.Popen(
-        [sys.executable, os.path.join(ROOT, "tests", "host", "tls_test_server.py"), "--bind", "0.0.0.0"],
+        [sys.executable, os.path.join(ROOT, "tests", "host", "tls_test_server.py"), "--bind", "0.0.0.0",
+         "--certs", cert_dir],
         stdout=subprocess.PIPE, text=True)
     try:
         if server.stdout.readline().strip() != "READY":
@@ -96,6 +102,7 @@ def main():
         return 0 if int(result.group(2)) == 0 else 1
     finally:
         server.terminate()
+        shutil.rmtree(cert_dir, ignore_errors=True)
         ls.close()
 
 
