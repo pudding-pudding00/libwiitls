@@ -37,6 +37,27 @@ void     wtls_plat_set_unix_time_offset(int64_t delta_s);
  * Returns true and stores the address in network byte order. */
 bool wtls_plat_parse_ipv4(const char *s, uint32_t *ipv4_be);
 
+/* IOS socket result classification. Used by plat_ogc.c; lives in
+ * plat_common.c so the host tests cover it. The IOS errno values are
+ * provisional until the Task 4 hardware spike confirms them. */
+#define WTLS_IOS_EAGAIN       6
+#define WTLS_IOS_EALREADY     7
+#define WTLS_IOS_EINPROGRESS 26
+#define WTLS_IOS_EISCONN     30
+#define WTLS_IPC_ENOMEM    (-22) /* libogc IPC heap exhausted: transient */
+#define WTLS_IPC_RETRIES      5  /* short in-call retries before handing back WANT_* */
+#define WTLS_PLAT_RETRY   (-1000) /* internal: pause briefly and repeat the call */
+
+/* Maps a raw net_send/net_recv result: bytes | 0 (recv EOF) | WANT_READ/WRITE |
+ * WTLS_PLAT_RETRY | ERR_IO. IPC exhaustion past the retries becomes WANT_*,
+ * so the caller's wait loop keeps trying until its own deadline. */
+int  wtls_plat_ios_io_result(int32_t r, bool is_send, int attempt);
+/* true: a non-blocking connect returned an error that is resolved by polling
+ * for writability and connecting again (any error, not only EINPROGRESS). */
+bool wtls_plat_ios_connect_pending(bool nonblocking, int32_t r);
+/* true: the second connect's result means the socket is connected. */
+bool wtls_plat_ios_connected(int32_t r);
+
 #if defined(WTLS_PLATFORM_OGC)
 /* One timebase-jitter sample: delta of mftb across the disturbance chosen in
  * Task 2 (variant b: cache-hostile stride walk over a 256 KiB buffer). The

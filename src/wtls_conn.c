@@ -158,7 +158,9 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     c->port = port;
     c->ip_literal = literal;
     c->ipv4_be = ip;
-    c->no_resumption = opt->no_resumption;
+    /* An unverified session must never be resumed by, or seed, a verified one:
+     * resumption skips certificate verification. */
+    c->no_resumption = opt->no_resumption || opt->insecure_skip_verify;
     c->io_timeout_ms = opt->io_timeout_ms ? opt->io_timeout_ms : DEF_IO_MS;
 
     int st = wtls_plat_connect(ip, port, opt->connect_timeout_ms ? opt->connect_timeout_ms : DEF_CONNECT_MS,
@@ -181,7 +183,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     }
     if (literal && !opt->insecure_skip_verify) mbedtls_ssl_set_verify(&c->ssl, verify_ip_san, c);
     mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
-    if (!opt->no_resumption) offer_ticket(c);
+    if (!c->no_resumption) offer_ticket(c);
 
     c->lookups_before = wtls_castore_lookups;
     uint64_t deadline = t0 + (opt->handshake_timeout_ms ? opt->handshake_timeout_ms : DEF_HANDSHAKE_MS);

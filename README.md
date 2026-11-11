@@ -16,8 +16,15 @@ TF-PSA-Crypto) and libogc.
 - TLS 1.3 session tickets (8-entry cache) and a 16-entry DNS cache: a second
   connection to the same host skips DNS and the certificate-chain work.
 - Blocking API with timeouts, plus a non-blocking mode for your own poll loop.
-- Entropy from the Wii's hardware sources plus a jitter collector; SNTP clock
-  sync for the often-wrong Wii RTC.
+- Entropy from a CPU-timing jitter collector (health-tested, SHA-256
+  conditioned; fails closed if the tests fail); SNTP clock sync for the
+  often-wrong Wii RTC.
+
+> **Hardware validation pending.** Everything above is built for the Wii and
+> tested on the host (PC) against a local test server. The hardware suites
+> (`tools/hwtest.py`), the real-world suite and the benchmarks have not yet run
+> on a Wii, so the jitter entropy estimate, IOS socket behaviour and all
+> performance numbers are unconfirmed on real hardware.
 
 ## Quick example
 

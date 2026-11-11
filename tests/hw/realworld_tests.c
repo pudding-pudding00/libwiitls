@@ -16,6 +16,7 @@
 #include "check.h"
 #include "env.h"
 #include "suites.h"
+#include "wtls_scache.h"
 
 static const char *const k_alpn[] = {"http/1.1", NULL};
 static bool s_clock_synced;
@@ -146,6 +147,7 @@ static void rw_wrong_host(void) {
 
 static void rw_resumption_example_com(void) {
     const char *host = "example.com";
+    wtls_scache_clear(); /* rw_example_com_tls13 already stored a ticket */
     for (int i = 0; i < 2; i++) {
         wtls_conn *c = NULL;
         int r = rw_connect(&c, host, 443);

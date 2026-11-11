@@ -62,7 +62,7 @@ typedef struct {
     uint32_t io_timeout_ms;         /**< 0 => 15000, blocking read/write */
     const char *const *alpn;        /**< NULL-terminated list, e.g. {"http/1.1", NULL}; NULL = no ALPN */
     bool no_resumption;             /**< neither use nor store session tickets */
-    bool insecure_skip_verify;      /**< TESTS ONLY: disables certificate verification */
+    bool insecure_skip_verify;      /**< TESTS ONLY: disables certificate verification; implies no_resumption */
 } wtls_options;
 
 /** Facts about an established connection (see wtls_get_info()). */

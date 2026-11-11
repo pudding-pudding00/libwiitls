@@ -1,6 +1,8 @@
 /* Platform-independent helpers of the platform layer. */
 #include "plat.h"
 
+#include <wiitls/wiitls.h>
+
 #include <string.h>
 #include <time.h>
 
@@ -28,3 +30,18 @@ bool wtls_plat_parse_ipv4(const char *s, uint32_t *ipv4_be) {
     if (ipv4_be) memcpy(ipv4_be, b, 4); /* b[0] first in memory = network order */
     return true;
 }
+
+int wtls_plat_ios_io_result(int32_t r, bool is_send, int attempt) {
+    if (r > 0) return (int)r;
+    if (r == 0) return is_send ? WTLS_ERR_IO : 0;
+    if (r == -WTLS_IOS_EAGAIN) return is_send ? WTLS_WANT_WRITE : WTLS_WANT_READ;
+    if (r == WTLS_IPC_ENOMEM) {
+        if (attempt < WTLS_IPC_RETRIES) return WTLS_PLAT_RETRY;
+        return is_send ? WTLS_WANT_WRITE : WTLS_WANT_READ;
+    }
+    return WTLS_ERR_IO;
+}
+
+bool wtls_plat_ios_connect_pending(bool nonblocking, int32_t r) { return nonblocking && r < 0; }
+
+bool wtls_plat_ios_connected(int32_t r) { return r == 0 || r == -WTLS_IOS_EISCONN; }

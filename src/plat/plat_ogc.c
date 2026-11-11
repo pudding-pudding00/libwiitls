@@ -17,13 +17,7 @@
 /* IOS socket error numbers (alphabetical SUSv3 order, as emulated by Dolphin's
  * IOS network code). libogc returns them negated, untranslated.
  * See docs/ios-socket-behaviour.md: confirmed by the Task 2 spike once run. */
-#define IOS_EAGAIN       6
-#define IOS_EALREADY     7
-#define IOS_EINPROGRESS 26
-#define IOS_EISCONN     30
-/* libogc IPC heap exhaustion (IPC_ENOMEM); transient, see Global Constraints. */
-#define IPC_ENOMEM_RET (-22)
-#define IPC_RETRIES 5
+/* IOS errno values and IPC_ENOMEM handling: plat.h (wtls_plat_ios_*). */
 #define IPC_RETRY_US 2000
 
 /* IOS poll bits and fcntl flag. */
@@ -101,7 +95,7 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
      * connect whose timeout is only best effort (IOS' own SYN timeout). */
     bool nb = set_nonblocking(fd) == 0;
     s32 r = net_connect(fd, (struct sockaddr *)&sa, sizeof sa);
-    if (r < 0 && nb && (r == -IOS_EINPROGRESS || r == -IOS_EALREADY || r == -IOS_EAGAIN)) {
+    if (wtls_plat_ios_connect_pending(nb, r)) {
         int pr = poll_one(fd, IOS_POLLOUT, timeout_ms);
         if (pr == 0) {
             net_close(fd);
@@ -109,7 +103,8 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
         }
         /* A second connect reports the outcome: 0 or EISCONN means connected. */
         r = pr < 0 ? -1 : net_connect(fd, (struct sockaddr *)&sa, sizeof sa);
-        if (r == -IOS_EISCONN) r = 0;
+        if (wtls_plat_ios_connected(r)) r = 0;
+        else if (r < 0) SYS_Report("wtls: connect failed, IOS code %d\n", (int)r); /* spike aid */
     }
     if (r < 0) {
         net_close(fd);
@@ -130,13 +125,9 @@ int wtls_plat_send(int fd, const uint8_t *buf, size_t len) {
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
     for (int attempt = 0;; attempt++) {
         s32 r = net_send(fd, buf, (s32)len, 0);
-        if (r > 0) return (int)r;
-        if (r == -IOS_EAGAIN) return WTLS_WANT_WRITE;
-        if (r == IPC_ENOMEM_RET && attempt < IPC_RETRIES) {
-            usleep(IPC_RETRY_US);
-            continue;
-        }
-        return WTLS_ERR_IO;
+        int c = wtls_plat_ios_io_result(r, true, attempt);
+        if (c != WTLS_PLAT_RETRY) return c;
+        usleep(IPC_RETRY_US);
     }
 }
 
@@ -145,13 +136,9 @@ int wtls_plat_recv(int fd, uint8_t *buf, size_t len) {
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
     for (int attempt = 0;; attempt++) {
         s32 r = net_recv(fd, buf, (s32)len, 0);
-        if (r >= 0) return (int)r;
-        if (r == -IOS_EAGAIN) return WTLS_WANT_READ;
-        if (r == IPC_ENOMEM_RET && attempt < IPC_RETRIES) {
-            usleep(IPC_RETRY_US);
-            continue;
-        }
-        return WTLS_ERR_IO;
+        int c = wtls_plat_ios_io_result(r, false, attempt);
+        if (c != WTLS_PLAT_RETRY) return c;
+        usleep(IPC_RETRY_US);
     }
 }
 

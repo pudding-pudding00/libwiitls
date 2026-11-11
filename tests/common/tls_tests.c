@@ -173,6 +173,19 @@ static void test_insecure_skip_verify(void) {
     wtls_close(c);
 }
 
+/* A ticket from an unverified connection must never let a later verified
+ * connection to the same host:port skip certificate verification. */
+static void test_insecure_ticket_not_reused(void) {
+    wtls_scache_clear();
+    wtls_options o = {0};
+    o.insecure_skip_verify = true;
+    wtls_conn *c = open_tls(g_env.server_host, P_EXPIRED, &o);
+    if (!c) return;
+    expect_line(c, "PING\n", "PING"); /* the server's ticket arrives with the reply */
+    wtls_close(c);
+    expect_cert_error(P_EXPIRED, MBEDTLS_X509_BADCERT_EXPIRED);
+}
+
 static void test_big_records(void) {
     enum { N = 65536 };
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
@@ -399,6 +412,7 @@ void wtls_suite_tls(void) {
     RUN(test_untrusted_ca);
     RUN(test_wrong_host);
     RUN(test_insecure_skip_verify);
+    RUN(test_insecure_ticket_not_reused);
     RUN(test_big_records);
     RUN(test_clean_close);
     RUN(test_truncation_is_io_error);

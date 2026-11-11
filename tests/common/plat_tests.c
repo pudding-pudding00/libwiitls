@@ -115,6 +115,34 @@ static void test_eof_after_bye(void) {
     wtls_plat_close(fd);
 }
 
+/* IOS result classification (pure, so it runs on the host too). */
+static void test_ios_io_result(void) {
+    CHECK_EQ_INT(wtls_plat_ios_io_result(5, false, 0), 5);
+    CHECK_EQ_INT(wtls_plat_ios_io_result(0, false, 0), 0);              /* recv EOF */
+    CHECK_EQ_INT(wtls_plat_ios_io_result(0, true, 0), WTLS_ERR_IO);     /* send of 0 */
+    CHECK_EQ_INT(wtls_plat_ios_io_result(-WTLS_IOS_EAGAIN, false, 0), WTLS_WANT_READ);
+    CHECK_EQ_INT(wtls_plat_ios_io_result(-WTLS_IOS_EAGAIN, true, 0), WTLS_WANT_WRITE);
+    CHECK_EQ_INT(wtls_plat_ios_io_result(WTLS_IPC_ENOMEM, false, 0), WTLS_PLAT_RETRY);
+    /* IPC heap still exhausted after the short retries: not fatal, the caller's
+     * wait loop retries until its own deadline. */
+    CHECK_EQ_INT(wtls_plat_ios_io_result(WTLS_IPC_ENOMEM, false, WTLS_IPC_RETRIES), WTLS_WANT_READ);
+    CHECK_EQ_INT(wtls_plat_ios_io_result(WTLS_IPC_ENOMEM, true, WTLS_IPC_RETRIES), WTLS_WANT_WRITE);
+    CHECK_EQ_INT(wtls_plat_ios_io_result(-54, false, 0), WTLS_ERR_IO);  /* e.g. reset */
+}
+
+static void test_ios_connect_classification(void) {
+    /* Any failure of a non-blocking connect goes to poll + second connect, so a
+     * wrong guess of EINPROGRESS/EALREADY cannot break every connection. */
+    CHECK(wtls_plat_ios_connect_pending(true, -WTLS_IOS_EINPROGRESS));
+    CHECK(wtls_plat_ios_connect_pending(true, -WTLS_IOS_EALREADY));
+    CHECK(wtls_plat_ios_connect_pending(true, -115)); /* unknown code */
+    CHECK(!wtls_plat_ios_connect_pending(true, 0));
+    CHECK(!wtls_plat_ios_connect_pending(false, -WTLS_IOS_EINPROGRESS));
+    CHECK(wtls_plat_ios_connected(0));
+    CHECK(wtls_plat_ios_connected(-WTLS_IOS_EISCONN));
+    CHECK(!wtls_plat_ios_connected(-WTLS_IOS_EINPROGRESS));
+}
+
 static void test_connect_refused(void) {
     int fd = -1;
     uint64_t t0 = wtls_plat_now_ms();
@@ -182,6 +210,8 @@ static void hw_four_parallel_connections(void) {
 
 void wtls_suite_plat(void) {
     CHECK_EQ_INT(wtls_plat_init(), WTLS_OK);
+    RUN(test_ios_io_result);
+    RUN(test_ios_connect_classification);
     RUN(test_echo_roundtrip);
     RUN(test_recv_without_data_wants_read);
     RUN(test_poll_timeout_duration);
