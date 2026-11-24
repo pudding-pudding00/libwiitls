@@ -41,6 +41,8 @@ python tools/jitter_assess.py jd.log
 | Non-blocking `net_connect` returns EINPROGRESS and `net_poll(POLLOUT)` signals completion? | yes: `-119`, then POLLOUT, second connect `-127` | non-blocking connect + poll + second connect, as implemented |
 | IOS error numbers | libogc returns **negated newlib errno values**: EINPROGRESS = 119, EISCONN = 127 (measured); EAGAIN = 11, EALREADY = 120 (same numbering) | `WTLS_IOS_*` in `src/plat/plat.h` |
 | `TCP_NODELAY` accepted? | no: `-109` (ENOPROTOOPT) | not set on the Wii (saves one IPC per connection) |
+| `net_sendto` address length | only 8 (IOS's own IPv4 sockaddr) works; `sizeof(struct sockaddr_in)` = 16 returns `-22` (EINVAL) | pass 8 in `wtls_plat_udp_exchange` |
+| UDP loss (SNTP) | one of several syncs timed out over Wi-Fi | `wtls_sntp_query`: 3 attempts sharing the timeout |
 | `net_poll` 100 ms timeout accuracy | min 100.28 / median 100.29 / max 100.42 ms | timeouts can rely on `net_poll` |
 | IPC round trip (`net_poll`, timeout 0) | 135 µs | — |
 | Max bytes per `net_recv(65536)` | 26116 | `WTLS_PLAT_MAX_CHUNK = 16384` stays |

@@ -102,6 +102,56 @@ static void test_unix_time_offset(void) {
     CHECK(m - wtls_plat_unix_time() <= 1 && wtls_plat_unix_time() - m <= 1);
 }
 
+/* Scripted UDP exchange: plays back one result per call (WTLS_ERR_TIMEOUT,
+ * 1 = a stray packet with a wrong nonce, 2 = the valid reply). */
+typedef struct {
+    int script[4];
+    int calls;
+    uint32_t timeouts[4];
+} fake_udp;
+
+static int fake_exchange(void *ctx, uint32_t ip, uint16_t port, const uint8_t *req, size_t req_len,
+                         uint8_t *resp, size_t cap, uint32_t timeout_ms) {
+    fake_udp *f = ctx;
+    (void)ip;
+    (void)req;
+    (void)req_len;
+    CHECK_EQ_INT(port, 123);
+    CHECK(cap >= 48);
+    f->timeouts[f->calls] = timeout_ms;
+    int s = f->script[f->calls++];
+    if (s < 0) return s;
+    make_reply(resp, 3912345600u);
+    if (s == 1) resp[24] ^= 0xFF; /* originate != nonce */
+    return 48;
+}
+
+/* One lost UDP packet must not fail the sync: up to 3 attempts share the timeout. */
+static void test_sntp_query_retries_lost_packet(void) {
+    fake_udp f = {{WTLS_ERR_TIMEOUT, 1, 2, 2}, 0, {0}};
+    int64_t t = 0;
+    CHECK_EQ_INT(wtls_sntp_query(fake_exchange, &f, 0x01020304u, NONCE, 3000, &t), WTLS_OK);
+    CHECK_EQ_INT(t, 1703356800);
+    CHECK_EQ_INT(f.calls, 3);
+    CHECK_EQ_INT(f.timeouts[0], 1000);
+    CHECK_EQ_INT(f.timeouts[2], 1000);
+}
+
+static void test_sntp_query_gives_up_after_3(void) {
+    fake_udp f = {{WTLS_ERR_TIMEOUT, WTLS_ERR_TIMEOUT, WTLS_ERR_TIMEOUT, 2}, 0, {0}};
+    int64_t t = 0;
+    CHECK_EQ_INT(wtls_sntp_query(fake_exchange, &f, 1, NONCE, 300, &t), WTLS_ERR_TIMEOUT);
+    CHECK_EQ_INT(f.calls, 3);
+    fake_udp g = {{1, 1, 1, 2}, 0, {0}};
+    CHECK_EQ_INT(wtls_sntp_query(fake_exchange, &g, 1, NONCE, 300, &t), WTLS_ERR_IO);
+    fake_udp h = {{WTLS_ERR_IO, 2, 2, 2}, 0, {0}}; /* hard socket error: no retry */
+    CHECK_EQ_INT(wtls_sntp_query(fake_exchange, &h, 1, NONCE, 300, &t), WTLS_ERR_IO);
+    CHECK_EQ_INT(h.calls, 1);
+    fake_udp k = {{WTLS_ERR_TIMEOUT, 2, 2, 2}, 0, {0}}; /* tiny timeout: >= 1 ms each */
+    CHECK_EQ_INT(wtls_sntp_query(fake_exchange, &k, 1, NONCE, 2, &t), WTLS_OK);
+    CHECK_EQ_INT(k.timeouts[0], 1);
+}
+
 /* SNTP needs PSA (nonce); without wtls_init nobody would free that state. */
 static void test_sntp_needs_init(void) {
     CHECK_EQ_INT(wtls_time_sync_sntp("127.0.0.1", 100), WTLS_ERR_STATE);
@@ -115,5 +165,7 @@ int main(void) {
     RUN(test_sntp_parse_era1);
     RUN(test_sntp_parse_rejects);
     RUN(test_unix_time_offset);
+    RUN(test_sntp_query_retries_lost_packet);
+    RUN(test_sntp_query_gives_up_after_3);
     return CHECK_DONE();
 }

@@ -163,7 +163,9 @@ int wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, 
     sa.sin_port = htons(port);
     memcpy(&sa.sin_addr, &ipv4_be, 4);
     int ret = WTLS_ERR_IO;
-    if (net_sendto(fd, req, (s32)req_len, 0, (struct sockaddr *)&sa, sizeof sa) == (s32)req_len) {
+    /* IOS takes only its own 8-byte IPv4 sockaddr length: sizeof sa (16) fails
+     * with -EINVAL (measured on a Wii). */
+    if (net_sendto(fd, req, (s32)req_len, 0, (struct sockaddr *)&sa, 8) == (s32)req_len) {
         int pr = poll_one(fd, IOS_POLLIN, timeout_ms);
         if (pr == 0) {
             ret = WTLS_ERR_TIMEOUT;
