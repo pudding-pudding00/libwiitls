@@ -110,7 +110,11 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
                 return WTLS_ERR_TIMEOUT;
             }
             uint64_t left = deadline - now;
-            if (poll_one(fd, IOS_POLLOUT, left < CONNECT_SLICE_MS ? (uint32_t)left : CONNECT_SLICE_MS) < 0) {
+            /* Counted as poll wait: the CPU sleeps while IOS waits. */
+            uint64_t p0 = wtls_plat_now_us();
+            int pr = poll_one(fd, IOS_POLLOUT, left < CONNECT_SLICE_MS ? (uint32_t)left : CONNECT_SLICE_MS);
+            wtls_plat_poll_wait_us += wtls_plat_now_us() - p0;
+            if (pr < 0) {
                 r = -1;
                 break;
             }

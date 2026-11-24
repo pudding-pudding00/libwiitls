@@ -13,6 +13,7 @@
 #include "check.h"
 #include "env.h"
 #include "plat/plat.h"
+#include "wtls_prof.h"
 #include "wtls_scache.h"
 
 #define PLAIN_PORT 4430
@@ -362,6 +363,52 @@ static void test_ticket_chain(void) {
     CHECK_EQ_INT(ping_resumed(false), 1); /* ticket stored by the resumed connection */
 }
 
+/* wtls_prof_last splits the last handshake into connect, setup and one entry
+ * per handshake state; the parts fit inside the caller's wall time. */
+static void check_profile(uint64_t wall_us) {
+    const wtls_prof *p = &wtls_prof_last;
+    uint64_t steps = 0, step_io = 0;
+    uint32_t n = 0;
+    for (int i = 0; i < WTLS_PROF_STATES; i++) {
+        steps += p->step_us[i];
+        step_io += p->step_io_us[i];
+        n += p->step_n[i];
+        CHECK(p->step_io_us[i] <= p->step_us[i]);
+    }
+    CHECK(n >= 5);                     /* ClientHello ... Finished */
+    CHECK(p->io_calls >= 2);           /* at least one send and one recv */
+    CHECK_EQ_INT(step_io, p->io_us);   /* every handshake IPC happens inside a step */
+    CHECK_EQ_INT(p->send_calls + p->recv_calls + p->recv_empty_calls, p->io_calls);
+    CHECK_EQ_INT(p->send_us + p->recv_us + p->recv_empty_us, p->io_us);
+    CHECK(p->send_calls >= 1 && p->recv_calls >= 1);
+    CHECK(p->connect_wait_us <= p->connect_us);
+    CHECK(p->connect_us + p->setup_us + steps + p->wait_us <= wall_us + 1000); /* clock granularity */
+}
+
+static void test_handshake_profile(void) {
+    wtls_options o = {0};
+    o.no_resumption = true;
+    memset(&wtls_prof_last, 0, sizeof wtls_prof_last);
+    uint64_t t0 = wtls_plat_now_us();
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    uint64_t wall = wtls_plat_now_us() - t0;
+    if (!c) return;
+    check_profile(wall);
+    wtls_close(c);
+    /* Resumed: the profile is rewritten, not added to. */
+    wtls_scache_clear();
+    CHECK_EQ_INT(ping_resumed(false), 0);
+    t0 = wtls_plat_now_us();
+    c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    wall = wtls_plat_now_us() - t0;
+    if (!c) return;
+    wtls_conn_info info;
+    CHECK_EQ_INT(wtls_get_info(c, &info), WTLS_OK);
+    CHECK(info.resumed);
+    check_profile(wall);
+    wtls_close(c);
+}
+
 static void test_nonblocking_read_wants_read(void) {
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
     if (!c) return;
@@ -440,6 +487,7 @@ void wtls_suite_tls(void) {
     RUN(test_resumption);
     RUN(test_no_resumption_flag);
     RUN(test_ticket_chain);
+    RUN(test_handshake_profile);
     RUN(test_nonblocking_read_wants_read);
     RUN(test_nonblocking_poll_then_read);
     RUN(test_pending_counts_buffered);

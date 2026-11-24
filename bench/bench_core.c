@@ -19,7 +19,10 @@
 #include "check.h"
 #include "env.h"
 #include "plat/plat.h"
+#include "p256-m.h"
+#include "psa_prof.h"
 #include "rsa_vector.h"
+#include "wtls_prof.h"
 
 #define RUNS 20
 #define BLOCK 16384
@@ -121,9 +124,13 @@ static void bench_x25519(void) {
         psa_key_id_t id = 0;
         uint8_t shared[32];
         size_t sl;
-        /* One TLS 1.3 key exchange: ephemeral keygen + agreement. */
+        /* One TLS 1.3 key exchange: ephemeral keygen, public key for the
+         * key share (computed at export), agreement. */
+        uint8_t own_pub[32];
+        size_t ol;
         uint64_t t0 = wtls_plat_now_us();
         psa_status_t st = psa_generate_key(&a, &id);
+        if (st == PSA_SUCCESS) st = psa_export_public_key(id, own_pub, sizeof own_pub, &ol);
         if (st == PSA_SUCCESS)
             st = psa_raw_key_agreement(PSA_ALG_ECDH, id, peer_pub, pl, shared, sizeof shared, &sl);
         t[i] = wtls_plat_now_us() - t0;
@@ -148,6 +155,18 @@ static void bench_ecdsa_p256_verify(void) {
     uint8_t hash[32] = {0x42}, sig[64];
     size_t sl = 0;
     CHECK_EQ_INT(psa_sign_hash(id, alg, hash, sizeof hash, sig, sizeof sig, &sl), PSA_SUCCESS);
+    /* Verify with a public key, as TLS does: with the key pair, the builtin
+     * driver would first recompute the public point from the private key. */
+    uint8_t pub[65];
+    size_t publ = 0;
+    CHECK_EQ_INT(psa_export_public_key(id, pub, sizeof pub, &publ), PSA_SUCCESS);
+    psa_destroy_key(id);
+    psa_set_key_type(&a, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+    psa_set_key_usage_flags(&a, PSA_KEY_USAGE_VERIFY_HASH);
+    id = 0;
+    st = psa_import_key(&a, pub, publ, &id);
+    CHECK_EQ_INT(st, PSA_SUCCESS);
+    if (st != PSA_SUCCESS) return;
     uint64_t t[RUNS];
     for (int i = 0; i < RUNS; i++) {
         uint64_t t0 = wtls_plat_now_us();
@@ -157,6 +176,17 @@ static void bench_ecdsa_p256_verify(void) {
     }
     psa_destroy_key(id);
     report("ecdsa_p256_verify", (double)median(t, RUNS) / 1000.0, "ms");
+
+    /* The same verify through p256-m (bench/p256m_probe.c). */
+    for (int i = 0; i < RUNS; i++) {
+        uint64_t t0 = wtls_plat_now_us();
+        int pr = p256_ecdsa_verify(sig, pub + 1, hash, sizeof hash);
+        t[i] = wtls_plat_now_us() - t0;
+        CHECK_EQ_INT(pr, P256_SUCCESS);
+    }
+    report("ecdsa_p256_verify_p256m", (double)median(t, RUNS) / 1000.0, "ms");
+    sig[5] ^= 1;
+    CHECK_EQ_INT(p256_ecdsa_verify(sig, pub + 1, hash, sizeof hash), P256_INVALID_SIGNATURE);
 }
 
 static void bench_rsa2048_verify(void) {
@@ -265,17 +295,103 @@ static int timed_connect(wtls_conn **c, const wtls_options *opt, uint64_t *wall_
     return r;
 }
 
+/* ---- handshake breakdown (wtls_prof) ----------------------------------- */
+
+/* Short names of mbedtls_ssl_states (mbedtls/ssl.h, 4.1.1), for BENCH lines. */
+static const char *state_name(int s) {
+    static const char *const k[] = {
+        "hello_request", "client_hello", "server_hello", "server_certificate",
+        "server_key_exchange", "certificate_request", "server_hello_done", "client_certificate",
+        "client_key_exchange", "certificate_verify", "client_ccs", "client_finished",
+        "server_ccs", "server_finished", "flush_buffers", "wrapup", "new_session_ticket",
+        "hello_verify_sent", "hello_retry_request", "encrypted_extensions", "end_of_early_data",
+        "client_certificate_verify", "ccs_after_server_finished", "ccs_before_2nd_hello",
+        "ccs_after_server_hello", "ccs_after_client_hello", "ccs_after_hrr", "handshake_over",
+        "tls13_new_session_ticket", "tls13_new_session_ticket_flush"};
+    return s >= 0 && s < (int)(sizeof k / sizeof k[0]) ? k[s] : "other";
+}
+
+static wtls_prof s_prof[RUNS];
+
+static double med_ms(uint64_t *v, size_t n) { return (double)median(v, n) / 1000.0; }
+
+/* Medians per part over the runs. CPU of a step = its time minus its
+ * send/recv; "rest" = CPU of the whole connect minus every listed part. */
+static void report_breakdown(const char *pfx, const uint64_t *cpu, int runs) {
+    uint64_t v[RUNS];
+    char name[96];
+#define PART(label, expr)                                  \
+    do {                                                   \
+        for (int i = 0; i < runs; i++) v[i] = (expr);      \
+        snprintf(name, sizeof name, "%s_%s", pfx, label);  \
+        report(name, med_ms(v, (size_t)runs), "ms");       \
+    } while (0)
+    PART("connect", s_prof[i].connect_us);
+    PART("connect_cpu", s_prof[i].connect_us - s_prof[i].connect_wait_us);
+    PART("setup", s_prof[i].setup_us);
+    PART("io", s_prof[i].io_us);
+    PART("io_send", s_prof[i].send_us);
+    PART("io_recv", s_prof[i].recv_us);
+    PART("io_recv_empty", s_prof[i].recv_empty_us);
+#define CALLS(label, field)                                      \
+    do {                                                         \
+        for (int i = 0; i < runs; i++) v[i] = s_prof[i].field;   \
+        snprintf(name, sizeof name, "%s_%s", pfx, label);        \
+        report(name, (double)median(v, (size_t)runs), "calls");  \
+    } while (0)
+    CALLS("io_calls", io_calls);
+    CALLS("io_send_calls", send_calls);
+    CALLS("io_recv_calls", recv_calls);
+    CALLS("io_recv_empty_calls", recv_empty_calls);
+#undef CALLS
+    for (int st = 0; st < WTLS_PROF_STATES; st++) {
+        if (!s_prof[0].step_n[st]) continue;
+        char label[48];
+        snprintf(label, sizeof label, "step_%s", state_name(st));
+        PART(label, s_prof[i].step_us[st] - s_prof[i].step_io_us[st]);
+    }
+    PART("rest", ({
+             uint64_t parts = s_prof[i].connect_us - s_prof[i].connect_wait_us + s_prof[i].setup_us;
+             for (int st = 0; st < WTLS_PROF_STATES; st++) parts += s_prof[i].step_us[st];
+             cpu[i] > parts ? cpu[i] - parts : 0;
+         }));
+    /* What the handshake itself costs the CPU: no TCP connect, no IPC. */
+    PART("crypto_cpu", ({
+             uint64_t x = s_prof[i].connect_us - s_prof[i].connect_wait_us + s_prof[i].io_us;
+             cpu[i] > x ? cpu[i] - x : 0;
+         }));
+#undef PART
+}
+
+/* Crypto calls per handshake (mean over the runs), from bench/psa_prof.c. */
+static void report_psa_prof(const char *pfx, int runs) {
+    for (int f = 0; f < WTLS_PP_COUNT; f++) {
+        if (!wtls_psa_prof_acc.n[f]) continue;
+        long long us100 = (long long)(wtls_psa_prof_acc.us[f] * 100 / (uint64_t)runs); /* 10 ns units */
+        unsigned calls10 = (unsigned)(wtls_psa_prof_acc.n[f] * 10u / (unsigned)runs);
+        TLOG("PROF %s %-36s %lld.%03lld ms %u.%u calls\n", pfx, wtls_psa_prof_names[f], us100 / 100000,
+             (us100 % 100000) / 100, calls10 / 10, calls10 % 10);
+    }
+    memset(&wtls_psa_prof_acc, 0, sizeof wtls_psa_prof_acc);
+}
+
 static void bench_handshake_full(void) {
     wtls_options opt = {0};
     opt.no_resumption = true;
     uint64_t wall[RUNS], cpu[RUNS];
+    memset(&wtls_psa_prof_acc, 0, sizeof wtls_psa_prof_acc);
     for (int i = 0; i < RUNS; i++) {
         wtls_conn *c = NULL;
+        wtls_psa_prof_on = true;
         int r = timed_connect(&c, &opt, &wall[i], &cpu[i]);
+        wtls_psa_prof_on = false;
         CHECK_EQ_INT(r, WTLS_OK);
         if (r != WTLS_OK) return;
+        s_prof[i] = wtls_prof_last;
         wtls_close(c);
     }
+    report_breakdown("hs_full", cpu, RUNS);
+    report_psa_prof("hs_full", RUNS);
     report("handshake_full_wall", (double)median(wall, RUNS) / 1000.0, "ms");
     s_hs_full_cpu_ms = (double)median(cpu, RUNS) / 1000.0;
     report("handshake_full_cpu", s_hs_full_cpu_ms, "ms");
@@ -288,17 +404,23 @@ static void bench_handshake_resumed(void) {
     CHECK(ping(c)); /* primes the ticket cache */
     wtls_close(c);
     uint64_t wall[RUNS], cpu[RUNS];
+    memset(&wtls_psa_prof_acc, 0, sizeof wtls_psa_prof_acc);
     for (int i = 0; i < RUNS; i++) {
         c = NULL;
+        wtls_psa_prof_on = true;
         int r = timed_connect(&c, NULL, &wall[i], &cpu[i]);
+        wtls_psa_prof_on = false;
         CHECK_EQ_INT(r, WTLS_OK);
         if (r != WTLS_OK) return;
+        s_prof[i] = wtls_prof_last;
         wtls_conn_info info;
         CHECK_EQ_INT(wtls_get_info(c, &info), WTLS_OK);
         CHECK(info.resumed);
         CHECK(ping(c)); /* next ticket for the next round */
         wtls_close(c);
     }
+    report_breakdown("hs_resumed", cpu, RUNS);
+    report_psa_prof("hs_resumed", RUNS);
     report("handshake_resumed_wall", (double)median(wall, RUNS) / 1000.0, "ms");
     s_hs_res_cpu_ms = (double)median(cpu, RUNS) / 1000.0;
     report("handshake_resumed_cpu", s_hs_res_cpu_ms, "ms");

@@ -28,8 +28,11 @@ All values are medians of 20 runs (streams: 3 runs).
 | `sha256_16k` | `psa_hash_compute` SHA-256 over 16 KiB | MB/s |
 | `chacha20_poly1305_enc_16k` | `psa_aead_encrypt` over 16 KiB | MB/s |
 | `aes128_gcm_enc_16k` | `psa_aead_encrypt` over 16 KiB | MB/s |
-| `x25519_keygen_agree` | ephemeral key generation + ECDH (one TLS 1.3 key exchange) | ms |
-| `ecdsa_p256_verify` | `psa_verify_hash` | ms |
+| `x25519_keygen_agree` | ephemeral key generation + public key export + ECDH (one TLS 1.3 key exchange; the export was not timed before the breakdown below) | ms |
+| `ecdsa_p256_verify` | `psa_verify_hash` with an imported public key (as in TLS; before the breakdown below it used the key pair, which recomputes the public point on every call) | ms |
+| `ecdsa_p256_verify_p256m` | the same verify through p256-m's raw `p256_ecdsa_verify` (`bench/p256m_probe.c`, comparison only) | ms |
+| `hs_<full\|resumed>_*` | breakdown of the handshake, see "Handshake breakdown" | ms / calls |
+| `PROF hs_<full\|resumed> <fn>` | mean time and calls per handshake of each PSA/X.509 function, via linker `--wrap` (bench builds only) | ms |
 | `rsa2048_verify` | PKCS#1 v1.5 / SHA-256 `psa_verify_hash` (fixed vector, `bench/rsa_vector.h`) | ms |
 | `handshake_full_wall` / `_cpu` | `wtls_connect` to port 4431 (TLS 1.3, ECDSA leaf), `no_resumption` | ms |
 | `handshake_resumed_wall` / `_cpu` | `wtls_connect` with a session ticket (checked: `resumed == true`) | ms |
@@ -38,8 +41,10 @@ All values are medians of 20 runs (streams: 3 runs).
 | `wtls_read_vs_raw` | `wtls_read_4m` / `net_recv_4m` | % |
 
 CPU time = wall time − time blocked in `wtls_plat_poll`
-(`wtls_plat_poll_wait_us`). It includes the TCP connect, so it is an upper bound
-for the handshake's own CPU cost.
+(`wtls_plat_poll_wait_us`). Since the breakdown below, the polls of a pending
+TCP connect also count as wait. The CPU figure still includes the CPU part of
+the TCP connect and the synchronous IOS IPC of every send/recv, so it is an
+upper bound for the handshake's own CPU cost; `hs_*_crypto_cpu` removes both.
 
 ## Tuning options
 
@@ -78,6 +83,15 @@ So the matrix to measure is `WTLS_BN_ASM` × `WTLS_EVEREST` × `WTLS_OPT` (8 bui
   `CMakeLists.txt` now re-adds the level per Mbed TLS target as
   `SHELL:-O3`. The `SHELL:` prefix is needed because CMake otherwise drops
   the option as a duplicate of the global one.
+- **X25519 public key export bypassed Everest.** With
+  `MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED`, TF-PSA-Crypto 4.1.1 uses Everest only
+  for the key agreement. `psa_export_public_key` still computed the public key
+  with the generic `mbedtls_ecp_mul`, which cost 8.7 ms per handshake on the
+  Wii. `CMakeLists.txt` patches `mbedtls_psa_ecp_export_public_key` at
+  configure time to compute X25519 public keys with
+  `mbedtls_x25519_scalarmult(pub, priv, 9)`, and stops with an error if the
+  anchor is gone. The RFC 7748 §6.1 vectors in the `crypto` suite pin the
+  export, including clamping.
 
 ## Targets (gate for Task 12)
 
@@ -122,12 +136,79 @@ Notes:
   `net_poll` does not signal a completed non-blocking connect (see
   `docs/ios-socket-behaviour.md`). The full handshake took 5096 ms wall;
   afterwards it took 101 ms.
-- **What the handshake CPU is made of.** In the full handshake, two ECDSA P-256
-  verifies (CertificateVerify plus the leaf signature) cost about 63 ms, and
-  X25519 costs 4.5 ms. The resumed handshake has no signatures, and only
-  about 4.5 ms of its 31.7 ms is X25519. The CPU figure also counts the TCP
-  connect and any IOS IPC time outside `wtls_plat_poll`. Where the remaining
-  ~27 ms goes is not yet profiled.
+- **What the handshake CPU is made of.** See "Handshake breakdown" below; the
+  table above predates it.
+
+### Handshake breakdown
+
+`wtls_connect` records a profile of every handshake (`src/wtls_prof.h`): TCP
+connect (and its poll wait), setup, each `mbedtls_ssl_handshake_step` by
+state, and the time inside `wtls_plat_send`/`recv`. The `tls` suite checks that
+the parts add up. The bench prints medians, and its `PROF` lines time each
+PSA/X.509 call. Default build, Wii over Wi-Fi, bench 9/9 pass.
+
+"Before" is the build at commit 925aaa9 with only the accounting fixed (connect
+polls counted as wait); "after" adds the X25519 export fix.
+
+| Resumed handshake | before ms | after ms |
+|-------------------|----------:|---------:|
+| wall | 35.7 | 29.3 |
+| CPU (wall − poll wait) | 26.5 | 18.0 |
+| TCP connect, CPU part (IOS IPC) | 2.6 | 2.6 |
+| send/recv IPC (12 calls: 3 send, 8 recv, 1 empty recv) | 5.6 | 5.2 |
+| step `client_hello` (X25519 keygen + export) | 13.0 | 4.8 |
+| step `server_hello` (X25519 agreement, key schedule) | 4.7 | 4.8 |
+| steps `server_finished`, `client_finished`, rest | 0.5 | 0.6 |
+| **crypto CPU (CPU − connect − IPC)** | **18.3** | **10.2** |
+
+| Full handshake | before ms | after ms |
+|----------------|----------:|---------:|
+| wall | 91.7 | 86.9 |
+| CPU (wall − poll wait) | 78.5 | 70.4 |
+| TCP connect, CPU part | 2.4 | 2.4 |
+| send/recv IPC (16 calls: 3 send, 12 recv, 1 empty) | 6.4 | 6.3 |
+| step `client_hello` | 12.8 | 4.6 |
+| step `server_hello` | 4.7 | 4.8 |
+| step `server_certificate` (chain verify: 1 ECDSA P-256) | 25.8 | 25.9 |
+| step `certificate_verify` (1 ECDSA P-256) | 25.7 | 25.7 |
+| other steps and rest | 0.6 | 0.6 |
+| **crypto CPU** | **69.6** | **61.6** |
+
+What the numbers say:
+
+- **The old CPU figure was not all crypto.** About 5 ms of the old 31.7 ms
+  resumed CPU were connect polls, now counted as wait. Of what remains, the
+  connect's IPC (2.6 ms) and the send/recv IPC (5.2 ms, about 0.45 ms per
+  call; a send costs about 1 ms) are IOS round trips, not crypto.
+- **Resumed handshake: X25519 is now nearly all of it.** Export 4.5 ms +
+  agreement 4.5 ms of 10.2 ms crypto. Hashing, HKDF, HMAC and AEAD together
+  take about 1.2 ms. The 10 ms target for the CPU figure cannot be met while
+  it includes about 8 ms of IOS IPC; the crypto part is at 10.2 ms.
+- **Full handshake: P-256 verify is 51 ms of 61.6 ms crypto.** Two verifies
+  at 25.7 ms each (leaf signature in the chain, CertificateVerify).
+  X.509 parsing costs 0.1 ms.
+- **p256-m is slower on the Wii.** Raw `p256_ecdsa_verify` takes 35.9 ms vs
+  25.6 ms for the builtin verify with `BN_ASM` (on the x86 host: 2.1 vs 1.0
+  ms). p256-m's 32-bit C does not beat the PPC32 bignum assembly, so routing
+  P-256 through it would make things worse. The builtin ECP options are
+  already at their best: `MBEDTLS_ECP_FIXED_POINT_OPTIM` is on, and window
+  size 4 is the maximum used for 256-bit curves.
+- **Earlier ECDSA bench numbers were inflated.** `ecdsa_p256_verify` used the
+  key pair, so the builtin driver recomputed the public point on every verify
+  (31.6 ms). With a public key, as in TLS, it is 25.6 ms.
+
+Remaining options, not done here:
+
+- **Fewer IPCs.** A read-ahead buffer in the BIO could merge the
+  header/body reads of TLS records (8–12 recv per handshake). It changes what
+  `wtls_pending` and the fd's readiness mean, so it needs its own design.
+- **Faster X25519 on PPC** (Task 12's driver): now 9 ms per handshake, the
+  largest part of a resumed one.
+- **Cache verified certificate chains** across connections to the same host.
+  This skips one P-256 verify (about 26 ms) per full handshake, but is a
+  security policy decision (revocation, expiry, key pinning).
+- **P-256 field arithmetic in PPC assembly**: beyond the existing `BN_ASM`,
+  only a dedicated P-256 field multiplication could help; not investigated.
 
 ### Gate decision
 
@@ -150,6 +231,14 @@ has an unexplained ~27 ms. Both are recorded as follow-ups: profile the
 resumed handshake, and look at a faster P-256 verify. If this ruling is wrong,
 the cost is a missing driver that would save at most about 0.5 ms per
 handshake at the current numbers.
+
+**Update after the handshake breakdown.** The profile showed that the X25519
+key exchange in a handshake cost 13 ms, not 4.5 ms, because the public key
+export bypassed Everest (fixed, see above). After the fix X25519 is about 9 ms
+per handshake (export + agreement; `x25519_keygen_agree` now measures both,
+8.9 ms), about half the resumed handshake's 18 ms CPU and nearly all of its
+10.2 ms crypto. A faster X25519 is therefore the one lever left for the
+resumed target; whether to do Task 12 is up for a new decision.
 
 ## Results: host smoke run (PC, localhost; not the target)
 
