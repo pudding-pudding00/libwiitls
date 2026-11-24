@@ -19,6 +19,8 @@
  * See docs/ios-socket-behaviour.md: confirmed by the Task 2 spike once run. */
 /* IOS errno values and IPC_ENOMEM handling: plat.h (wtls_plat_ios_*). */
 #define IPC_RETRY_US 2000
+/* Poll slice while a non-blocking connect runs (two IPCs of ~135 us each). */
+#define CONNECT_SLICE_MS 5u
 
 /* IOS poll bits and fcntl flag. */
 #define IOS_POLLIN  0x0003
@@ -96,15 +98,32 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
     bool nb = set_nonblocking(fd) == 0;
     s32 r = net_connect(fd, (struct sockaddr *)&sa, sizeof sa);
     if (wtls_plat_ios_connect_pending(nb, r)) {
-        int pr = poll_one(fd, IOS_POLLOUT, timeout_ms);
-        if (pr == 0) {
-            net_close(fd);
-            return WTLS_ERR_TIMEOUT;
+        /* IOS' net_poll wakes for a refused connect (RST) but not for a
+         * completed one: POLLOUT shows up only at the poll timeout (measured).
+         * So poll in short slices and ask a second connect each time:
+         * 0/EISCONN = connected, EALREADY/EINPROGRESS = still running. */
+        uint64_t deadline = wtls_plat_now_ms() + timeout_ms;
+        for (;;) {
+            uint64_t now = wtls_plat_now_ms();
+            if (now >= deadline) {
+                net_close(fd);
+                return WTLS_ERR_TIMEOUT;
+            }
+            uint64_t left = deadline - now;
+            if (poll_one(fd, IOS_POLLOUT, left < CONNECT_SLICE_MS ? (uint32_t)left : CONNECT_SLICE_MS) < 0) {
+                r = -1;
+                break;
+            }
+            r = net_connect(fd, (struct sockaddr *)&sa, sizeof sa);
+            if (wtls_plat_ios_connected(r)) {
+                r = 0;
+                break;
+            }
+            if (!wtls_plat_ios_connect_in_progress(r)) {
+                SYS_Report("wtls: connect failed, IOS code %d\n", (int)r);
+                break;
+            }
         }
-        /* A second connect reports the outcome: 0 or EISCONN means connected. */
-        r = pr < 0 ? -1 : net_connect(fd, (struct sockaddr *)&sa, sizeof sa);
-        if (wtls_plat_ios_connected(r)) r = 0;
-        else if (r < 0) SYS_Report("wtls: connect failed, IOS code %d\n", (int)r); /* spike aid */
     }
     if (r < 0) {
         net_close(fd);

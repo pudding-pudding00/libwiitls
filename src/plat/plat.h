@@ -59,6 +59,8 @@ int  wtls_plat_ios_io_result(int32_t r, bool is_send, int attempt);
 bool wtls_plat_ios_connect_pending(bool nonblocking, int32_t r);
 /* true: the second connect's result means the socket is connected. */
 bool wtls_plat_ios_connected(int32_t r);
+/* true: the second connect's result means the TCP handshake is still running. */
+bool wtls_plat_ios_connect_in_progress(int32_t r);
 
 #if defined(WTLS_PLATFORM_OGC)
 /* One jitter sample: the timebase delta since the previous call, measured

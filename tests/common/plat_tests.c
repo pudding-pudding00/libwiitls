@@ -147,13 +147,37 @@ static void test_ios_connect_classification(void) {
     CHECK_EQ_INT(-WTLS_IOS_EISCONN, -127);
     CHECK(!wtls_plat_ios_connected(-119));
     CHECK(wtls_plat_ios_connected(-127));
+    /* Second connect while the handshake is still running: keep waiting. A
+     * second EINPROGRESS means a new attempt after a refusal: give up. */
+    CHECK(wtls_plat_ios_connect_in_progress(-WTLS_IOS_EALREADY));
+    CHECK(!wtls_plat_ios_connect_in_progress(-WTLS_IOS_EINPROGRESS));
+    CHECK(!wtls_plat_ios_connect_in_progress(-WTLS_IOS_EISCONN));
+    CHECK(!wtls_plat_ios_connect_in_progress(0));
+    CHECK(!wtls_plat_ios_connect_in_progress(-111)); /* ECONNREFUSED */
+}
+
+/* IOS' net_poll does not wake for a completed non-blocking connect (measured:
+ * POLLOUT only at the poll timeout), so a LAN connect must not take the whole
+ * timeout. */
+static void test_connect_is_fast(void) {
+    int fd = -1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_plat_connect(server_ip(), ECHO_PORT, 3000, &fd), WTLS_OK);
+    uint64_t ms = wtls_plat_now_ms() - t0;
+    TLOG("    connected after %u ms\n", (unsigned)ms);
+    CHECK(ms < 500);
+    if (fd >= 0) wtls_plat_close(fd);
 }
 
 static void test_connect_refused(void) {
     int fd = -1;
     uint64_t t0 = wtls_plat_now_ms();
     CHECK_EQ_INT(wtls_plat_connect(server_ip(), CLOSED_PORT, 5000, &fd), WTLS_ERR_CONNECT);
-    TLOG("    refused after %u ms\n", (unsigned)(wtls_plat_now_ms() - t0));
+    uint64_t ms = wtls_plat_now_ms() - t0;
+    TLOG("    refused after %u ms\n", (unsigned)ms);
+    /* The RST arrives within a LAN round trip (Wii: 7 ms). Not on the host:
+     * Windows retries a refused SYN for about 2 s. */
+    if (g_env.is_hw) CHECK(ms < 2000);
     CHECK_EQ_INT(fd, -1);
 }
 
@@ -223,6 +247,7 @@ void wtls_suite_plat(void) {
     RUN(test_poll_timeout_duration);
     RUN(test_poll_wait_accounting);
     RUN(test_eof_after_bye);
+    RUN(test_connect_is_fast);
     RUN(test_connect_refused);
     RUN(test_resolve_ip_literal_and_garbage);
     if (!g_env.is_hw) RUN(test_resolve_localhost);
