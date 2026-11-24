@@ -5,6 +5,7 @@ add_executable(wtls_hwtest
     entropy_suite.c
     time_suite.c
     ${PROJECT_SOURCE_DIR}/tests/common/plat_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/crypto_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/tls_tests.c
     realworld_tests.c
 )

@@ -29,8 +29,8 @@ option(WTLS_BUILD_TESTS "Build libwiitls tests" ${WTLS_BUILD_TESTS_DEFAULT})
 # below, including the fetched Mbed TLS.
 option(WTLS_BN_ASM "PPC32 bignum assembly (MBEDTLS_HAVE_ASM)" ON)
 option(WTLS_P256M "p256-m driver for P-256 (fails to build with 4.1.1 + PK)" OFF)
-option(WTLS_EVEREST "X25519 via Everest/HACL* (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED)" OFF)
-set(WTLS_OPT O2 CACHE STRING "Optimisation level for library and Mbed TLS: O2 or O3")
+option(WTLS_EVEREST "X25519 via Everest/HACL* (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED)" ON)
+set(WTLS_OPT O3 CACHE STRING "Optimisation level for library and Mbed TLS: O2 or O3")
 set_property(CACHE WTLS_OPT PROPERTY STRINGS O2 O3)
 if(NOT WTLS_OPT MATCHES "^O[23]$")
     message(FATAL_ERROR "WTLS_OPT must be O2 or O3, got '${WTLS_OPT}'")
@@ -48,7 +48,7 @@ endif()
 if(WTLS_EVEREST)
     add_compile_definitions(WTLS_CFG_EVEREST)
 endif()
-add_compile_options(-${WTLS_OPT}) # after CMAKE_C_FLAGS_<CONFIG>: the last -O wins
+add_compile_options(-${WTLS_OPT}) # after CMAKE_C_FLAGS_<CONFIG>: the last -O wins (Mbed TLS: below)
 
 include(FetchContent)
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -65,6 +65,37 @@ FetchContent_Declare(mbedtls
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(mbedtls)
+# Mbed TLS adds its own $<$<CONFIG:Release>:-O2> per target, after the global
+# options: repeat WTLS_OPT on each target so it comes last and wins.
+foreach(t mbedtls mbedx509 tfpsacrypto builtin everest p256-m platform utilities extras pqcp)
+    if(TARGET ${t})
+        target_compile_options(${t} PRIVATE "SHELL:-${WTLS_OPT}") # SHELL: escapes de-duplication against the global -O
+    endif()
+endforeach()
+if(WTLS_EVEREST)
+    # Everest's generic big-endian htole64 swaps only the two 32-bit halves: it
+    # calls htobe32 (a no-op on big-endian) where it needs htole32, so X25519
+    # returns wrong shared secrets on the Wii (tests/common/crypto_tests.c).
+    # Fixed in the fetched source at configure time; idempotent.
+    set(_wtls_endian
+        ${mbedtls_SOURCE_DIR}/tf-psa-crypto/drivers/everest/include/tf-psa-crypto/private/everest/kremlin/c_endianness.h)
+    file(READ ${_wtls_endian} _wtls_src)
+    string(FIND "${_wtls_src}" "__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__" _wtls_be)
+    string(FIND "${_wtls_src}" "__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__" _wtls_le)
+    if(_wtls_be LESS 0 OR _wtls_le LESS _wtls_be)
+        message(FATAL_ERROR "WTLS_EVEREST: unexpected layout of ${_wtls_endian}")
+    endif()
+    string(SUBSTRING "${_wtls_src}" 0 ${_wtls_be} _wtls_head)
+    math(EXPR _wtls_len "${_wtls_le} - ${_wtls_be}")
+    string(SUBSTRING "${_wtls_src}" ${_wtls_be} ${_wtls_len} _wtls_branch)
+    string(SUBSTRING "${_wtls_src}" ${_wtls_le} -1 _wtls_tail)
+    string(REPLACE "__low = htobe32(" "__low = htole32(" _wtls_branch "${_wtls_branch}")
+    string(REPLACE "__high = htobe32(" "__high = htole32(" _wtls_branch "${_wtls_branch}")
+    set(_wtls_fixed "${_wtls_head}${_wtls_branch}${_wtls_tail}")
+    if(NOT _wtls_fixed STREQUAL _wtls_src)
+        file(WRITE ${_wtls_endian} "${_wtls_fixed}")
+    endif()
+endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     foreach(t mbedtls mbedx509 tfpsacrypto)
         target_compile_definitions(${t} PUBLIC WTLS_DEBUG)
@@ -176,6 +207,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_castore)
     wtls_host_test(test_scache)
     wtls_host_test(test_dns)
+    wtls_host_test(test_crypto tests/common/crypto_tests.c)
     add_dependencies(test_castore wtls_test_certs)
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"

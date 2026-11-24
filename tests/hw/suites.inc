@@ -3,6 +3,7 @@
 {"entropy", wtls_suite_entropy},
 {"jitterdump", wtls_suite_jitterdump},
 {"plat", wtls_suite_plat},
+{"crypto", wtls_suite_crypto},
 {"time", wtls_suite_time},
 {"tls", wtls_suite_tls},
 {"realworld", wtls_suite_realworld},
