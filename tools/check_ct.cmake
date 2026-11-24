@@ -10,6 +10,8 @@
 # look at it before raising a budget.
 #
 # Usage: cmake -DOBJDUMP=<powerpc-eabi-objdump> -DOBJECTS=<obj;...> -P check_ct.cmake
+
+cmake_minimum_required(VERSION 3.20) # script mode starts with no policies (IN_LIST needs CMP0057)
 # OBJECTS may hold all of a target's objects; x25519_fe32 is picked out.
 
 set(funcs x25519_ladder ge_select)
