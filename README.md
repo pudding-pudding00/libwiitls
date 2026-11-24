@@ -29,6 +29,12 @@ TF-PSA-Crypto) and libogc.
 > The full matrix and the targets that are still missed are in
 > [docs/benchmarks.md](docs/benchmarks.md).
 
+**Documentation:** [usage guide](docs/usage.md) (setup, threading, error
+handling, resumption, non-blocking I/O, limits) ·
+[performance](docs/performance.md) · API reference in
+[include/wiitls/wiitls.h](include/wiitls/wiitls.h). Prebuilt packages for
+devkitPPC are on the GitHub releases page.
+
 ## Quick example
 
 ```c
@@ -103,6 +109,10 @@ Suites: `selftest`, `spike`, `entropy`, `plat`, `time`, `tls` (against the PC
 test server), `realworld` (example.com, google.com, cloudflare.com, badssl.com).
 
 ## Using it in your project
+
+**Prebuilt release package:** see [docs/usage.md](docs/usage.md#1-add-it-to-your-project).
+`tools/make_release.sh` (in a devkitPro shell) builds the package into
+`dist/` and checks that the example links against it.
 
 **As a subdirectory** (recommended: Mbed TLS and the include path come along):
 
