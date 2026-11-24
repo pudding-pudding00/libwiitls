@@ -141,6 +141,12 @@ static void test_ios_connect_classification(void) {
     CHECK(wtls_plat_ios_connected(0));
     CHECK(wtls_plat_ios_connected(-WTLS_IOS_EISCONN));
     CHECK(!wtls_plat_ios_connected(-WTLS_IOS_EINPROGRESS));
+    /* libogc hands back negated newlib errno values, measured by the spike on
+     * a Wii: non-blocking connect -119, second connect -127. */
+    CHECK_EQ_INT(-WTLS_IOS_EINPROGRESS, -119);
+    CHECK_EQ_INT(-WTLS_IOS_EISCONN, -127);
+    CHECK(!wtls_plat_ios_connected(-119));
+    CHECK(wtls_plat_ios_connected(-127));
 }
 
 static void test_connect_refused(void) {

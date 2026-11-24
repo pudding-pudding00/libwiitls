@@ -1,13 +1,13 @@
 /* Wii platform layer: libogc net_* (IOS /dev/net/ip/top) and the timebase. */
 #include "plat.h"
 
-#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <gccore.h>
 #include <network.h>
+#include <ogc/ipc.h>
 #include <ogc/lwp_watchdog.h>
 #include <ogc/mutex.h>
 
@@ -114,8 +114,8 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
         net_close(fd);
         return WTLS_ERR_CONNECT;
     }
-    int one = 1;
-    (void)net_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one); /* best effort */
+    /* No TCP_NODELAY: IOS rejects it with ENOPROTOOPT (-109, measured), so the
+     * call would only cost an IPC round trip. */
     *fd_out = (int)fd;
     return WTLS_OK;
 }
@@ -176,14 +176,13 @@ int wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, 
     return ret;
 }
 
-/* ---- timebase jitter (variant b of the Task 2 spike) ---- */
-#define JIT_WALK_BYTES (256 * 1024)
-#define JIT_STRIDE (4096 + 32)
-
-static volatile uint8_t *g_walk;
-static size_t g_walk_pos;
-static uint32_t g_prev_tb;
-
+/* ---- timebase jitter: one IOS IPC round trip per sample ---- */
+/* The PPC timebase measured across a round trip into IOS on the Starlet,
+ * whose timing depends on asynchronous events (Wi-Fi and timer interrupts,
+ * the IOS scheduler). Measured on a Wii (tools/jitter_assess.py, worst
+ * estimator): >= 4.6 bits of min-entropy per sample, versus 0.22 for
+ * CPU-only cache-walk timing (docs/ios-socket-behaviour.md). IOS_Open of a
+ * path that does not exist has no side effects and needs no network. */
 static inline uint32_t tb_read(void) {
     uint32_t t;
     __asm__ volatile("mftb %0" : "=r"(t));
@@ -191,21 +190,11 @@ static inline uint32_t tb_read(void) {
 }
 
 uint32_t wtls_plat_jitter_sample(void) {
-    if (!g_walk) {
-        g_walk = memalign(32, JIT_WALK_BYTES);
-        if (!g_walk) return 0;
-        g_walk_pos = 0;
-        g_prev_tb = tb_read();
-    }
-    g_walk[g_walk_pos] ^= (uint8_t)g_prev_tb;
-    g_walk_pos = (g_walk_pos + JIT_STRIDE) % JIT_WALK_BYTES;
+    static uint32_t prev;
+    s32 fd = IOS_Open("/dev/wtls/none", 0);
+    if (fd >= 0) IOS_Close(fd);
     uint32_t now = tb_read();
-    uint32_t d = now - g_prev_tb;
-    g_prev_tb = now;
+    uint32_t d = now - prev;
+    prev = now;
     return d;
-}
-
-void wtls_plat_jitter_release(void) {
-    free((void *)g_walk);
-    g_walk = NULL;
 }

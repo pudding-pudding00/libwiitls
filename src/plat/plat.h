@@ -38,12 +38,14 @@ void     wtls_plat_set_unix_time_offset(int64_t delta_s);
 bool wtls_plat_parse_ipv4(const char *s, uint32_t *ipv4_be);
 
 /* IOS socket result classification. Used by plat_ogc.c; lives in
- * plat_common.c so the host tests cover it. The IOS errno values are
- * provisional until the Task 4 hardware spike confirms them. */
-#define WTLS_IOS_EAGAIN       6
-#define WTLS_IOS_EALREADY     7
-#define WTLS_IOS_EINPROGRESS 26
-#define WTLS_IOS_EISCONN     30
+ * plat_common.c so the host tests cover it. libogc translates IOS results
+ * into negated newlib errno values: EINPROGRESS (-119) and EISCONN (-127)
+ * were measured on a Wii (docs/ios-socket-behaviour.md); EAGAIN and EALREADY
+ * follow the same newlib numbering. */
+#define WTLS_IOS_EAGAIN       11
+#define WTLS_IOS_EALREADY    120
+#define WTLS_IOS_EINPROGRESS 119
+#define WTLS_IOS_EISCONN     127
 #define WTLS_IPC_ENOMEM    (-22) /* libogc IPC heap exhausted: transient */
 #define WTLS_IPC_RETRIES      5  /* short in-call retries before handing back WANT_* */
 #define WTLS_PLAT_RETRY   (-1000) /* internal: pause briefly and repeat the call */
@@ -59,13 +61,9 @@ bool wtls_plat_ios_connect_pending(bool nonblocking, int32_t r);
 bool wtls_plat_ios_connected(int32_t r);
 
 #if defined(WTLS_PLATFORM_OGC)
-/* One timebase-jitter sample: delta of mftb across the disturbance chosen in
- * Task 2 (variant b: cache-hostile stride walk over a 256 KiB buffer). The
- * buffer is allocated on first use; wtls_plat_jitter_release() frees it.
- * Returns 0 forever if the buffer cannot be allocated (the health tests then
- * fail closed). */
+/* One jitter sample: the timebase delta since the previous call, measured
+ * across one IOS IPC round trip (see plat_ogc.c for the entropy estimate). */
 uint32_t wtls_plat_jitter_sample(void);
-void     wtls_plat_jitter_release(void);
 #endif
 
 #endif

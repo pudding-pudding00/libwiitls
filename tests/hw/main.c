@@ -15,6 +15,7 @@
 
 #include "check.h"
 #include "env.h"
+#include "hw_net.h"
 #include "suites.h"
 
 WTLS_CHECK_DEFINE_COUNTERS;
@@ -30,7 +31,9 @@ int wtls_hw_printf(const char *fmt, ...) {
     va_end(ap);
     if (n < 0) return n;
     size_t len = (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1;
-    fputs(buf, stdout);
+    /* Bulk data lines ("JD ...", jitterdump) go to the TCP log only: scrolling
+     * them through the console would take minutes. */
+    if (strncmp(buf, "JD ", 3) != 0 || g_log_fd < 0) fputs(buf, stdout);
     if (g_log_fd >= 0) {
         size_t off = 0;
         while (off < len) {
@@ -70,28 +73,13 @@ static void video_init(void) {
     if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
 }
 
-static int log_connect(const char *ip, int port) {
-    s32 fd = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (fd < 0) return -1;
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((u16)port);
-    sa.sin_addr.s_addr = inet_addr(ip);
-    if (net_connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        net_close(fd);
-        return -1;
-    }
-    return fd;
-}
-
 int main(int argc, char **argv) {
     video_init();
     printf("libwiitls hardware test runner\n");
 
     const char *logip = NULL, *suite = "selftest";
     int logport = 4405;
-    for (int i = 1; i < argc; i++) {
+    for (int i = 0; i < argc; i++) { /* wiiload may put the first argument in argv[0] */
         if (!strncmp(argv[i], "logip=", 6)) logip = argv[i] + 6;
         else if (!strncmp(argv[i], "logport=", 8)) logport = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "suite=", 6)) suite = argv[i] + 6;
@@ -100,10 +88,8 @@ int main(int argc, char **argv) {
     }
     g_env.is_hw = true;
 
-    s32 r = -1;
-    for (int tries = 0; tries < 10 && r < 0; tries++) r = net_init();
-    if (r < 0) printf("net_init failed: %d\n", (int)r);
-    else if (logip) g_log_fd = log_connect(logip, logport);
+    s32 r = hw_net_init();
+    if (r >= 0 && logip) g_log_fd = hw_log_connect(logip, logport);
 
     wtls_hw_printf("suite=%s server=%s pctime=%lld log=%s\n", suite,
                    g_env.server_host ? g_env.server_host : "-", (long long)g_env.pc_time,
@@ -124,8 +110,8 @@ int main(int argc, char **argv) {
     }
     wtls_hw_printf("WTLS-HWTEST DONE pass=%d fail=%d skip=%d\n", wtls_t_pass, wtls_t_fail,
                    wtls_t_skip);
-    if (g_log_fd >= 0) net_close(g_log_fd);
-
-    for (int i = 0; i < 60 * 3; i++) VIDEO_WaitVSync(); /* keep the result visible */
+    bool logged = g_log_fd >= 0;
+    if (logged) net_close(g_log_fd);
+    hw_hold_screen(logged);
     return 0;
 }

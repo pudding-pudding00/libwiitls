@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
     printf("libwiitls https_get example\n");
 
     const char *url = "https://example.com/";
-    for (int i = 1; i < argc; i++)
+    for (int i = 0; i < argc; i++) /* wiiload may put the first argument in argv[0] */
         if (!strncmp(argv[i], "url=", 4)) url = argv[i] + 4;
     if (!parse_url(url)) {
         printf("bad url: %s (expected https://host[:port]/path)\n", url);
