@@ -38,7 +38,7 @@ python tools/jitter_assess.py jd.log
 
 | Question | Measured | Decision |
 |---|---|---|
-| Non-blocking `net_connect` returns EINPROGRESS and `net_poll(POLLOUT)` signals completion? | yes: `-119`, then POLLOUT, second connect `-127` | non-blocking connect + poll + second connect, as implemented |
+| Non-blocking `net_connect` returns EINPROGRESS and `net_poll(POLLOUT)` signals completion? | partly. `-119` first. `net_poll` wakes at once on a refusal (RST), but **not** when the connect completes: POLLOUT shows up only when the poll times out, so a 5 s timeout meant a 5 s connect. A second `net_connect` returns `-120` (EALREADY) while the connect is running, `-127`/0 once connected, and `-119` again after a refusal, which is a new attempt | poll in 5 ms slices, each followed by a second `net_connect`: EALREADY = keep waiting, connected = done, anything else = fail. Connect now takes 8 ms, a refusal 6 ms (`plat` suite) |
 | IOS error numbers | libogc returns **negated newlib errno values**: EINPROGRESS = 119, EISCONN = 127 (measured); EAGAIN = 11, EALREADY = 120 (same numbering) | `WTLS_IOS_*` in `src/plat/plat.h` |
 | `TCP_NODELAY` accepted? | no: `-109` (ENOPROTOOPT) | not set on the Wii (saves one IPC per connection) |
 | `net_sendto` address length | only 8 (IOS's own IPv4 sockaddr) works; `sizeof(struct sockaddr_in)` = 16 returns `-22` (EINVAL) | pass 8 in `wtls_plat_udp_exchange` |

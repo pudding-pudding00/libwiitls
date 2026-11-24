@@ -21,11 +21,12 @@ TF-PSA-Crypto) and libogc.
   SHA-256 conditioned, fails closed if the tests fail; `wtls_init` spends
   about 400 ms seeding); SNTP clock sync for the often-wrong Wii RTC.
 
-> **Hardware validation pending.** Everything above is built for the Wii and
-> tested on the host (PC) against a local test server. The hardware suites
-> (`tools/hwtest.py`), the real-world suite and the benchmarks have not yet run
-> on a Wii, so the jitter entropy estimate, IOS socket behaviour and all
-> performance numbers are unconfirmed on real hardware.
+> **Validated on a Wii.** The hardware suites pass on a real Wii over Wi-Fi:
+> `plat`, `crypto`, `time`, `tls` and `realworld`, the last against public HTTPS
+> servers. With the default build, a full TLS 1.3 handshake costs about 84 ms of
+> CPU (88 ms wall) and a resumed one about 32 ms. ChaCha20-Poly1305 runs at
+> 24 MB/s and X25519 takes 4.5 ms. The full matrix and the targets that are
+> still missed are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick example
 
