@@ -30,6 +30,7 @@ option(WTLS_BUILD_TESTS "Build libwiitls tests" ${WTLS_BUILD_TESTS_DEFAULT})
 option(WTLS_BN_ASM "PPC32 bignum assembly (MBEDTLS_HAVE_ASM)" ON)
 option(WTLS_P256M "p256-m driver for P-256 (fails to build with 4.1.1 + PK)" OFF)
 option(WTLS_EVEREST "X25519 via Everest/HACL* (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED)" ON)
+option(WTLS_ACCEL "X25519 with 32-bit limbs (src/accel), hooked into Everest" ON)
 set(WTLS_OPT O3 CACHE STRING "Optimisation level for library and Mbed TLS: O2 or O3")
 set_property(CACHE WTLS_OPT PROPERTY STRINGS O2 O3)
 if(NOT WTLS_OPT MATCHES "^O[23]$")
@@ -47,6 +48,12 @@ if(WTLS_P256M)
 endif()
 if(WTLS_EVEREST)
     add_compile_definitions(WTLS_CFG_EVEREST)
+endif()
+if(WTLS_ACCEL)
+    if(NOT WTLS_EVEREST)
+        message(FATAL_ERROR "WTLS_ACCEL=ON needs WTLS_EVEREST=ON: it replaces Everest's X25519")
+    endif()
+    add_compile_definitions(WTLS_ACCEL_X25519)
 endif()
 add_compile_options(-${WTLS_OPT}) # after CMAKE_C_FLAGS_<CONFIG>: the last -O wins (Mbed TLS: below)
 
@@ -139,6 +146,35 @@ if(WTLS_EVEREST)
 " _wtls_src "${_wtls_src}")
         file(WRITE ${_wtls_ecp} "${_wtls_src}")
     endif()
+
+    # With WTLS_ACCEL, Everest's one X25519 entry point (used by the agreement
+    # and, via the patch above, by the public key export) calls the 32-bit-limb
+    # implementation in src/accel instead of HACL*'s 51-bit limbs, which need
+    # emulated 128-bit products on PPC32. Selected by the WTLS_ACCEL_X25519
+    # define, so builds with and without it can share the fetched source.
+    # Pinned by tests/common/crypto_tests.c. Idempotent.
+    set(_wtls_x25519 ${mbedtls_SOURCE_DIR}/tf-psa-crypto/drivers/everest/library/x25519.c)
+    file(READ ${_wtls_x25519} _wtls_src)
+    set(_wtls_marker "/* libwiitls: X25519 via src/accel */")
+    string(FIND "${_wtls_src}" "${_wtls_marker}" _wtls_done)
+    if(_wtls_done LESS 0)
+        set(_wtls_fn "void mbedtls_x25519_scalarmult(")
+        string(FIND "${_wtls_src}" "${_wtls_fn}" _wtls_at_fn)
+        string(FIND "${_wtls_src}" "    Hacl_Curve25519_crypto_scalarmult(out, cp_scalar, cp_point);" _wtls_at_call)
+        if(_wtls_at_fn LESS 0 OR _wtls_at_call LESS 0)
+            message(FATAL_ERROR "WTLS_ACCEL: unexpected layout of ${_wtls_x25519}")
+        endif()
+        string(REPLACE "${_wtls_fn}" "${_wtls_marker}
+void wtls_x25519(uint8_t *out, const uint8_t *scalar, const uint8_t *point);
+
+${_wtls_fn}" _wtls_src "${_wtls_src}")
+        string(REPLACE "    Hacl_Curve25519_crypto_scalarmult(out, cp_scalar, cp_point);" "#if defined(WTLS_ACCEL_X25519)
+    wtls_x25519(out, cp_scalar, cp_point);
+#else
+    Hacl_Curve25519_crypto_scalarmult(out, cp_scalar, cp_point);
+#endif" _wtls_src "${_wtls_src}")
+        file(WRITE ${_wtls_x25519} "${_wtls_src}")
+    endif()
 endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     foreach(t mbedtls mbedx509 tfpsacrypto)
@@ -181,6 +217,11 @@ add_library(wiitls STATIC
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
+if(WTLS_ACCEL)
+    # Called from Everest's mbedtls_x25519_scalarmult (patched above); the
+    # tfpsacrypto -> wiitls link edge below resolves it.
+    target_sources(wiitls PRIVATE src/accel/x25519_fe32.c)
+endif()
 set_target_properties(wiitls PROPERTIES OUTPUT_NAME wiitls PREFIX lib)
 target_include_directories(wiitls
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include

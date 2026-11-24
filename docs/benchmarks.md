@@ -1,8 +1,9 @@
 # libwiitls benchmarks
 
 Status: **measured on a Wii** (2026-11-24, Wi-Fi, PC test server on the same
-network). Defaults are now `WTLS_EVEREST=ON`, `WTLS_OPT=O3`. Gate decision and
-Task 12 ruling: see the end of the Wii results.
+network). Defaults are now `WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`.
+Gate decision, Task 12 ruling and the Task 12 result: see the end of the Wii
+results.
 
 ## How to run
 
@@ -56,6 +57,7 @@ All options apply to libwiitls and the fetched Mbed TLS/TF-PSA-Crypto.
 | `WTLS_P256M` | `MBEDTLS_PSA_P256M_DRIVER_ENABLED`: p256-m for P-256 (does not build, see below) | OFF |
 | `WTLS_EVEREST` | `MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED`: X25519 via Everest/HACL* (big-endian fix patched in at configure time, see below) | ON |
 | `WTLS_OPT` | `O2` or `O3` | `O3` |
+| `WTLS_ACCEL` | X25519 with 32-bit limbs (`src/accel`), hooked into Everest's `mbedtls_x25519_scalarmult`; needs `WTLS_EVEREST` (see "Task 12 result") | ON |
 
 ### Option build check (Wii toolchain, devkitPPC)
 
@@ -202,8 +204,7 @@ Remaining options, not done here:
 - **Fewer IPCs.** A read-ahead buffer in the BIO could merge the
   header/body reads of TLS records (8–12 recv per handshake). It changes what
   `wtls_pending` and the fd's readiness mean, so it needs its own design.
-- **Faster X25519 on PPC** (Task 12's driver): now 9 ms per handshake, the
-  largest part of a resumed one.
+- **Faster X25519 on PPC**: done, see "Task 12 result" below.
 - **Cache verified certificate chains** across connections to the same host.
   This skips one P-256 verify (about 26 ms) per full handshake, but is a
   security policy decision (revocation, expiry, key pinning).
@@ -239,6 +240,46 @@ per handshake (export + agreement; `x25519_keygen_agree` now measures both,
 8.9 ms), about half the resumed handshake's 18 ms CPU and nearly all of its
 10.2 ms crypto. A faster X25519 is therefore the one lever left for the
 resumed target; whether to do Task 12 is up for a new decision.
+
+### Task 12 result: X25519 with 32-bit limbs
+
+Decided: do the X25519 part of Task 12. Everest's HACL* code uses 51-bit limbs;
+without `__int128` on PPC32 every 64×64→128 product is emulated.
+`src/accel/x25519_fe32.c` uses ten limbs of 26/25 bits (the ref10 layout), so
+each product is one `mullw`/`mulhw` pair:
+
+- **Key agreement**: Montgomery ladder per RFC 7748, constant time.
+- **Public key** (point 9): fixed-base comb on the twisted Edwards form,
+  signed radix-16 digits, 64 mixed additions from a 32×8 table and 4 doublings,
+  then u = (1+y)/(1−y). The ladder would cost as much as the agreement.
+- **Generated code**: `tools/gen_fe25519.py` writes the multiply/square
+  (`fe25519_mul.inc`, terms derived from the limb layout instead of
+  hand-copied) and the base table (`ge25519_base.inc`, exact integer
+  arithmetic).
+- **Hook**: a configure-time patch makes Everest's `mbedtls_x25519_scalarmult`
+  call `wtls_x25519`, so the PSA key exchange and the export (both through
+  Everest, see above) use it.
+- **Tests** (`crypto` suite): RFC 7748 §5.2 vectors, the iterated vector
+  (1 and 1000 rounds), §6.1, and comparisons with Everest. There are 6 edge
+  points, plus random scalar/point pairs and random base-point scalars
+  including all-zero and all-one (1000 of each on the host, 100 on the Wii).
+
+Wii, default build (`EVEREST=ON`, `OPT=O3`, `ACCEL=ON`):
+
+| | Everest | 32-bit ladder | + fixed-base comb |
+|---|---|---|---|
+| `x25519_keygen_agree` (keygen + export + agreement) | 8.9 ms | 6.79 ms | **4.60 ms** |
+| export in the handshake (`psa_export_public_key`) | 4.5 ms | 3.4 ms | 1.27 ms |
+| agreement in the handshake (`psa_raw_key_agreement`) | 4.5 ms | 3.4 ms | 3.45 ms |
+| full handshake CPU / wall | — | 68.5 / 80.1 ms | 66.1 / 81.0 ms |
+| resumed handshake CPU / wall | 18 ms CPU | 16.3 / 27.0 ms | 13.6 / 24.7 ms |
+| resumed handshake crypto | 10.2 ms | 8.0 ms | 5.9 ms |
+
+Suites: `crypto` 8/8, `tls` 27/27, bench 9/9. X25519 gate met (4.60 ≤ 5 ms).
+The handshake targets stay missed: the resumed one is now 13.6 ms CPU, of which
+5.2 ms is socket I/O (IPC to IOS), not crypto. The full one is dominated by
+P-256 verification (51 ms). **Ruling: ChaCha20-Poly1305 is not accelerated.**
+At 24 MB/s it is above its target and far above what the Wi-Fi delivers.
 
 ## Results: host smoke run (PC, localhost; not the target)
 

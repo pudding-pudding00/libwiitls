@@ -23,10 +23,11 @@ TF-PSA-Crypto) and libogc.
 
 > **Validated on a Wii.** The hardware suites pass on a real Wii over Wi-Fi:
 > `plat`, `crypto`, `time`, `tls` and `realworld`, the last against public HTTPS
-> servers. With the default build, a full TLS 1.3 handshake costs about 84 ms of
-> CPU (88 ms wall) and a resumed one about 32 ms. ChaCha20-Poly1305 runs at
-> 24 MB/s and X25519 takes 4.5 ms. The full matrix and the targets that are
-> still missed are in [docs/benchmarks.md](docs/benchmarks.md).
+> servers. With the default build, a full TLS 1.3 handshake costs about 66 ms of
+> CPU (81 ms wall) and a resumed one about 14 ms. ChaCha20-Poly1305 runs at
+> 24 MB/s, and an X25519 key exchange (keygen, export, agreement) takes 4.6 ms.
+> The full matrix and the targets that are still missed are in
+> [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Quick example
 
