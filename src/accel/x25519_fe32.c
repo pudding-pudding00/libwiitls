@@ -186,9 +186,19 @@ static void fe_tobytes(uint8_t s[32], const fe f) {
     s[31] = (uint8_t)(u[9] >> 18);
 }
 
+/* Hides v from the optimiser. Without it GCC -O3 for the PPC750 sees that a
+ * mask comes from a 0/1 value and compiles the masked swap back into a branch
+ * on the scalar bit (tools/check_ct.cmake checks the Wii object for that). */
+static inline int32_t value_barrier(int32_t v) {
+#if defined(__GNUC__)
+    __asm__("" : "+r"(v));
+#endif
+    return v;
+}
+
 /* Swap f and g when b == 1, without a branch. */
 static void fe_cswap(fe f, fe g, uint32_t b) {
-    int32_t mask = -(int32_t)b;
+    int32_t mask = value_barrier(-(int32_t)b);
     for (int i = 0; i < 10; i++) {
         int32_t x = mask & (f[i] ^ g[i]);
         f[i] ^= x;
@@ -234,7 +244,7 @@ static void fe_sq2(fe h, const fe f) {
 }
 
 static void fe_cmov(fe f, const fe g, uint32_t b) {
-    int32_t mask = -(int32_t)b;
+    int32_t mask = value_barrier(-(int32_t)b);
     for (int i = 0; i < 10; i++) f[i] ^= mask & (f[i] ^ g[i]);
 }
 

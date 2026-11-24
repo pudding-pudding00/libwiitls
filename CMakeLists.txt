@@ -221,6 +221,15 @@ if(WTLS_ACCEL)
     # Called from Everest's mbedtls_x25519_scalarmult (patched above); the
     # tfpsacrypto -> wiitls link edge below resolves it.
     target_sources(wiitls PRIVATE src/accel/x25519_fe32.c)
+    if(WTLS_PLATFORM STREQUAL "ogc")
+        # The compiler may turn the masked swaps back into branches on the key
+        # bits: fail the build if the PPC code of the ladder/select branches.
+        add_custom_command(TARGET wiitls POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -DOBJDUMP=${CMAKE_OBJDUMP}
+                    "-DOBJECTS=$<FILTER:$<TARGET_OBJECTS:wiitls>,INCLUDE,x25519_fe32>"
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_ct.cmake
+            VERBATIM)
+    endif()
 endif()
 set_target_properties(wiitls PROPERTIES OUTPUT_NAME wiitls PREFIX lib)
 target_include_directories(wiitls
