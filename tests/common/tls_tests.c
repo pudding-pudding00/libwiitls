@@ -13,6 +13,7 @@
 #include "check.h"
 #include "env.h"
 #include "plat/plat.h"
+#include "wtls_dns.h"
 #include "wtls_prof.h"
 #include "wtls_scache.h"
 
@@ -679,6 +680,215 @@ static void test_mtls_resumption_isolated(void) {
     wtls_client_cred_free(a);
 }
 
+/* ---- cooperative cancellation (abort_cb) -------------------------------- */
+
+typedef struct {
+    int calls;
+    int abort_at; /* abort once calls >= abort_at */
+} abort_state;
+
+static bool abort_after_cb(void *ctx) {
+    abort_state *s = ctx;
+    return ++s->calls >= s->abort_at;
+}
+
+static void test_abort_before_connect(void) {
+    abort_state st = {.abort_at = 1};
+    wtls_options o = {0};
+    o.abort_cb = abort_after_cb;
+    o.abort_ctx = &st;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
+    CHECK(c == NULL);
+}
+
+static void test_abort_during_handshake(void) {
+    abort_state st = {.abort_at = 4}; /* past initial + connect, inside handshake steps */
+    wtls_options o = {0};
+    o.no_resumption = true;
+    o.abort_cb = abort_after_cb;
+    o.abort_ctx = &st;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
+    CHECK(c == NULL);
+}
+
+static void test_abort_during_read_poll(void) {
+    abort_state st = {.abort_at = 1000};
+    wtls_options o = {0};
+    o.io_timeout_ms = 5000;
+    o.abort_cb = abort_after_cb;
+    o.abort_ctx = &st;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (!c) return;
+    if (send_str(c, "SILENT\n")) {
+        /* Trigger cancellation after 2 poll slices (~100-200 ms instead of 5000 ms). */
+        st.calls = 0;
+        st.abort_at = 3;
+        char b[16];
+        uint64_t t0 = wtls_plat_now_ms();
+        CHECK_EQ_INT(wtls_read(c, b, sizeof b), WTLS_ERR_CANCELLED);
+        uint64_t dt = wtls_plat_now_ms() - t0;
+        TLOG("    read abort took %u ms\n", (unsigned)dt);
+        CHECK(dt < 1000);
+    }
+    wtls_close(c);
+}
+
+/* ---- multi-IPv4 fallback & wtls_net_reset (WP2) ------------------------- */
+
+static int s_multi_dns_calls;
+static uint32_t s_good_ip_be;
+
+static int multi_fallback_resolver(const char *host, uint32_t *addrs, size_t cap, size_t *count) {
+    (void)host;
+    s_multi_dns_calls++;
+    /* 192.0.2.1 (RFC 5737 TEST-NET-1, blackhole) followed by the real server IP. */
+    uint8_t bad[4] = {192, 0, 2, 1};
+    memcpy(&addrs[0], bad, 4);
+    if (cap >= 2) {
+        addrs[1] = s_good_ip_be;
+        *count = 2;
+    } else {
+        *count = 1;
+    }
+    return WTLS_OK;
+}
+
+static void test_multi_ip_fallback_and_net_reset(void) {
+    if (wtls_plat_resolve(g_env.server_host, &s_good_ip_be) != WTLS_OK) {
+        CHECK(false);
+        return;
+    }
+    wtls_dns_clear();
+    wtls_dns_set_resolver_all(multi_fallback_resolver);
+    s_multi_dns_calls = 0;
+
+    wtls_options o = {0};
+    o.connect_timeout_ms = 300;
+    o.insecure_skip_verify = true; /* synthetic host name */
+    wtls_conn *c = open_tls("fallback.test", P_TLS13_ECDSA, &o);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    CHECK_EQ_INT(s_multi_dns_calls, 1);
+
+    /* Second connect must use ONLY the cached working IP (no resolver call). */
+    c = open_tls("fallback.test", P_TLS13_ECDSA, &o);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    CHECK_EQ_INT(s_multi_dns_calls, 1);
+
+    /* wtls_net_reset() drops the cached working IP, forcing re-resolution. */
+    wtls_net_reset();
+    c = open_tls("fallback.test", P_TLS13_ECDSA, &o);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    CHECK_EQ_INT(s_multi_dns_calls, 2);
+
+    wtls_dns_set_resolver_all(NULL);
+    wtls_dns_clear();
+}
+
+/* ---- SPKI SHA-256 pinning (WP3) ---------------------------------------- */
+
+static bool fetch_spki(const char *name, uint8_t out[WTLS_SPKI_SHA256_LEN]) {
+    char cmd[40];
+    snprintf(cmd, sizeof cmd, "SPKI %s", name);
+    size_t len = 0;
+    uint8_t *buf = plain_fetch(cmd, &len);
+    bool ok = buf && len == WTLS_SPKI_SHA256_LEN;
+    if (ok) memcpy(out, buf, WTLS_SPKI_SHA256_LEN);
+    free(buf);
+    CHECK(ok);
+    return ok;
+}
+
+static void test_spki_pin_leaf_and_ca(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa) || !fetch_spki("test-ca", pin_ca)) return;
+
+    /* Leaf SPKI pin accepts matching server and rejects a different key. */
+    wtls_options o = {0};
+    memcpy(o.spki_pins[0], pin_ecdsa, WTLS_SPKI_SHA256_LEN);
+    o.n_spki_pins = 1;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_RSA, &o), WTLS_ERR_CERT);
+    CHECK(c == NULL);
+    CHECK(wtls_last_verify_flags() & MBEDTLS_X509_BADCERT_OTHER);
+
+    /* Root CA SPKI pin accepts both leaf keys signed by test-ca. */
+    memcpy(o.spki_pins[0], pin_ca, WTLS_SPKI_SHA256_LEN);
+    c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+    c = open_tls(g_env.server_host, P_TLS13_RSA, &o);
+    if (c) wtls_close(c);
+
+    /* Backup pin in slot 1 matches when slot 0 is a retired/dummy pin. */
+    memset(o.spki_pins[0], 0xAA, WTLS_SPKI_SHA256_LEN);
+    memcpy(o.spki_pins[1], pin_ecdsa, WTLS_SPKI_SHA256_LEN);
+    o.n_spki_pins = 2;
+    c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+
+    /* Invalid n_spki_pins is rejected cleanly before dialing. */
+    o.n_spki_pins = WTLS_SPKI_MAX_PINS + 1;
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+
+    /* insecure_skip_verify disables certificate & pin verification. */
+    o.n_spki_pins = 1;
+    o.insecure_skip_verify = true;
+    c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+}
+
+static void test_spki_pin_resumption_isolated(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa) || !fetch_spki("test-ca", pin_ca)) return;
+    wtls_scache_clear();
+
+    wtls_options o_ca = {0};
+    memcpy(o_ca.spki_pins[0], pin_ca, WTLS_SPKI_SHA256_LEN);
+    o_ca.n_spki_pins = 1;
+    wtls_options o_leaf = {0};
+    memcpy(o_leaf.spki_pins[0], pin_ecdsa, WTLS_SPKI_SHA256_LEN);
+    o_leaf.n_spki_pins = 1;
+
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (c) {
+        expect_line(c, "PING\n", "PING"); /* receives server ticket */
+        wtls_close(c);
+    }
+    wtls_conn *d = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_leaf);
+    if (d) {
+        wtls_conn_info info;
+        wtls_get_info(d, &info);
+        CHECK(!info.resumed); /* distinct pin set must not reuse o_ca ticket */
+        wtls_close(d);
+    }
+    wtls_conn *e = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (e) {
+        wtls_conn_info info;
+        wtls_get_info(e, &info);
+        CHECK(info.resumed);
+        wtls_close(e);
+    }
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -724,6 +934,12 @@ void wtls_suite_tls(void) {
     RUN(test_mtls_cert_key_mismatch);
     RUN(test_mtls_free_while_connected);
     RUN(test_mtls_resumption_isolated);
+    RUN(test_abort_before_connect);
+    RUN(test_abort_during_handshake);
+    RUN(test_abort_during_read_poll);
+    RUN(test_multi_ip_fallback_and_net_reset);
+    RUN(test_spki_pin_leaf_and_ca);
+    RUN(test_spki_pin_resumption_isolated);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
     else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();

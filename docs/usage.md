@@ -27,11 +27,24 @@ for the `MBEDTLS_X509_BADCERT_*` flags below); they must match the
 configuration the archives were built with, which the package ships.
 `example/Makefile` in the package builds the example this way.
 
-**From source with CMake** (fetches Mbed TLS on the first configure):
+**As a subdirectory or installed package (`find_package`, 0.4.0):**
 
 ```cmake
+# Subdirectory (fetches Mbed TLS + zlib on the first configure):
 add_subdirectory(third_party/libwiitls)
-target_link_libraries(my_app PRIVATE wiitls)
+target_link_libraries(my_app PRIVATE wiitls::wiitls)
+
+# Or from `cmake --install <build> --prefix <prefix>`:
+find_package(wiitls 0.4 REQUIRED)
+target_link_libraries(my_app PRIVATE wiitls::wiitls)
+```
+
+**On native Windows without MSYS2:** configure Wii builds with Ninja using
+[cmake/wii-win-toolchain.cmake](../cmake/wii-win-toolchain.cmake):
+
+```sh
+cmake -S . -B build-wii-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/wii-win-toolchain.cmake
+cmake --build build-wii-win
 ```
 
 ## 2. Start-up
@@ -62,6 +75,11 @@ Wii's clock is often wrong (dead clock battery, never set). Two strategies:
   `MBEDTLS_X509_BADCERT_EXPIRED` or `_FUTURE` flag. In both cases: sync, retry
   once.
 
+**Network / Wi-Fi changes.** After `net_deinit()` / `net_init()` or switching
+access points, `wtls_net_reset()` flushes the DNS cache and pooled HTTP
+connections (on the Wii, interface IP changes via `net_gethostip()` are also
+detected automatically before new connects).
+
 ## 3. One network thread
 
 libwiitls has no locks. **Every `wtls_*` call must come from the same
@@ -84,7 +102,14 @@ LWP_CreateThread(&th, net_thread, NULL, net_stack, sizeof net_stack, 64);
 ```
 
 64 KiB of stack is enough. [examples/https_get](../examples/https_get/main.c)
-is a complete program with this structure.
+shows a spinner UI thread + network LWP thread;
+[examples/upload_mtls_abort](../examples/upload_mtls_abort/main.c) adds
+streaming uploads, optional mTLS/SPKI pinning, progress reporting, and
+Wiimote/GC cancellation.
+
+In `Debug` builds (or with `-DWTLS_THREAD_CHECK=ON`), libwiitls checks on every
+public entry point that the caller matches the thread bound by `wtls_init()` and
+aborts immediately on misuse.
 
 ## 4. A request
 
@@ -265,6 +290,12 @@ Points that trip people up:
 - **Timeouts:** `req.tls` (a `wtls_options`) sets connect and I/O timeouts,
   `req.header_timeout_ms` (default 15 s) the time from sending the request to
   the complete response head.
+- **Cooperative cancellation & progress (0.4.0):** set
+  `opt.abort_cb` / `opt.abort_ctx` in `wtls_options` (shared via `req.tls` for
+  both `https://` and `http://`). Polling sleeps in <= 100 ms slices, so
+  pressing **B/HOME** cancels blocked connects, handshakes, header waits, or
+  reads promptly with `WTLS_ERR_CANCELLED`. In `wtls_http_fetch`, set
+  `req.progress_cb` to track `(done, total_or_minus_one)` bytes received.
 
 Limits: URL 8 KiB; request and response head 16 KiB each; 100 response
 header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
@@ -362,11 +393,34 @@ the certificate's fingerprint: a connection with one identity never resumes
 or reuses a connection of another. And like `Authorization` and `Cookie`,
 the client certificate is stripped when a redirect leaves the origin.
 
+### Public-key (SPKI) pinning (0.4.0)
+
+In addition to normal chain + date + hostname verification, you can pin up to
+`WTLS_SPKI_MAX_PINS` (2: primary + backup) SHA-256 digests of ASN.1 DER
+`SubjectPublicKeyInfo`:
+
+```c
+static const uint8_t k_pin_primary[WTLS_SPKI_SHA256_LEN] = { /* 32 bytes */ };
+static const uint8_t k_pin_backup[WTLS_SPKI_SHA256_LEN]  = { /* 32 bytes */ };
+
+wtls_options opt = {0};
+memcpy(opt.spki_pins[0], k_pin_primary, WTLS_SPKI_SHA256_LEN);
+memcpy(opt.spki_pins[1], k_pin_backup,  WTLS_SPKI_SHA256_LEN);
+opt.n_spki_pins = 2;
+```
+
+Matches if any verified chain certificate (leaf, intermediate, or trusted root)
+matches a configured pin; mismatches fail with `WTLS_ERR_CERT`
+(`MBEDTLS_X509_BADCERT_OTHER` set in `wtls_last_verify_flags()`). Pin sets are
+isolated in both TLS session tickets and the HTTP keep-alive pool.
+
 ## 9. What to do with each error
 
 | Return | Typical cause | What your app should do |
 |--------|---------------|-------------------------|
-| `WTLS_ERR_NET` | `net_init` not done or failed | bring the network up first |
+| `WTLS_ERR_ARG` | -10 | check arguments / counts |
+| `WTLS_ERR_CANCELLED` | -13 | `abort_cb` returned `true`: clean up without retry |
+| `WTLS_ERR_NET` | -30 | `net_init` not done or failed | bring the network up first |
 | `WTLS_ERR_ENTROPY` | random generator health test failed | no TLS; show an error |
 | `WTLS_ERR_CLOCK` | Wii clock far off | `wtls_time_sync_sntp`, retry once |
 | `WTLS_ERR_DNS` | no such host, no DNS | show "host not found" |
@@ -406,3 +460,11 @@ called again afterwards.
 - **Single thread**, see 3.
 - **Memory:** each connection holds Mbed TLS's record buffers (two 16 KiB
   buffers plus overhead), allocated from the normal heap.
+
+## 12. Version check & struct compatibility (SemVer contract)
+
+Check the compiled library version against header macros via `wtls_version()`
+(`WTLS_VERSION_MAJOR`, `WTLS_VERSION_MINOR`, `WTLS_VERSION_PATCH`). Always
+zero-initialize option and request structs (`wtls_options opt = {0};`,
+`wtls_http_request req = {0};`) — future minor releases may only append new
+fields whose zero value preserves prior default behavior.

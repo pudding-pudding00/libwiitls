@@ -279,6 +279,59 @@ static void test_send_truthfulness(void) {
     wtls_plat_close(fd);
 }
 
+/* Stalled peer: server accepts and stops reading; wtls_plat_send must not hang
+ * indefinitely (returns WTLS_WANT_WRITE on host, or either WANT_WRITE or
+ * bounded WTLS_ERR_IO when IOS POLLOUT fires on a partial <2048 B tail). */
+static void test_stalled_peer_nonblocking(void) {
+    int fd = connect_echo();
+    if (fd < 0) return;
+    CHECK(send_str(fd, "STALL\n"));
+    static uint8_t buf[16384];
+    memset(buf, 0x5A, sizeof buf);
+    uint64_t deadline = wtls_plat_now_ms() + 2000;
+    bool got_want_write = false;
+    int last_r = 0;
+    size_t sent = 0;
+    while (sent < 8u * 1024u * 1024u && wtls_plat_now_ms() < deadline) {
+        int r = wtls_plat_send(fd, buf, sizeof buf);
+        last_r = r;
+        if (r > 0) {
+            sent += (size_t)r;
+        } else if (r == WTLS_WANT_WRITE) {
+            got_want_write = true;
+            break;
+        } else {
+            break;
+        }
+    }
+    TLOG("    stalled peer: sent %u B before WANT_WRITE=%d last=%d\n",
+         (unsigned)sent, (int)got_want_write, last_r);
+    if (!g_env.is_hw) {
+        CHECK(got_want_write);
+    } else {
+        CHECK(got_want_write || last_r == WTLS_ERR_IO);
+    }
+    int pr = wtls_plat_poll(fd, false, true, 50);
+    CHECK(pr >= 0);
+    if (pr == 1) {
+        size_t extra = 0;
+        bool blocked_again = false;
+        while (extra < 512u * 1024u) {
+            int r2 = wtls_plat_send(fd, buf, 1024);
+            if (r2 > 0) extra += (size_t)r2;
+            else if (r2 == WTLS_WANT_WRITE) {
+                blocked_again = true;
+                break;
+            } else {
+                break;
+            }
+        }
+        TLOG("    poll was writable once; drained %u B (WANT_WRITE=%d)\n",
+             (unsigned)extra, (int)blocked_again);
+    }
+    wtls_plat_close(fd);
+}
+
 void wtls_suite_plat(void) {
     CHECK_EQ_INT(wtls_plat_init(), WTLS_OK);
     RUN(test_ios_io_result);
@@ -294,4 +347,5 @@ void wtls_suite_plat(void) {
     if (!g_env.is_hw) RUN(test_resolve_localhost);
     RUN(hw_four_parallel_connections);
     RUN(test_send_truthfulness);
+    RUN(test_stalled_peer_nonblocking);
 }

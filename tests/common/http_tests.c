@@ -1571,6 +1571,274 @@ static void http_mtls_free_while_pooled(void) {
     CHECK_EQ_INT(get_full("/hello", NULL, hello, sizeof hello, NULL), 200);
 }
 
+/* ---- cooperative abort_cb & download progress_cb (WP1) ------------------- */
+
+typedef struct {
+    int calls;
+    int abort_at;
+} http_abort_state;
+
+static bool http_abort_cb(void *ctx) {
+    http_abort_state *s = ctx;
+    return ++s->calls >= s->abort_at;
+}
+
+static void http_abort_slowhead(void) {
+    wtls_http_pool_flush();
+    http_abort_state st = {.abort_at = 1000};
+    wtls_options opt = {0};
+    opt.abort_cb = http_abort_cb;
+    opt.abort_ctx = &st;
+    /* warm handshake first? no, abort during slowhead poll after handshake */
+    st.abort_at = 20; /* allow connect+send, then abort inside read_head poll */
+    wtls_http_request req = {0};
+    req.url = url("/slowhead");
+    req.header_timeout_ms = 5000;
+    req.tls = &opt;
+    wtls_http_response *r = (wtls_http_response *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CANCELLED);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    TLOG("    http slowhead abort took %u ms\n", (unsigned)dt);
+    CHECK(dt < 1500);
+    CHECK(r == NULL);
+}
+
+static void http_abort_plain(void) {
+    wtls_http_pool_flush();
+    http_abort_state st = {.abort_at = 6};
+    wtls_options opt = {0};
+    opt.abort_cb = http_abort_cb;
+    opt.abort_ctx = &st;
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/slowhead");
+    req.header_timeout_ms = 5000;
+    req.tls = &opt;
+    wtls_http_response *r = (wtls_http_response *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CANCELLED);
+    CHECK(wtls_plat_now_ms() - t0 < 1500);
+    CHECK(r == NULL);
+}
+
+static void http_abort_read_not_pooled(void) {
+    wtls_http_pool_flush();
+    http_abort_state st = {.abort_at = 1000};
+    wtls_options opt = {0};
+    opt.io_timeout_ms = 5000;
+    opt.abort_cb = http_abort_cb;
+    opt.abort_ctx = &st;
+    wtls_http_request req = {0};
+    req.url = url("/slowbody?ms=1000");
+    req.tls = &opt;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    st.calls = 0;
+    st.abort_at = 3;
+    char buf[16];
+    CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), WTLS_ERR_CANCELLED);
+    CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), WTLS_ERR_CANCELLED); /* sticky */
+    wtls_http_close(r);
+    /* Cancelled connections must not go back into the pool. */
+    char body[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+}
+
+static bool http_abort_after_upload_chunks(void *ctx) {
+    const up_state *us = ctx;
+    return us->calls >= 4;
+}
+
+static void http_abort_upload(void) {
+    wtls_http_pool_flush();
+    up_state us = {.len = 128u * 1024u, .piece = 4096u, .abort_after = -1};
+    wtls_options opt = {0};
+    opt.abort_cb = http_abort_after_upload_chunks;
+    opt.abort_ctx = &us;
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url("/echo");
+    req.tls = &opt;
+    req.body_cb = up_cb;
+    req.body_ctx = &us;
+    req.body_len = us.len;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CANCELLED);
+    CHECK_EQ_INT(us.calls, 4);
+    CHECK(r == NULL);
+}
+
+static void http_net_reset_flushes_pool(void) {
+    wtls_http_pool_flush();
+    char body[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+    wtls_net_reset();
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+}
+
+typedef struct {
+    int calls;
+    size_t last_done;
+    int64_t last_total;
+    bool monotonic;
+    bool same_total;
+} prog_state;
+
+static void test_prog_cb(void *ctx, size_t done, int64_t total) {
+    prog_state *p = ctx;
+    if (p->calls == 0) p->last_total = total;
+    if (total != p->last_total) p->same_total = false;
+    if (done < p->last_done) p->monotonic = false;
+    p->last_done = done;
+    p->calls++;
+}
+
+static void http_fetch_progress(void) {
+    wtls_http_pool_flush();
+    prog_state ps = {.monotonic = true, .same_total = true};
+    wtls_http_request req = {0};
+    req.url = url("/len?n=40000");
+    req.progress_cb = test_prog_cb;
+    req.progress_ctx = &ps;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 0, &res), WTLS_OK);
+    CHECK(ps.calls >= 1 && ps.monotonic && ps.same_total);
+    CHECK_EQ_INT((long long)ps.last_done, 40000);
+    CHECK_EQ_INT((long long)ps.last_total, 40000);
+    wtls_http_result_free(&res);
+
+    /* chunked: unknown total (-1) */
+    ps = (prog_state){.monotonic = true, .same_total = true};
+    req.url = url("/chunked?n=20000&size=1234");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 0, &res), WTLS_OK);
+    CHECK(ps.calls >= 1 && ps.monotonic && ps.same_total);
+    CHECK_EQ_INT((long long)ps.last_done, 20000);
+    CHECK_EQ_INT((long long)ps.last_total, -1);
+    wtls_http_result_free(&res);
+
+    /* empty 204: called once with (0, 0) */
+    ps = (prog_state){.monotonic = true, .same_total = true};
+    req.url = url("/status?code=204");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 0, &res), WTLS_OK);
+    CHECK_EQ_INT(ps.calls, 1);
+    CHECK_EQ_INT((long long)ps.last_done, 0);
+    CHECK_EQ_INT((long long)ps.last_total, 0);
+    wtls_http_result_free(&res);
+}
+
+/* ---- SPKI SHA-256 pinning over HTTP (WP3) ------------------------------ */
+
+static bool http_fetch_spki(const char *name, uint8_t out[WTLS_SPKI_SHA256_LEN]) {
+    char cmd[40];
+    snprintf(cmd, sizeof cmd, "SPKI %s", name);
+    size_t len = 0;
+    uint8_t *buf = cred_fetch(cmd, &len);
+    bool ok = buf && len == WTLS_SPKI_SHA256_LEN;
+    if (ok) memcpy(out, buf, WTLS_SPKI_SHA256_LEN);
+    free(buf);
+    CHECK(ok);
+    return ok;
+}
+
+static void http_spki_pin_ca_and_mismatch(void) {
+    wtls_http_pool_flush();
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!http_fetch_spki("test-ca", pin_ca)) return;
+
+    wtls_options opt = {0};
+    memcpy(opt.spki_pins[0], pin_ca, WTLS_SPKI_SHA256_LEN);
+    opt.n_spki_pins = 1;
+    wtls_http_request req = {0};
+    req.url = url("/hello");
+    req.tls = &opt;
+    wtls_http_response *r = open_req(&req);
+    if (r) {
+        int last = 1;
+        CHECK(strcmp(body_str(r, &last), "hello") == 0);
+        CHECK_EQ_INT(last, 0);
+        wtls_http_close(r);
+    }
+
+    memset(opt.spki_pins[0], 0x55, WTLS_SPKI_SHA256_LEN);
+    r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CERT);
+    CHECK(r == NULL);
+
+    /* Backup pin in slot 1 recovers cleanly. */
+    memcpy(opt.spki_pins[1], pin_ca, WTLS_SPKI_SHA256_LEN);
+    opt.n_spki_pins = 2;
+    r = open_req(&req);
+    if (r) wtls_http_close(r);
+
+    opt.n_spki_pins = WTLS_SPKI_MAX_PINS + 1;
+    r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_ARG);
+    CHECK(r == NULL);
+}
+
+static void http_spki_pin_pool_and_redirect(void) {
+    wtls_http_pool_flush();
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!http_fetch_spki("test-ca", pin_ca)) return;
+
+    wtls_options opt = {0};
+    memcpy(opt.spki_pins[0], pin_ca, WTLS_SPKI_SHA256_LEN);
+    opt.n_spki_pins = 1;
+    wtls_http_request req = {0};
+    req.url = url("/conn");
+    req.tls = &opt;
+    wtls_http_response *r = open_req(&req);
+    if (r) {
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(!info.reused_connection);
+        int last = 1;
+        body_str(r, &last);
+        wtls_http_close(r);
+    }
+
+    /* Unpinned request must not reuse a pinned pooled connection. */
+    req.tls = NULL;
+    r = open_req(&req);
+    if (r) {
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(!info.reused_connection);
+        int last = 1;
+        body_str(r, &last);
+        wtls_http_close(r);
+    }
+
+    /* Second pinned request reuses the pinned connection. */
+    req.tls = &opt;
+    r = open_req(&req);
+    if (r) {
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(info.reused_connection);
+        int last = 1;
+        body_str(r, &last);
+        wtls_http_close(r);
+    }
+
+    /* SPKI pins remain enforced across HTTP -> HTTPS redirects. */
+    req.url = url_of("http", P_HTTP_PLAIN, redirect_path(302, url("/hello")));
+    r = open_req(&req);
+    if (r) {
+        CHECK_EQ_INT(wtls_http_status(r), 200);
+        wtls_http_close(r);
+    }
+    memset(opt.spki_pins[0], 0x55, WTLS_SPKI_SHA256_LEN);
+    r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CERT);
+    CHECK(r == NULL);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -1614,6 +1882,14 @@ void wtls_suite_http(void) {
     RUN(http_mtls_cross_origin_stripped);
     RUN(http_mtls_upload);
     RUN(http_mtls_free_while_pooled);
+    RUN(http_abort_slowhead);
+    RUN(http_abort_plain);
+    RUN(http_abort_read_not_pooled);
+    RUN(http_abort_upload);
+    RUN(http_fetch_progress);
+    RUN(http_net_reset_flushes_pool);
+    RUN(http_spki_pin_ca_and_mismatch);
+    RUN(http_spki_pin_pool_and_redirect);
     RUN(http_request_headers);
     RUN(http_get_info);
     RUN(http_alpn_forced);
