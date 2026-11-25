@@ -49,6 +49,7 @@ static void test_url_encode_args(void) {
     size_t need = 99;
     CHECK_EQ_INT(wtls_http_url_encode(NULL, 0, NULL, 0, &need), WTLS_ERR_ARG);
     CHECK_EQ_INT(wtls_http_url_encode("a", 1, NULL, 0, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_url_encode("a", SIZE_MAX, NULL, 0, &need), WTLS_ERR_HTTP_LIMIT);
     char buf[4];
     /* exactly fitting buffer is fine, empty input included */
     CHECK_EQ_INT(wtls_http_url_encode("abc", 3, buf, 4, &need), WTLS_OK);

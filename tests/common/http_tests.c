@@ -1149,6 +1149,35 @@ static void http_upload_empty_chunked(void) {
     wtls_http_close(r);
 }
 
+static void http_upload_empty_fixed(void) {
+    wtls_http_pool_flush();
+    up_state s = {.abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 0;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "") == 0);
+    CHECK_EQ_INT(last, 0);
+    CHECK_EQ_INT(s.calls, 0); /* 0-byte fixed-length body needs no callback read */
+    wtls_http_close(r);
+}
+
+static void http_null_headers_nonzero_count(void) {
+    wtls_http_request req = {0};
+    req.url = url("/hello");
+    req.headers = NULL;
+    req.n_headers = 2;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_ARG);
+    CHECK(r == NULL);
+}
+
 static void http_upload_premature_eof(void) {
     wtls_http_pool_flush();
     up_state s = {.len = 100, .piece = 50, .premature_eof = true, .abort_after = -1};
@@ -1644,6 +1673,20 @@ static void http_abort_read_not_pooled(void) {
     bool reused = true;
     CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
     CHECK(!reused);
+
+    /* Immediate abort at wtls_http_read() entry also marks TLS connection aborted. */
+    st.calls = 0;
+    st.abort_at = 1000;
+    r = open_req(&req);
+    if (!r) return;
+    st.calls = 0;
+    st.abort_at = 1;
+    CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), WTLS_ERR_CANCELLED);
+    CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), WTLS_ERR_CANCELLED);
+    wtls_http_close(r);
+    reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
 }
 
 static bool http_abort_after_upload_chunks(void *ctx) {
@@ -1837,6 +1880,27 @@ static void http_spki_pin_pool_and_redirect(void) {
     r = (wtls_http_response *)1;
     CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_CERT);
     CHECK(r == NULL);
+
+    /* Plain http:// hops do not partition their keep-alive pool by TLS pins. */
+    wtls_http_pool_flush();
+    wtls_http_request preq = {0};
+    preq.url = url_of("http", P_HTTP_PLAIN, "/conn");
+    r = open_req(&preq);
+    if (r) {
+        int last = 1;
+        body_str(r, &last);
+        wtls_http_close(r);
+    }
+    preq.tls = &opt;
+    r = open_req(&preq);
+    if (r) {
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(!info.secure && info.reused_connection);
+        int last = 1;
+        body_str(r, &last);
+        wtls_http_close(r);
+    }
 }
 
 void wtls_suite_http(void) {
@@ -1868,6 +1932,8 @@ void wtls_suite_http(void) {
     RUN(http_upload_body_cb_fixed);
     RUN(http_upload_body_cb_chunked);
     RUN(http_upload_empty_chunked);
+    RUN(http_upload_empty_fixed);
+    RUN(http_null_headers_nonzero_count);
     RUN(http_upload_premature_eof);
     RUN(http_upload_callback_abort);
     RUN(http_upload_307_redirect);

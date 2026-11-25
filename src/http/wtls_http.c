@@ -28,6 +28,7 @@
 
 #define HEAD_BUF_START 2048u
 #define SINGLE_WRITE_MAX 16384u
+#define UPLOAD_BUF_SIZE 16384u
 
 /* wtls_conn_info.alpn points into this list, so it must outlive every connection. */
 static const char *const k_alpn[] = {"http/1.1", NULL};
@@ -155,6 +156,10 @@ static void tr_set_abort(http_tr *t, wtls_abort_cb cb, void *ctx) {
     }
 }
 
+static void tr_mark_aborted(http_tr *t) {
+    if (t && t->tls) t->tls->aborted = true;
+}
+
 void wtls_http_tr_close(void *c) {
     http_tr *t = c;
     if (!t) return;
@@ -260,37 +265,71 @@ typedef struct {
  * early, writes more than asked or returns <0 aborts the request with
  * WTLS_ERR_IO; the caller then closes the connection (never pools it). */
 static int send_body_cb(http_tr *c, request_ctx *x) {
-    uint8_t buf[16384]; /* one TLS record's worth: fewest IOS round trips */
+    if (!x->body_chunked && x->body_len == 0) return WTLS_OK;
+    /* Heap-allocated to keep 16 KiB off Wii LWP network-thread stacks. */
+    uint8_t *buf = malloc(UPLOAD_BUF_SIZE);
+    if (!buf) return WTLS_ERR_NOMEM;
     size_t left = x->body_len;
+    int ret = WTLS_OK;
     for (;;) {
-        if (x->opt.abort_cb && x->opt.abort_cb(x->opt.abort_ctx)) return WTLS_ERR_CANCELLED;
-        size_t want = sizeof buf;
+        if (x->opt.abort_cb && x->opt.abort_cb(x->opt.abort_ctx)) {
+            tr_mark_aborted(c);
+            ret = WTLS_ERR_CANCELLED;
+            break;
+        }
+        size_t want = UPLOAD_BUF_SIZE;
         if (!x->body_chunked && want > left) want = left;
         x->cb_started = true;
         int k = x->body_cb(x->body_ctx, buf, want);
-        if (k < 0 || (size_t)k > want) return WTLS_ERR_IO;
+        if (k < 0 || (size_t)k > want) {
+            ret = WTLS_ERR_IO;
+            break;
+        }
         if (!x->body_chunked) {
-            if (k == 0) return WTLS_ERR_IO; /* short of body_len: no rewind */
+            if (k == 0) {
+                ret = WTLS_ERR_IO; /* short of body_len: no rewind */
+                break;
+            }
             int st = tr_write_all(c, buf, (size_t)k);
-            if (st != WTLS_OK) return st;
+            if (st != WTLS_OK) {
+                ret = st;
+                break;
+            }
             left -= (size_t)k;
-            if (!left) return WTLS_OK;
+            if (!left) break;
             continue;
         }
-        if (k == 0) return tr_write_all(c, "0\r\n\r\n", 5);
+        if (k == 0) {
+            ret = tr_write_all(c, "0\r\n\r\n", 5);
+            break;
+        }
         char hex[10];
         int n = snprintf(hex, sizeof hex, "%x\r\n", (unsigned)k);
         int st = tr_write_all(c, hex, (size_t)n);
-        if (st != WTLS_OK) return st;
+        if (st != WTLS_OK) {
+            ret = st;
+            break;
+        }
         st = tr_write_all(c, buf, (size_t)k);
-        if (st != WTLS_OK) return st;
+        if (st != WTLS_OK) {
+            ret = st;
+            break;
+        }
         st = tr_write_all(c, "\r\n", 2);
-        if (st != WTLS_OK) return st;
+        if (st != WTLS_OK) {
+            ret = st;
+            break;
+        }
     }
+    free(buf);
+    return ret;
 }
 
 static int send_request(http_tr *c, request_ctx *x) {
-    if (x->opt.abort_cb && x->opt.abort_cb(x->opt.abort_ctx)) return WTLS_ERR_CANCELLED;
+    if (x->opt.abort_cb && x->opt.abort_cb(x->opt.abort_ctx)) {
+        tr_mark_aborted(c);
+        return WTLS_ERR_CANCELLED;
+    }
     size_t body_len = x->body ? x->body_len : 0;
     if (body_len && x->head_len + body_len <= SINGLE_WRITE_MAX) {
         char *all = malloc(x->head_len + body_len);
@@ -318,7 +357,10 @@ static int read_head(wtls_http_response *r, uint32_t timeout_ms, bool *got) {
     uint64_t deadline = wtls_plat_now_ms() + timeout_ms;
     int interim = 0;
     for (;;) {
-        if (r->abort_cb && r->abort_cb(r->abort_ctx)) return WTLS_ERR_CANCELLED;
+        if (r->abort_cb && r->abort_cb(r->abort_ctx)) {
+            tr_mark_aborted(r->conn);
+            return WTLS_ERR_CANCELLED;
+        }
         size_t end = wtls_http_head_end(buf, fill);
         if (end) {
             int st = wtls_http_parse_head(buf, end, &r->head);
@@ -445,12 +487,16 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     r->secure = u->secure;
     r->port = u->port;
     memcpy(r->host, u->host, sizeof r->host);
-    /* this hop's client + pin identity: part of the pool key (see acquire) */
-    st = wtls_conn_identity_fp(&x->opt, &r->has_cred, r->cred_fp);
-    if (st != WTLS_OK) {
-        free(head);
-        x->head = NULL;
-        return st;
+    /* this hop's client + pin identity: part of the pool key for HTTPS hops */
+    if (u->secure) {
+        st = wtls_conn_identity_fp(&x->opt, &r->has_cred, r->cred_fp);
+        if (st != WTLS_OK) {
+            free(head);
+            x->head = NULL;
+            return st;
+        }
+    } else {
+        r->has_cred = false;
     }
     r->head_request = strcmp(x->method, "HEAD") == 0;
     r->err = 0;
@@ -594,6 +640,7 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
     if (!wtls_core_initialized()) return WTLS_ERR_STATE;
     if (!WTLS_THREAD_GUARD("wtls_http_open")) return WTLS_ERR_STATE;
     if (wtls_plat_net_changed()) wtls_net_reset();
+    if (req->n_headers && !req->headers) return WTLS_ERR_ARG;
     if (req->body_len && !req->body && !req->body_cb) return WTLS_ERR_ARG;
     if (req->body && req->body_cb) return WTLS_ERR_ARG;
     if (req->body_chunked && !req->body_cb) return WTLS_ERR_ARG;
@@ -802,7 +849,10 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     if (!r || (!buf && len)) return WTLS_ERR_ARG;
     if (!WTLS_THREAD_GUARD("wtls_http_read")) return WTLS_ERR_STATE;
     if (r->err) return r->err;
-    if (r->abort_cb && r->abort_cb(r->abort_ctx)) return fail(r, WTLS_ERR_CANCELLED);
+    if (r->abort_cb && r->abort_cb(r->abort_ctx)) {
+        tr_mark_aborted(r->conn);
+        return fail(r, WTLS_ERR_CANCELLED);
+    }
     if (!len) return 0;
     if (len > INT_MAX) len = INT_MAX;
 #if WTLS_GZIP

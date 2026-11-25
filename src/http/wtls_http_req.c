@@ -32,6 +32,7 @@ static bool value_ok(const char *v) {
 }
 
 bool wtls_http_headers_have(const wtls_http_header *h, size_t n, const char *name) {
+    if (!h || !name) return false;
     for (size_t i = 0; i < n; i++)
         if (h[i].name && wtls_http_ieq(h[i].name, name)) return true;
     return false;

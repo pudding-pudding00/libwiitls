@@ -67,7 +67,8 @@ typedef struct {
     bool no_gzip;                    /**< do not offer gzip; bodies are returned as sent */
     const wtls_options *tls;         /**< NULL => defaults; ALPN is always "http/1.1"; for http:// only
                                           connect_timeout_ms, io_timeout_ms, and abort_cb/abort_ctx are used */
-    wtls_http_body_cb body_cb;        /**< streaming upload; mutually exclusive with body */
+    wtls_http_body_cb body_cb;        /**< streaming upload; mutually exclusive with body (when body_len == 0
+                                           and !body_chunked, sends Content-Length: 0 without invoking body_cb) */
     void *body_ctx;                   /**< opaque pointer passed to body_cb */
     bool body_chunked;                /**< with body_cb: send Transfer-Encoding: chunked (no Content-Length;
                                           the callback ends the body by returning 0) */
@@ -127,7 +128,8 @@ void wtls_http_close(wtls_http_response *r);
 
 /** Result of wtls_http_fetch(). */
 typedef struct {
-    int status;      /**< HTTP status */
+    int status;      /**< HTTP status (0 if the response head was not received; may still be set on
+                          post-head errors such as WTLS_ERR_HTTP_LIMIT) */
     char *body;      /**< NUL-terminated (NUL not counted in body_len); NULL on error */
     size_t body_len;
 } wtls_http_result;

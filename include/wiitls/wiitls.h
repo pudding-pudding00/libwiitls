@@ -103,9 +103,9 @@ typedef struct {
                                          must stay valid until wtls_close() */
     bool no_resumption;             /**< neither use nor store session tickets */
     bool insecure_skip_verify;      /**< TESTS ONLY: disables certificate verification; implies no_resumption */
-    const wtls_client_cred *client_cred; /**< NULL => no client certificate; must stay valid (see
-                                              wtls_client_cred_free) for as long as any connection,
-                                              pooled or active, uses it */
+    const wtls_client_cred *client_cred; /**< NULL => no client certificate; connections retain an internal
+                                              reference, so wtls_client_cred_free() may be called while
+                                              connections still use it */
     wtls_abort_cb abort_cb;         /**< NULL => no cancellation callback */
     void *abort_ctx;                /**< opaque pointer passed to abort_cb */
     uint8_t spki_pins[WTLS_SPKI_MAX_PINS][WTLS_SPKI_SHA256_LEN]; /**< optional SHA-256 digests of DER

@@ -42,6 +42,7 @@ if [ -d build-host/_deps/mbedtls-src ]; then MBED="$ROOT/build-host/_deps/mbedtl
 
 mkdir -p "$OUT/example" "$OUT/docs" "$OUT/licenses"
 cmake --install "$BUILD" --prefix "$ROOT/$OUT" >/dev/null
+rm -f "$OUT/lib/libmbedcrypto.a" # CMake < 3.28 cannot EXCLUDE_FROM_ALL Mbed TLS's legacy alias
 test -f "$OUT/include/wiitls/http.h" || { echo "include/wiitls/http.h missing from the package" >&2; exit 1; }
 test -f "$OUT/lib/cmake/wiitls/wiitlsConfig.cmake" || { echo "wiitlsConfig.cmake missing from the package" >&2; exit 1; }
 
@@ -101,10 +102,10 @@ rm -f "$OUT/example/https_get.elf"
 CMAKE_CHK="$BUILD/consumer-check"
 rm -rf "$CMAKE_CHK"
 mkdir -p "$CMAKE_CHK"
-cat > "$CMAKE_CHK/CMakeLists.txt" <<'EOF'
+cat > "$CMAKE_CHK/CMakeLists.txt" <<EOF
 cmake_minimum_required(VERSION 3.20)
 project(wtls_pkg_check C)
-find_package(wiitls 0.4 REQUIRED)
+find_package(wiitls $VERSION REQUIRED)
 add_executable(pkg_check main.c)
 target_link_libraries(pkg_check PRIVATE wiitls::wiitls)
 ogc_create_dol(pkg_check)

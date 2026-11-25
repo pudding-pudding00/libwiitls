@@ -73,12 +73,20 @@ set(GEN_FILES OFF CACHE BOOL "" FORCE)
 set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+set(INSTALL_MBEDTLS_HEADERS OFF CACHE BOOL "" FORCE)
+set(INSTALL_TF_PSA_CRYPTO_HEADERS OFF CACHE BOOL "" FORCE)
 set(MBEDTLS_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/config/wtls_mbedtls_config.h" CACHE FILEPATH "" FORCE)
 set(TF_PSA_CRYPTO_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/config/wtls_crypto_config.h" CACHE FILEPATH "" FORCE)
+set(_wtls_mbedtls_extra_args)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+    list(APPEND _wtls_mbedtls_extra_args EXCLUDE_FROM_ALL)
+endif()
 FetchContent_Declare(mbedtls
     URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.1/mbedtls-4.1.1.tar.bz2
     URL_HASH SHA256=3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    ${_wtls_mbedtls_extra_args}
 )
 FetchContent_MakeAvailable(mbedtls)
 
@@ -552,7 +560,7 @@ if(WTLS_BUILD_FUZZ)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "WTLS_BUILD_FUZZ=ON requires Clang (-DCMAKE_C_COMPILER=clang)")
     endif()
-    foreach(t wiitls mbedtls mbedx509 tfpsacrypto builtin everest platform utilities extras pqcp)
+    foreach(t wiitls wtls_zlib mbedtls mbedx509 tfpsacrypto builtin everest platform utilities extras pqcp)
         if(TARGET ${t})
             target_compile_options(${t} PRIVATE -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
         endif()

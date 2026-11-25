@@ -99,6 +99,8 @@ static void test_req_gzip(void) {
     CHECK(wtls_http_headers_have(hd, 1, "Accept-Encoding"));
     CHECK(!wtls_http_headers_have(hd, 1, "Accept"));
     CHECK(!wtls_http_headers_have(NULL, 0, "Accept"));
+    CHECK(!wtls_http_headers_have(NULL, 3, "Accept"));
+    CHECK(!wtls_http_headers_have(hd, 1, NULL));
 }
 
 static void test_req_rejects(void) {

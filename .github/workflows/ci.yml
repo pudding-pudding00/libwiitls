@@ -22,11 +22,12 @@ jobs:
           test -f build-wii/examples/upload_mtls_abort/upload_mtls_abort.dol
       - name: Verify install package (find_package)
         run: |
+          VER=$(sed -n 's/^project(libwiitls VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           cmake --install build-wii --prefix dist-wii
-          mkdir -p test-consumer-wii && cat > test-consumer-wii/CMakeLists.txt <<'EOF'
+          mkdir -p test-consumer-wii && cat > test-consumer-wii/CMakeLists.txt <<EOF
           cmake_minimum_required(VERSION 3.20)
           project(wtls_consumer_wii C)
-          find_package(wiitls 0.4 REQUIRED)
+          find_package(wiitls ${VER} REQUIRED)
           add_executable(consumer main.c)
           target_link_libraries(consumer PRIVATE wiitls::wiitls)
           ogc_create_dol(consumer)
@@ -54,11 +55,12 @@ jobs:
           ctest --test-dir build-debug -R "^(test_thread|test_smoke|test_tls|test_http)$" --output-on-failure
       - name: Verify install package (find_package)
         run: |
+          VER=$(sed -n 's/^project(libwiitls VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           cmake --install build-host --prefix dist-host
-          mkdir -p test-consumer && cat > test-consumer/CMakeLists.txt <<'EOF'
+          mkdir -p test-consumer && cat > test-consumer/CMakeLists.txt <<EOF
           cmake_minimum_required(VERSION 3.20)
           project(wtls_consumer C)
-          find_package(wiitls 0.4 REQUIRED)
+          find_package(wiitls ${VER} REQUIRED)
           add_executable(consumer main.c)
           target_link_libraries(consumer PRIVATE wiitls::wiitls)
           EOF
@@ -120,7 +122,12 @@ jobs:
         with:
           msystem: UCRT64
           update: false
-          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-openssl
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-openssl
       - name: Build and test (Windows UCRT64 + Ninja)
         shell: msys2 {0}
         run: |
