@@ -344,6 +344,44 @@ a constructed R = O vector, differential against the builtin on random
 keys), `tls` 34/34, `http` 76/76, `plat` 12/12, `time` 1/1, `realworld` 10/10,
 bench 10/10.
 
+### v0.4.0 / Pre-1.0 re-verification (OGC_SEND_MAX = 2048 + `pt_jadd` cleanup)
+
+Re-measured on the same Wii over Wi-Fi on 2026-11-25 after reducing
+`OGC_SEND_MAX` to 2048 B (`src/plat/plat_ogc.c`), removing duplicate field
+ops in `pt_jadd()` (`src/accel/p256_verify.c`), and adding the 0.4.0
+features (SPKI pinning, cooperative `abort_cb`, multi-IPv4 failover,
+`wtls_net_reset`). Bench 10/10 pass (`WTLS-HWTEST DONE pass=10 fail=0 skip=0`):
+
+```
+BENCH sha256_16k 29.257 MB/s
+BENCH chacha20_poly1305_enc_16k 24.094 MB/s
+BENCH aes128_gcm_enc_16k 5.270 MB/s
+BENCH x25519_keygen_agree 4.596 ms
+BENCH ecdsa_p256_verify 5.405 ms
+BENCH rsa2048_verify 8.608 ms
+BENCH handshake_full_wall 36.844 ms
+BENCH handshake_full_cpu 27.285 ms
+BENCH hs_full_crypto_cpu 16.713 ms
+BENCH handshake_resumed_wall 24.586 ms
+BENCH handshake_resumed_cpu 15.662 ms
+BENCH hs_resumed_crypto_cpu 5.886 ms
+BENCH net_recv_4m 0.955 MB/s
+BENCH wtls_read_4m 0.923 MB/s
+BENCH wtls_read_vs_raw 96.657 %
+BENCH http_get_new_wall 87.669 ms
+BENCH http_get_pooled_wall 6.579 ms
+BENCH http_get_pooled_cpu 3.046 ms
+GATE handshake_full_cpu <= 30 ms        27.285 met
+GATE handshake_resumed_cpu <= 10 ms     15.662 MISSED
+GATE chacha20_poly1305 >= 20 MB/s       24.094 met
+GATE x25519 <= 5 ms                     4.596 met
+GATE wtls_read >= 90 % of net_recv      96.657 met
+GATE http_get_pooled_cpu < handshake_resumed_cpu 3.046 met
+```
+
+All crypto and full-handshake gates remain met with improved headroom
+(`handshake_full_cpu`: 27.8 → **27.3 ms**; `wtls_read_vs_raw`: **96.7 %**).
+
 ## HTTP
 
 Three lines from `bench_http_get` (median of 20, `GET /hello` on the test

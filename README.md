@@ -28,14 +28,14 @@ TF-PSA-Crypto) and libogc.
   about 400 ms seeding); SNTP clock sync for the often-wrong Wii RTC.
 
 > **Validated on a Wii.** All hardware suites pass on a real Wii over Wi-Fi
-> (`suite=all`: `time` 1/1, `plat` 13/13, `crypto` 14/14, `tls` 40/40, `http` 84/84,
+> (`suite=all`: `time` 1/1, `plat` 13/13, `crypto` 14/14, `tls` 40/40, `http` 86/86,
 > `soak` 128 iterations with 0 heap growth, and `realworld` 15/15 across public
-> HTTPS/CDN servers — **168/168 pass**). With the default build (`WTLS_ACCEL_P256=ON`), a full
-> TLS 1.3 handshake costs about 28 ms of CPU (37 ms wall — meeting the ≤ 30 ms
-> CPU target), a resumed one about 16 ms (24 ms wall), and a further HTTP
-> request over a kept-alive connection about 3.0 ms CPU (5.9 ms wall).
+> HTTPS/CDN servers — **170/170 pass**; `wtls_bench.dol` **10/10 pass**). With the default build (`WTLS_ACCEL_P256=ON`), a full
+> TLS 1.3 handshake costs about 27 ms of CPU (37 ms wall — meeting the ≤ 30 ms
+> CPU target), a resumed one about 16 ms (25 ms wall), and a further HTTP
+> request over a kept-alive connection about 3.0 ms CPU (6.6 ms wall).
 > ChaCha20-Poly1305 runs at 24 MB/s, an X25519 key exchange takes 4.6 ms, and
-> a P-256 ECDSA verify takes 5.3 ms. The full matrix and the resumed-handshake
+> a P-256 ECDSA verify takes 5.3–5.4 ms. The full matrix and the resumed-handshake
 > target are in [docs/benchmarks.md](docs/benchmarks.md).
 
 **Documentation:** [usage guide](docs/usage.md) (setup, threading, error
