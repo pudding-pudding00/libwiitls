@@ -147,6 +147,64 @@ def handle_plain(sock):
                 pem = open(path, "rb").read() if path and os.path.isfile(path) else b""
                 sock.sendall(b"%d\n" % len(pem) + pem)
                 continue
+            if cmd.startswith(b"SENDFUZZ "):
+                """Send-truthfulness probe: read exactly <total> pattern bytes
+                (byte i = i % 251) and report the first mismatch or a short read."""
+                total = int(cmd[9:])
+                got = 0
+                bad = None
+                while got < total and bad is None:
+                    data = sock.recv(min(65536, total - got))
+                    if not data:
+                        break
+                    for i, b in enumerate(data):
+                        if b != (got + i) % 251:
+                            bad = (got + i, b)
+                            break
+                    got += len(data)
+                if bad is None and got == total:
+                    sock.sendall(b"FUZZOK %d\n" % total)
+                else:
+                    off, g = bad if bad else (got, 0)
+                    sock.sendall(b"FUZZBAD off=%d got=%d want=%d total=%d\n" %
+                                 (off, g, off % 251, total))
+                continue
+            if cmd.startswith(b"SENDFUZZDUP "):
+                """Bidirectional-pressure probe: while reading the <total> pattern
+                bytes (like SENDFUZZ), a thread pushes junk back, the way a TLS
+                server's post-handshake records arrive during a big upload."""
+                total = int(cmd[13:])
+
+                def push_junk(sock=sock, n=256 * 1024):
+                    try:
+                        junk = bytes(i % 251 for i in range(4096))
+                        for _ in range(n // len(junk)):
+                            sock.sendall(junk)
+                    except OSError:
+                        pass
+
+                import threading as _t
+                pusher = _t.Thread(target=push_junk, daemon=True)
+                pusher.start()
+                got = 0
+                bad = None
+                while got < total and bad is None:
+                    data = sock.recv(min(65536, total - got))
+                    if not data:
+                        break
+                    for i, b in enumerate(data):
+                        if b != (got + i) % 251:
+                            bad = (got + i, b)
+                            break
+                    got += len(data)
+                pusher.join(5)
+                if bad is None and got == total:
+                    sock.sendall(b"FUZZOK %d\n" % total)
+                else:
+                    off, g = bad if bad else (got, 0)
+                    sock.sendall(b"FUZZBAD off=%d got=%d want=%d total=%d\n" %
+                                 (off, g, off % 251, total))
+                continue
             sock.sendall(line)
     except OSError:
         pass
@@ -560,8 +618,11 @@ def http_handler(ctx, counter):
                 if "close" in fields.get("connection", "").lower():
                     clean_close(sock, secure)
                     return
-        except (OSError, ssl.SSLError, ValueError):
-            pass
+        except (OSError, ssl.SSLError, ValueError) as e:
+            import traceback
+            sys.stderr.write("HTTP HANDLER EXCEPTION: %r\n" % (e,))
+            traceback.print_exc()
+            sys.stderr.flush()
         finally:
             try:
                 sock.close()

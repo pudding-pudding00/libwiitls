@@ -143,11 +143,14 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
     return WTLS_OK;
 }
 
+int wtls_plat_dbg_last_send; /* diagnostic: raw net_send result of the last failed call (spike suite) */
+
 int wtls_plat_send(int fd, const uint8_t *buf, size_t len) {
     if (len == 0) return WTLS_ERR_ARG;
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
     for (int attempt = 0;; attempt++) {
         s32 r = net_send(fd, buf, (s32)len, 0);
+        if (r < 0) wtls_plat_dbg_last_send = (int)r;
         int c = wtls_plat_ios_io_result(r, true, attempt);
         if (c != WTLS_PLAT_RETRY) return c;
         usleep(IPC_RETRY_US);

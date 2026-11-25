@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <malloc.h>
 
+#include <wiitls/wiitls.h>
+
 #include <gccore.h>
 #include <network.h>
 #include <ogc/lwp_watchdog.h>
@@ -215,6 +217,160 @@ static void spike_jitter(void) {
     free((void *)walk);
 }
 
+/* net_send truthfulness: sustained full-speed sends at a given call size.
+ * The server (SENDFUZZ) checks every byte and the count; a mismatch with
+ * the Wii-side sum of return values means net_send reported more than it
+ * actually transmitted. */
+static void spike_send_truth(void) {
+    static const struct {
+        int chunk;
+        long total;
+    } rounds[] = {
+        {4096, 64L * 1024},
+        {16384, 256L * 1024},
+    };
+    for (size_t k = 0; k < sizeof rounds / sizeof rounds[0]; k++) {
+        int chunk = rounds[k].chunk;
+        long total = rounds[k].total;
+        TLOG("[%d] net_send truthfulness: %d-byte calls, %ld bytes\n", (int)k + 8, chunk, total);
+        s32 fd = blocking_connect();
+        if (fd < 0) {
+            TLOG("    connect failed: %d\n", (int)fd);
+            return;
+        }
+        char cmd[48];
+        int n = snprintf(cmd, sizeof cmd, "SENDFUZZ %ld\n", total);
+        send_all(fd, cmd);
+        uint8_t *buf = malloc((size_t)chunk);
+        if (!buf) {
+            net_close(fd);
+            return;
+        }
+        long sent = 0; /* sum of net_send return values, Wii-side view */
+        s32 r = 0;
+        int calls = 0, short_sends = 0;
+        while (sent < total) {
+            size_t want = (size_t)(total - sent) < (size_t)chunk ? (size_t)(total - sent) : (size_t)chunk;
+            for (size_t i = 0; i < want; i++) buf[i] = (uint8_t)((sent + (long)i) % 251);
+            r = net_send(fd, buf, (s32)want, 0);
+            calls++;
+            if (r <= 0) break;
+            if ((size_t)r < want) short_sends++;
+            sent += r;
+        }
+        TLOG("    net_send: %d calls, %d short, last r=%d, sum(wii view)=%ld\n", calls,
+             short_sends, (int)r, sent);
+        /* verdict line from the server */
+        char line[96] = {0};
+        size_t got = 0;
+        while (got < sizeof line - 1) {
+            s32 g = net_recv(fd, (uint8_t *)line + got, 1, 0);
+            if (g <= 0) break;
+            if (line[got] == '\n') break;
+            got += (size_t)g;
+        }
+        line[got] = 0;
+        TLOG("    server: %s\n", line);
+        free(buf);
+        net_close(fd);
+    }
+}
+
+/* Same sustained-send pressure as spike_send_truth, but through the TLS
+ * layer against /echo (the path http_upload_256k takes): wtls_write in
+ * steps of various sizes, to find the threshold where records corrupt. */
+static void spike_send_truth_tls(void) {
+    static const int steps[] = {2048, 4096, 8192, 16384};
+    if (wtls_init() != WTLS_OK) {
+        TLOG("    wtls_init failed\n");
+        return;
+    }
+    for (size_t k = 0; k < sizeof steps / sizeof steps[0]; k++) {
+        int step = steps[k];
+        long total = 256L * 1024;
+        TLOG("[10.%d] TLS sustained write: 256 KiB to /echo in %d-byte steps\n", (int)k, step);
+        wtls_options opt = {0};
+        opt.io_timeout_ms = 20000;
+        opt.insecure_skip_verify = true; /* the spike suite trusts no CA */
+        wtls_conn *c = (wtls_conn *)1;
+        s32 st = wtls_connect(&c, g_env.server_host, 4438, &opt);
+        if (st != WTLS_OK) {
+            TLOG("    connect: %d\n", (int)st);
+            return;
+        }
+        char head[128];
+        int hn = snprintf(head, sizeof head,
+                          "PUT /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %ld\r\n\r\n", total);
+        int r = wtls_write(c, head, (size_t)hn);
+        if (r != hn) {
+            TLOG("    head write: %d of %d\n", r, hn);
+            wtls_close(c);
+            continue;
+        }
+        long off = 0;
+        uint8_t buf[16384];
+        while (off < total) {
+            size_t want = (size_t)(total - off) < (size_t)step ? (size_t)(total - off) : (size_t)step;
+            for (size_t i = 0; i < want; i++) buf[i] = (uint8_t)((off + (long)i) % 251);
+            r = wtls_write(c, buf, want);
+            if (r <= 0) {
+                extern int wtls_plat_dbg_last_send;
+                TLOG("    write failed at off=%ld (record %ld): %d, raw net_send=%d\n", off,
+                     off / step, r, wtls_plat_dbg_last_send);
+                break;
+            }
+            off += r;
+        }
+        if (r > 0) TLOG("    write done: %ld bytes\n", off);
+        wtls_close(c);
+    }
+}
+
+/* Bidirectional-pressure probe on PLAIN TCP: like spike_send_truth, but the
+ * server pushes junk back while we upload, the way a TLS 1.3 server's
+ * NewSessionTicket arrives during a big upload. The client never reads
+ * (mbedtls does not read while writing either). */
+static void spike_send_truth_duplex(void) {
+    static const int steps[] = {2048, 16384};
+    for (size_t k = 0; k < sizeof steps / sizeof steps[0]; k++) {
+        int chunk = steps[k];
+        long total = 256L * 1024;
+        TLOG("[11.%d] plain duplex pressure: %d-byte calls, %ld bytes, junk inbound\n", (int)k,
+             chunk, total);
+        s32 fd = blocking_connect();
+        if (fd < 0) return;
+        char cmd[48];
+        int n = snprintf(cmd, sizeof cmd, "SENDFUZZDUP %ld\n", total);
+        send_all(fd, cmd);
+        long sent = 0;
+        s32 r = 0;
+        int calls = 0, short_sends = 0;
+        uint8_t buf[16384];
+        while (sent < total) {
+            size_t want = (size_t)(total - sent) < (size_t)chunk ? (size_t)(total - sent) : (size_t)chunk;
+            for (size_t i = 0; i < want; i++) buf[i] = (uint8_t)((sent + (long)i) % 251);
+            r = net_send(fd, buf, (s32)want, 0);
+            calls++;
+            if (r <= 0) break;
+            if ((size_t)r < want) short_sends++;
+            sent += r;
+        }
+        TLOG("    net_send: %d calls, %d short, last r=%d, sum=%ld\n", calls, short_sends, (int)r,
+             sent);
+        char line[96] = {0};
+        size_t got = 0;
+        while (got < sizeof line - 1) {
+            s32 g = net_recv(fd, (uint8_t *)line + got, 1, 0);
+            if (g <= 0) break;
+            if (line[got] == '\n') break;
+            got += (size_t)g;
+        }
+        line[got] = 0;
+        TLOG("    server: %s\n", line);
+        net_close(fd);
+    }
+}
+
 void wtls_suite_spike(void) {
     spike_nonblocking_connect();
     spike_nodelay();
@@ -223,4 +379,7 @@ void wtls_suite_spike(void) {
     spike_max_recv();
     spike_clock();
     spike_jitter();
+    spike_send_truth();
+    spike_send_truth_tls();
+    spike_send_truth_duplex();
 }
