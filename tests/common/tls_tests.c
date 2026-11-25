@@ -24,6 +24,8 @@
 #define P_UNTRUSTED 4435
 #define P_WRONGHOST 4436
 #define P_BAD_EKU 4437
+#define P_MTLS 4441
+#define P_MTLS12 4443
 #define P_CLOSED 4499
 
 static const char *const k_alpn[] = {"http/1.1", NULL};
@@ -458,6 +460,225 @@ static void test_set_nonblocking_null_is_arg_error(void) {
     CHECK_EQ_INT(wtls_pending(NULL), 0);
 }
 
+/* ---- mutual TLS (client certificates, WP3) --------------------------------- */
+
+/* Fetches an artifact (CA/CLIENTCERT/CLIENTKEY) from the server's plain port:
+ * "<len>\n" followed by that many bytes. NULL on failure. */
+static uint8_t *plain_fetch(const char *cmd, size_t *len) {
+    *len = 0;
+    uint32_t ip;
+    int fd = -1;
+    if (wtls_plat_resolve(g_env.server_host, &ip) != WTLS_OK) return NULL;
+    if (wtls_plat_connect(ip, PLAIN_PORT, 3000, &fd) != WTLS_OK) return NULL;
+    uint8_t *buf = NULL;
+    char full[40];
+    int n = snprintf(full, sizeof full, "%s\n", cmd);
+    uint64_t deadline = wtls_plat_now_ms() + 3000;
+    if (n > 0 && n < (int)sizeof full && wtls_plat_send(fd, (const uint8_t *)full, (size_t)n) == n) {
+        char line[16] = {0};
+        size_t i = 0;
+        while (i < sizeof line - 1 && plain_recv_exact(fd, (uint8_t *)&line[i], 1, deadline) &&
+               line[i] != '\n')
+            i++;
+        long want = strtol(line, NULL, 10);
+        if (want > 0 && want < 16384 && (buf = malloc((size_t)want))) {
+            if (plain_recv_exact(fd, buf, (size_t)want, deadline)) *len = (size_t)want;
+            else {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    wtls_plat_close(fd);
+    return buf;
+}
+
+/* Loads a test client credential: cert and key fetched over the plain port,
+ * so the Wii needs no file access either. The key is PEM: it is fetched with
+ * its terminating NUL included, as the API requires. */
+static wtls_client_cred *client_cred(const char *name) {
+    char cmd[40];
+    size_t clen = 0, klen = 0;
+    snprintf(cmd, sizeof cmd, "CLIENTCERT %s", name);
+    uint8_t *cert = plain_fetch(cmd, &clen);
+    snprintf(cmd, sizeof cmd, "CLIENTKEY %s", name);
+    uint8_t *key0 = plain_fetch(cmd, &klen);
+    uint8_t *key = NULL;
+    if (key0) {
+        key = malloc(klen + 1); /* PEM: append the terminating NUL */
+        if (key) {
+            memcpy(key, key0, klen);
+            key[klen] = 0;
+            klen += 1;
+        }
+        free(key0);
+    }
+    wtls_client_cred *cred = NULL;
+    if (cert && key) {
+        CHECK_EQ_INT(wtls_client_cred_load(&cred, cert, clen, key, klen), WTLS_OK);
+    } else {
+        CHECK(false); /* plain fetch failed */
+    }
+    free(cert);
+    free(key);
+    return cred;
+}
+
+static void test_mtls_connect_ecdsa(void) {
+    wtls_client_cred *cred = client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_conn *c = open_tls(g_env.server_host, P_MTLS, &opt);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    wtls_client_cred_free(cred);
+}
+
+static void test_mtls_connect_rsa_tls12(void) {
+    wtls_client_cred *cred = client_cred("client-rsa");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_conn *c = open_tls(g_env.server_host, P_MTLS12, &opt);
+    if (c) {
+        wtls_conn_info info;
+        wtls_get_info(c, &info);
+        CHECK(info.tls_version && strcmp(info.tls_version, "TLSv1.2") == 0);
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    wtls_client_cred_free(cred);
+}
+
+/* A server that rejects our client identity aborts somewhere around the
+ * client's last flight: in TLS 1.3 that can be only after it, so the
+ * connect itself may look successful - the abort then surfaces on the
+ * first write or read. Either way, no application data must flow. */
+static void check_no_dataflow(int st, wtls_conn *c) {
+    if (st == WTLS_OK) {
+        int w = wtls_write(c, "PING\n", 5);
+        if (w == 5) {
+            char buf[8];
+            CHECK(wtls_read(c, buf, sizeof buf) < 0);
+        } else {
+            CHECK(w < 0); /* the server aborted right after "accepting" */
+        }
+        wtls_close(c);
+    } else {
+        CHECK(st == WTLS_ERR_HANDSHAKE || st == WTLS_ERR_IO || st == WTLS_ERR_CERT);
+        CHECK(c == NULL);
+    }
+}
+
+static void test_mtls_missing_cert_rejected(void) {
+    wtls_conn *c = (wtls_conn *)1;
+    int st = wtls_connect(&c, g_env.server_host, P_MTLS, NULL);
+    check_no_dataflow(st, c);
+}
+
+static void test_mtls_untrusted_client_rejected(void) {
+    wtls_client_cred *cred = client_cred("client-untrusted");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_conn *c = (wtls_conn *)1;
+    int st = wtls_connect(&c, g_env.server_host, P_MTLS, &opt);
+    check_no_dataflow(st, c);
+    wtls_client_cred_free(cred);
+}
+
+static void test_mtls_cert_key_mismatch(void) {
+    size_t clen = 0, klen = 0;
+    uint8_t *cert = plain_fetch("CLIENTCERT client-ec", &clen);
+    uint8_t *key0 = plain_fetch("CLIENTKEY client-rsa", &klen);
+    uint8_t *key = NULL;
+    if (key0) {
+        key = malloc(klen + 1); /* PEM: append the terminating NUL */
+        if (key) {
+            memcpy(key, key0, klen);
+            key[klen] = 0;
+            klen += 1;
+        }
+        free(key0);
+    }
+    CHECK(cert && key);
+    if (!cert || !key) {
+        free(cert);
+        free(key);
+        return;
+    }
+    wtls_client_cred *cred = (wtls_client_cred *)1;
+    CHECK_EQ_INT(wtls_client_cred_load(&cred, cert, clen, key, klen), WTLS_ERR_ARG);
+    CHECK(cred == NULL);
+    CHECK_EQ_INT(wtls_client_cred_load(NULL, cert, clen, key, klen), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_client_cred_load(&cred, NULL, 0, key, klen), WTLS_ERR_ARG);
+    wtls_client_cred_free(NULL); /* NULL is safe */
+    free(cert);
+    free(key);
+}
+
+/* The application may free the credential while a connection still uses it:
+ * the connection holds its own reference. */
+static void test_mtls_free_while_connected(void) {
+    wtls_client_cred *cred = client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_conn *c = open_tls(g_env.server_host, P_MTLS, &opt);
+    wtls_client_cred_free(cred); /* drops the application's reference */
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c); /* releases the connection's reference: destroyed here */
+    }
+}
+
+/* Session tickets of an mTLS connection are keyed by the client identity:
+ * a different credential never resumes them. */
+static void test_mtls_resumption_isolated(void) {
+    wtls_client_cred *a = client_cred("client-ec");
+    wtls_client_cred *b = client_cred("client-rsa");
+    CHECK(a && b);
+    if (!a || !b) {
+        wtls_client_cred_free(a);
+        wtls_client_cred_free(b);
+        return;
+    }
+    wtls_options oa = {0};
+    oa.client_cred = a;
+    wtls_options ob = {0};
+    ob.client_cred = b;
+
+    wtls_conn *c = open_tls(g_env.server_host, P_MTLS, &oa); /* stores ticket(a) */
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    wtls_conn *d = open_tls(g_env.server_host, P_MTLS, &ob); /* b must not resume a */
+    if (d) {
+        wtls_conn_info info;
+        wtls_get_info(d, &info);
+        CHECK(!info.resumed);
+        expect_line(d, "PING\n", "PING");
+        wtls_close(d);
+    }
+    wtls_conn *e = open_tls(g_env.server_host, P_MTLS, &oa); /* a's own ticket: resumed */
+    if (e) {
+        wtls_conn_info info;
+        wtls_get_info(e, &info);
+        CHECK(info.resumed);
+        wtls_close(e);
+    }
+    wtls_client_cred_free(b);
+    wtls_client_cred_free(a);
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -496,6 +717,13 @@ void wtls_suite_tls(void) {
     RUN(test_ip_literal_no_sni);
     RUN(test_ip_literal_wrong_san);
     RUN(test_connect_refuses_with_bad_clock);
+    RUN(test_mtls_connect_ecdsa);
+    RUN(test_mtls_connect_rsa_tls12);
+    RUN(test_mtls_missing_cert_rejected);
+    RUN(test_mtls_untrusted_client_rejected);
+    RUN(test_mtls_cert_key_mismatch);
+    RUN(test_mtls_free_while_connected);
+    RUN(test_mtls_resumption_isolated);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
     else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();

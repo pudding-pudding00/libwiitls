@@ -8,6 +8,11 @@ Commands (one per line):
   BIG n    send n pattern bytes: byte i = i % 251
   CA       "<len>
 " followed by the test CA in DER (needs --certs)
+  CLIENTCERT <name> "<len>
+" + the client certificate <name> in DER (client-ec, client-rsa,
+           client-untrusted; needs --certs)
+  CLIENTKEY <name> "<len>
+" + the private key <name> in PEM (unencrypted test keys, plain TCP)
   other    echoed back unchanged (including the newline)
 
 TLS ports (only with --certs DIR, the output of make_certs.py; default: the
@@ -18,12 +23,15 @@ WTLS_TEST_CERT_DIR environment variable):
   4434 expired certificate        4435 untrusted CA
   4436 certificate for other.test
   4437 certificate without the serverAuth extended key usage
+  4441 mutual TLS: a client certificate from the test CA is REQUIRED
 TLS commands: PING, SNI (received SNI or "-"), BIG n (byte i = i & 0xFF),
 CLOSE (close_notify), TRUNC (TCP close without close_notify), SILENT,
 CONNS (TCP connections accepted on this port so far).
 
 HTTP/1.1 ports (with --certs; TLS 1.2+1.3, ECDSA leaf, ALPN http/1.1): 4438 and
-4439; the same endpoints over plain TCP on 4440. Keep-alive until the request says "Connection: close" or an endpoint
+4439; the same endpoints over plain TCP on 4440; port 4442 asks for a client
+certificate (optional) and answers /who with the client CN. Keep-alive until
+the request says "Connection: close" or an endpoint
 closes. Pattern bytes: i % 251. Unknown query parameters (e.g. id=...) are
 ignored, so a test can tag its requests and count them with /count.
   GET /hello                      200, text/plain, "hello"
@@ -105,6 +113,12 @@ class LineConn:
         line, self.buf = self.buf.split(b"\n", 1)
         return line + b"\n"
 
+    def recv(self, n):
+        if self.buf:
+            out, self.buf = self.buf[:n], self.buf[n:]
+            return out
+        return self.sock.recv(n)
+
 
 def handle_plain(sock):
     conn = LineConn(sock)
@@ -126,6 +140,76 @@ def handle_plain(sock):
             if cmd == b"CA":
                 der = open(os.path.join(CERT_DIR, "test-ca.der"), "rb").read() if CERT_DIR else b""
                 sock.sendall(b"%d\n" % len(der) + der)
+                continue
+            if cmd.startswith(b"CLIENTCERT "):
+                name = cmd[len(b"CLIENTCERT "):].decode()
+                path = os.path.join(CERT_DIR, name + ".der") if CERT_DIR else None
+                der = open(path, "rb").read() if path and os.path.isfile(path) else b""
+                sock.sendall(b"%d\n" % len(der) + der)
+                continue
+            if cmd.startswith(b"CLIENTKEY "):
+                name = cmd[len(b"CLIENTKEY "):].decode()
+                path = os.path.join(CERT_DIR, name + ".key") if CERT_DIR else None
+                pem = open(path, "rb").read() if path and os.path.isfile(path) else b""
+                sock.sendall(b"%d\n" % len(pem) + pem)
+                continue
+            if cmd.startswith(b"SENDFUZZ "):
+                """Send-truthfulness probe: read exactly <total> pattern bytes
+                (byte i = i % 251) and report the first mismatch or a short read."""
+                total = int(cmd[9:])
+                got = 0
+                bad = None
+                while got < total and bad is None:
+                    data = conn.recv(min(65536, total - got))
+                    if not data:
+                        break
+                    for i, b in enumerate(data):
+                        if b != (got + i) % 251:
+                            bad = (got + i, b)
+                            break
+                    got += len(data)
+                if bad is None and got == total:
+                    sock.sendall(b"FUZZOK %d\n" % total)
+                else:
+                    off, g = bad if bad else (got, 0)
+                    sock.sendall(b"FUZZBAD off=%d got=%d want=%d total=%d\n" %
+                                 (off, g, off % 251, total))
+                continue
+            if cmd.startswith(b"SENDFUZZDUP "):
+                """Bidirectional-pressure probe: while reading the <total> pattern
+                bytes (like SENDFUZZ), a thread pushes junk back, the way a TLS
+                server's post-handshake records arrive during a big upload."""
+                total = int(cmd[12:])
+
+                def push_junk(sock=sock, n=256 * 1024):
+                    try:
+                        junk = b"J" * 4096
+                        for _ in range(n // len(junk)):
+                            sock.sendall(junk)
+                    except OSError:
+                        pass
+
+                import threading as _t
+                pusher = _t.Thread(target=push_junk, daemon=True)
+                pusher.start()
+                got = 0
+                bad = None
+                while got < total and bad is None:
+                    data = conn.recv(min(65536, total - got))
+                    if not data:
+                        break
+                    for i, b in enumerate(data):
+                        if b != (got + i) % 251:
+                            bad = (got + i, b)
+                            break
+                    got += len(data)
+                pusher.join(5)
+                if bad is None and got == total:
+                    sock.sendall(b"FUZZOK %d\n" % total)
+                else:
+                    off, g = bad if bad else (got, 0)
+                    sock.sendall(b"FUZZBAD off=%d got=%d want=%d total=%d\n" %
+                                 (off, g, off % 251, total))
                 continue
             sock.sendall(line)
     except OSError:
@@ -167,6 +251,15 @@ def tls_context(leaf, tls13_only=False, tls12_only=False, alpn=None, ciphers=Non
         sslobj.wtls_sni = name
 
     ctx.sni_callback = on_sni
+    return ctx
+
+
+def mtls_context(leaf, required):
+    """TLS context that verifies client certificates against the test CA
+    (mutual TLS). required: handshake fails without a client cert."""
+    ctx = tls_context(leaf)
+    ctx.verify_mode = ssl.CERT_REQUIRED if required else ssl.CERT_OPTIONAL
+    ctx.load_verify_locations(os.path.join(CERT_DIR, "test-ca.pem"))
     return ctx
 
 
@@ -230,7 +323,16 @@ def tls_listeners(bind):
         (4436, dict(leaf="wronghost")),
         (4437, dict(leaf="clientonly")),
     ]
-    return [serve(bind, port, tls_handler(tls_context(**kw), Counter())) for port, kw in specs]
+    listeners = [serve(bind, port, tls_handler(tls_context(**kw), Counter())) for port, kw in specs]
+    # mutual TLS: the handshake fails unless the client presents a
+    # certificate signed by the test CA
+    listeners.append(serve(bind, 4441, tls_handler(mtls_context("ecdsa", required=True), Counter())))
+    # the same, TLS 1.2 only
+    mtls12 = mtls_context("ecdsa", required=True)
+    mtls12.minimum_version = ssl.TLSVersion.TLSv1_2
+    mtls12.maximum_version = ssl.TLSVersion.TLSv1_2
+    listeners.append(serve(bind, 4443, tls_handler(mtls12, Counter())))
+    return listeners
 
 
 # ---- HTTP/1.1 -------------------------------------------------------------
@@ -262,12 +364,51 @@ class HttpReader:
             if not self.fill():
                 return None
 
+    def line(self):
+        """One CRLF (or LF) terminated line, without its terminator."""
+        while True:
+            for sep in (b"\r\n", b"\n"):
+                i = self.buf.find(sep)
+                if i >= 0:
+                    line, self.buf = self.buf[:i], self.buf[i + len(sep):]
+                    return line
+            if not self.fill():
+                return None
+
     def body(self, n):
         while len(self.buf) < n:
             if not self.fill():
                 return None
         body, self.buf = self.buf[:n], self.buf[n:]
         return body
+
+    def chunked_body(self, max_len=2 * 1024 * 1024):
+        """Decodes a chunked request body; None when malformed or over max_len."""
+        out = b""
+        while True:
+            size_line = self.line()
+            if size_line is None:
+                return None
+            size_line = size_line.split(b";", 1)[0].strip()
+            try:
+                size = int(size_line, 16)
+            except ValueError:
+                return None
+            if size == 0:
+                while True:  # trailers until the empty line
+                    t = self.line()
+                    if t is None:
+                        return None
+                    if t == b"":
+                        return out
+            data = self.body(size)
+            if data is None:
+                return None
+            out += data
+            if len(out) > max_len:
+                return None
+            if self.body(2) != b"\r\n":
+                return None  # the CRLF that ends every chunk
 
 
 def http_response(status, headers=(), body=b"", reason=b"X"):
@@ -397,6 +538,20 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             send(http_response(200, [enc, ("Content-Length", len(z))], z))
     elif path == "/encoding":
         send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
+    elif path == "/who":
+        """Mutual TLS made visible: the CN of the client certificate, or none."""
+        cn = "none"
+        try:
+            peercert = sock.getpeercert()
+            if peercert:
+                for rdn in peercert.get("subject", ()):
+                    for key, value in rdn:
+                        if key == "commonName":
+                            cn = value
+        except (AttributeError, ValueError):
+            pass  # plain socket or no certificate
+        out = cn.encode()
+        send(http_response(200, [("Content-Length", len(out))], out))
     elif path == "/count":
         with HTTP_LOG_LOCK:
             c = sum(1 for q in HTTP_LOG if q.get("id") == query.get("id"))
@@ -449,7 +604,10 @@ def http_handler(ctx, counter):
                     if b":" in line:
                         k, v = line.split(b":", 1)
                         fields[k.strip().lower().decode()] = v.strip().decode()
-                body = rd.body(int(fields.get("content-length", "0")))
+                if fields.get("transfer-encoding", "").lower() == "chunked":
+                    body = rd.chunked_body()
+                else:
+                    body = rd.body(int(fields.get("content-length", "0")))
                 if body is None:
                     return
                 url = urllib.parse.urlsplit(target)
@@ -480,7 +638,9 @@ def http_handler(ctx, counter):
 def http_listeners(bind):
     ctx = tls_context("ecdsa", alpn=["http/1.1"])
     tls = [serve(bind, port, http_handler(ctx, Counter())) for port in (4438, 4439)]
-    return tls + [serve(bind, 4440, http_handler(None, Counter()))]
+    # mutual TLS, client certificate optional: /who shows who connected
+    mtls = serve(bind, 4442, http_handler(mtls_context("ecdsa", required=False), Counter()))
+    return tls + [mtls, serve(bind, 4440, http_handler(None, Counter()))]
 
 
 def serve(bind, port, handler):

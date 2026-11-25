@@ -183,6 +183,51 @@ with `req.headers = h; req.n_headers = 1;`. `Host`, `Content-Length`,
 `Transfer-Encoding` and `Connection` are set by the library and refused in
 `req.headers`.
 
+Streaming uploads (0.3.0), when the body is generated on the fly or read
+from SD without buffering it whole:
+
+```c
+/* int my_body_reader(void *ctx, void *buf, size_t len): fill buf with up to
+ * len bytes, return the count, 0 at the end, or a negative value to abort. */
+
+wtls_http_request req = {0};
+req.method = "PUT";
+req.url = "https://example.com/upload/savegame.bin";
+req.body_cb = my_body_reader;      /* mutually exclusive with req.body */
+req.body_ctx = &my_state;
+req.body_len = file_size;          /* sent as Content-Length ... */
+/* ... or req.body_chunked = true;  ... sent as Transfer-Encoding: chunked,
+   the reader ends the body by returning 0 (no body_len needed). */
+```
+
+Rules the library enforces for you: a reader that stops early or fails
+aborts the request with `WTLS_ERR_IO` and closes (never pools) the
+connection; a stale pooled connection is only retried if the reader has not
+been called yet and the method is idempotent; 303 (and 301/302 after POST)
+turn into GET without calling the reader again; any other redirect with a
+streaming body is refused with `WTLS_ERR_HTTP_REDIRECT`, because a stream
+cannot be rewound - set `req.max_redirects = -1` if you can rewind it
+yourself and follow the `Location` by hand.
+
+Two small helpers (0.3.0) in `<wiitls/http.h>`: `wtls_http_url_encode`
+percent-encodes query values (RFC 3986, upper case hex), and
+`wtls_http_parse_content_range` parses the `Content-Range` of a `206`
+response for resumable downloads:
+
+```c
+/* https://example.com/d/app.zip?user=<encoded name> */
+char q[300]; size_t qn;
+wtls_http_url_encode(name, strlen(name), q, sizeof q, &qn);   /* out=NULL: size query */
+
+/* Resume a download: Range: bytes=<have>- ... then check what arrived. */
+wtls_http_content_range cr;
+if (wtls_http_status(res) == 206 &&
+    wtls_http_parse_content_range(wtls_http_get_header(res, "Content-Range"), &cr) == WTLS_OK) {
+    /* cr.start, cr.end, cr.total (or -1 if "*"); cr.start == have means the
+     * server resumed - otherwise the file changed and the data is useless. */
+}
+```
+
 Points that trip people up:
 
 - **An HTTP status ≥ 400 is not an error.** `wtls_http_open` returns
@@ -226,15 +271,16 @@ header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
 (`WTLS_ERR_HTTP_LIMIT` above that, checked against the decoded size).
 
 Not supported: HTTP/2 and HTTP/3, proxies, cookies (send your own `Cookie`
-header), authentication schemes (send your own `Authorization`), request
-bodies of unknown length (chunked uploads), `Expect: 100-continue`, ranges,
-caching, and `deflate`/`br` encodings.
+header), authentication schemes (send your own `Authorization`), the
+`Expect` header, caching, and `deflate`/`br` encodings. Ranges are not
+negotiated for you: send your own `Range` header and check the `206` answer
+with `wtls_http_parse_content_range`.
 
 ## 6. Faster second connections
 
 The library keeps the last 8 TLS 1.3 session tickets and 16 DNS answers. A
 later `wtls_connect` to the same host and port reuses both: no DNS lookup, no
-certificate chain check, about 25 ms instead of 80 ms on Wi-Fi.
+certificate chain check, about 24 ms instead of 37 ms on Wi-Fi.
 `wtls_get_info(c, &info)` tells you whether it happened (`info.resumed`).
 
 The server sends its ticket after the handshake, so it is captured only while
@@ -280,6 +326,42 @@ It is trusted in addition to the built-in Mozilla roots until
 `wtls_shutdown`. Do **not** use `insecure_skip_verify` for this. That option
 turns off all certificate checks and exists for tests only.
 
+### Client certificates (mutual TLS, 0.3.0)
+
+Servers that require the *client* to authenticate (your own API, a NAS, a
+home server) get a client certificate from the TLS layer:
+
+```c
+extern const unsigned char my_cert_pem[]; extern const size_t my_cert_pem_len;
+extern const unsigned char my_key_pem[];   extern const size_t my_key_pem_len;
+
+wtls_client_cred *cred;
+int r = wtls_client_cred_load(&cred, my_cert_pem, my_cert_pem_len,
+                              my_key_pem, my_key_pem_len);
+/* WTLS_OK; WTLS_ERR_ARG if unparsable or the key does not match the cert. */
+
+wtls_options opt = {0};
+opt.client_cred = cred;                       /* present it from now on */
+wtls_conn *c;
+r = wtls_connect(&c, "nas.local", 443, &opt); /* server must accept the cert */
+...
+wtls_close(c);
+wtls_client_cred_free(cred);                   /* NULL is safe */
+```
+
+Both accept DER, or PEM with the terminating NUL byte included in `len`;
+the certificate chain goes leaf-first. Keys: ECDSA (P-256, P-384) and RSA,
+unencrypted (no passwords). The match of key and leaf is checked at load.
+
+The credential is reference-counted behind the scenes: every connection
+(including idle keep-alive connections of the HTTP client, and pooled ones)
+holds a reference, so `wtls_client_cred_free` may be called while
+connections still use it - the private key is zeroized once the last
+reference is gone. Session tickets and pooled HTTP connections are keyed by
+the certificate's fingerprint: a connection with one identity never resumes
+or reuses a connection of another. And like `Authorization` and `Cookie`,
+the client certificate is stripped when a redirect leaves the origin.
+
 ## 9. What to do with each error
 
 | Return | Typical cause | What your app should do |
@@ -290,7 +372,7 @@ turns off all certificate checks and exists for tests only.
 | `WTLS_ERR_DNS` | no such host, no DNS | show "host not found" |
 | `WTLS_ERR_CONNECT` | port closed, no route | retry later |
 | `WTLS_ERR_TIMEOUT` | server or Wi-Fi too slow | retry; raise the timeouts in `wtls_options` if needed |
-| `WTLS_ERR_HANDSHAKE` | server needs something unsupported (e.g. client certificates, TLS ≤ 1.1) | not fixable on the client |
+| `WTLS_ERR_HANDSHAKE` | server needs something unsupported (e.g. TLS ≤ 1.1), or rejected our client certificate / did not send the required one | not fixable on the client as-is |
 | `WTLS_ERR_CERT` | untrusted, expired, wrong host name | `wtls_last_verify_flags()`; EXPIRED/FUTURE: sync the clock and retry once; otherwise refuse |
 | `WTLS_ERR_IO` | connection reset or truncated | discard partial data; retry |
 | `WTLS_ERR_CLOSED` | clean end of stream | done |
@@ -307,7 +389,8 @@ called again afterwards.
 
 ## 11. Limits and security notes
 
-- **Client only.** No server mode, no client certificates.
+- **Client only.** No server mode. Client certificates for mutual TLS are
+  supported since 0.3.0 (see 8), password-protected keys are not.
 - **HTTP:** HTTP/1.1 only, limits and non-goals in 5. `http://` has no
   encryption and no authentication of the server.
 - **TLS 1.3 preferred, TLS 1.2 minimum.** Ciphers: ChaCha20-Poly1305 first

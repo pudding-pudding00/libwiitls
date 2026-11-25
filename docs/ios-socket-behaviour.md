@@ -46,6 +46,7 @@ python tools/jitter_assess.py jd.log
 | `net_poll` 100 ms timeout accuracy | min 100.28 / median 100.29 / max 100.42 ms | timeouts can rely on `net_poll` |
 | IPC round trip (`net_poll`, timeout 0) | 135 µs | — |
 | Max bytes per `net_recv(65536)` | 26116 | `WTLS_PLAT_MAX_CHUNK = 16384` stays |
+| Non-blocking `net_send` past ~4080 B buffer | IOS queues the partial prefix (`4080` B total, or free space) and still returns `-11` (`-EAGAIN`), causing retries to duplicate bytes; `SO_SNDBUF`/`SO_SNDLOWAT` return `-22` on connected sockets and `SO_SNDTIMEO` returns `-109` | `wtls_plat_send` polls `IOS_POLLOUT` with timeout `0` (returning `WTLS_WANT_WRITE` when full) and temporarily clears `IOS_O_NONBLOCK` around `net_send` (`spike` `[8]`–`[11]`, `http_upload_256k`) |
 | `time(NULL)` − PC time | +3602 s: the RTC holds **local time** (CET here), not UTC | SNTP sync where exact time matters; one hour does not break certificate checks |
 | Jitter sampler and credited entropy | see below | **IOS IPC round trip** per sample, `WTLS_JITTER_BITS_PER_SAMPLE = 1` |
 

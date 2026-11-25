@@ -7,8 +7,9 @@
 
 WTLS_CHECK_DEFINE_COUNTERS;
 
-static char *build(const char *method, const char *url, const wtls_http_header *h, size_t n, bool has_body,
-                   size_t body_len, bool no_keepalive, bool gzip, int *status) {
+static char *build_chunked(const char *method, const char *url, const wtls_http_header *h, size_t n,
+                            bool has_body, size_t body_len, bool chunked, bool no_keepalive, bool gzip,
+                            int *status) {
     wtls_url u;
     char *out = NULL;
     size_t len = 0;
@@ -16,9 +17,15 @@ static char *build(const char *method, const char *url, const wtls_http_header *
         *status = -1000;
         return NULL;
     }
-    *status = wtls_http_build_head(method, &u, h, n, has_body, body_len, no_keepalive, gzip, &out, &len);
+    *status = wtls_http_build_head(method, &u, h, n, has_body, body_len, chunked, no_keepalive, gzip,
+                                   &out, &len);
     if (*status == WTLS_OK) CHECK_EQ_INT(strlen(out), len);
     return out;
+}
+
+static char *build(const char *method, const char *url, const wtls_http_header *h, size_t n, bool has_body,
+                   size_t body_len, bool no_keepalive, bool gzip, int *status) {
+    return build_chunked(method, url, h, n, has_body, body_len, false, no_keepalive, gzip, status);
 }
 
 static void test_req_get_default(void) {

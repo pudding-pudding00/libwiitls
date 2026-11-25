@@ -238,6 +238,47 @@ static void hw_four_parallel_connections(void) {
     }
 }
 
+/* Sustained 256 KiB plain upload over wtls_plat_send (tests non-blocking
+ * truthfulness past IOS' ~4 KiB socket buffer). */
+static void test_send_truthfulness(void) {
+    int fd = connect_echo();
+    if (fd < 0) return;
+    const size_t total = 256u * 1024u;
+    CHECK(send_str(fd, "SENDFUZZ 262144\n"));
+    uint8_t chunk[16384];
+    size_t sent = 0;
+    uint64_t deadline = wtls_plat_now_ms() + 15000;
+    while (sent < total && wtls_plat_now_ms() < deadline) {
+        size_t want = total - sent < sizeof chunk ? total - sent : sizeof chunk;
+        for (size_t i = 0; i < want; i++) chunk[i] = (uint8_t)((sent + i) % 251);
+        int r = wtls_plat_send(fd, chunk, want);
+        if (r > 0) {
+            sent += (size_t)r;
+        } else if (r == WTLS_WANT_WRITE) {
+            if (wtls_plat_poll(fd, false, true, 500) < 0) break;
+        } else {
+            break;
+        }
+    }
+    CHECK_EQ_INT(sent, total);
+    char line[64] = {0};
+    size_t got = 0;
+    while (got < sizeof line - 1 && wtls_plat_now_ms() < deadline) {
+        int r = wtls_plat_recv(fd, (uint8_t *)line + got, 1);
+        if (r == 1) {
+            if (line[got] == '\n') break;
+            got++;
+        } else if (r == WTLS_WANT_READ) {
+            wtls_plat_poll(fd, true, false, 200);
+        } else {
+            break;
+        }
+    }
+    line[got] = 0;
+    CHECK(strcmp(line, "FUZZOK 262144") == 0);
+    wtls_plat_close(fd);
+}
+
 void wtls_suite_plat(void) {
     CHECK_EQ_INT(wtls_plat_init(), WTLS_OK);
     RUN(test_ios_io_result);
@@ -252,4 +293,5 @@ void wtls_suite_plat(void) {
     RUN(test_resolve_ip_literal_and_garbage);
     if (!g_env.is_hw) RUN(test_resolve_localhost);
     RUN(hw_four_parallel_connections);
+    RUN(test_send_truthfulness);
 }

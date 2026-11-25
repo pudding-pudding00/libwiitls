@@ -12,6 +12,9 @@ Writes into DIR (each cert as .pem and .der, each key as .key):
   wronghost     leaf, P-256, SAN DNS:other.test
   untrusted     leaf, P-256, signed by untrusted-ca
   clientonly    leaf, P-256, same SANs, extendedKeyUsage clientAuth only
+  client-ec     client leaf, P-256, signed by test-ca, extendedKeyUsage clientAuth
+  client-rsa    client leaf, RSA-2048, signed by test-ca, clientAuth
+  client-untrusted client leaf, P-256, signed by untrusted-ca, clientAuth
 """
 import argparse
 import os
@@ -108,6 +111,9 @@ def main():
         make_leaf(o, out, "wronghost", "test-ca", "ec", "DNS:other.test")
         make_leaf(o, out, "untrusted", "untrusted-ca", "ec", san)
         make_leaf(o, out, "clientonly", "test-ca", "ec", san, eku="clientAuth")
+        make_leaf(o, out, "client-ec", "test-ca", "ec", san, eku="clientAuth")
+        make_leaf(o, out, "client-rsa", "test-ca", "rsa", san, eku="clientAuth")
+        make_leaf(o, out, "client-untrusted", "untrusted-ca", "ec", san, eku="clientAuth")
     except subprocess.CalledProcessError as e:
         sys.stderr.write(e.stderr.decode(errors="replace"))
         return 1
