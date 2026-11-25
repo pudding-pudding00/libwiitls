@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libwiitls VERSION 0.1.0 LANGUAGES C)
+project(libwiitls VERSION 0.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -203,6 +203,15 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# WTLS_VERSION in the public header must match the project version.
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/include/wiitls/wiitls.h _wtls_ver_line
+     REGEX "^#define WTLS_VERSION \"[^\"]*\"")
+string(REGEX REPLACE ".*\"([^\"]*)\".*" "\\1" _wtls_ver "${_wtls_ver_line}")
+if(NOT _wtls_ver STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR "WTLS_VERSION in wiitls.h is '${_wtls_ver}', project version is ${PROJECT_VERSION}")
+endif()
+
+# ---------------------------------------------------------------------------
 # libwiitls
 add_library(wiitls STATIC
     src/wtls_core.c
@@ -213,6 +222,8 @@ add_library(wiitls STATIC
     src/wtls_conn.c
     src/wtls_scache.c
     src/wtls_dns.c
+    src/http/wtls_url.c
+    src/http/wtls_http_req.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -324,6 +335,8 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_scache)
     wtls_host_test(test_dns)
     wtls_host_test(test_crypto tests/common/crypto_tests.c)
+    wtls_host_test(test_http_url)
+    wtls_host_test(test_http_req)
     add_dependencies(test_castore wtls_test_certs)
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"

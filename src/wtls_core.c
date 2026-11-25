@@ -19,6 +19,9 @@ const char *wtls_strerror(int status) {
     case WTLS_ERR_CLOSED:    return "connection closed by peer";
     case WTLS_ERR_HANDSHAKE: return "TLS handshake failed";
     case WTLS_ERR_CERT:      return "certificate verification failed";
+    case WTLS_ERR_HTTP:      return "malformed HTTP response";
+    case WTLS_ERR_HTTP_LIMIT: return "HTTP limit exceeded";
+    case WTLS_ERR_HTTP_REDIRECT: return "HTTP redirect refused or too many redirects";
     case WTLS_ERR_INTERNAL:  return "internal error";
     default:                 return "unknown error";
     }
