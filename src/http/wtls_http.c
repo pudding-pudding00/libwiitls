@@ -299,6 +299,8 @@ static int acquire(wtls_http_response *r, request_ctx *x) {
         if (tr_alive(c)) {
             r->conn = c;
             r->reused = true;
+            /* this request's I/O timeout, not the one of the request that opened it */
+            tr_set_timeout(c, x->opt.io_timeout_ms ? x->opt.io_timeout_ms : DEF_IO_MS);
             return WTLS_OK;
         }
         wtls_http_tr_close(c);

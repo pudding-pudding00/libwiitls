@@ -240,6 +240,38 @@ static void http_trickle(void) {
     wtls_http_close(r);
 }
 
+/* A pooled connection takes the io_timeout_ms of the request that reuses it,
+ * not of the one that opened it. */
+static void http_reused_takes_request_io_timeout(void) {
+    wtls_http_pool_flush();
+    wtls_options fast = {0}, slow = {0};
+    fast.io_timeout_ms = 300;
+    slow.io_timeout_ms = 5000;
+    for (int round = 0; round < 2; round++) {
+        /* round 0: opened slow, reused fast -> times out; round 1: the reverse -> body arrives */
+        wtls_http_request req = {0};
+        req.url = url("/hello");
+        req.tls = round == 0 ? &slow : &fast;
+        wtls_http_response *r = open_req(&req);
+        if (!r) return;
+        int last = 1;
+        body_str(r, &last);
+        CHECK_EQ_INT(last, 0);
+        wtls_http_close(r);
+        req.url = url("/slowbody?ms=1000");
+        req.tls = round == 0 ? &fast : &slow;
+        r = open_req(&req);
+        if (!r) return;
+        wtls_http_info info;
+        CHECK_EQ_INT(wtls_http_get_info(r, &info), WTLS_OK);
+        CHECK(info.reused_connection);
+        char buf[8];
+        CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), (round == 0 ? WTLS_ERR_TIMEOUT : 2));
+        wtls_http_close(r);
+    }
+    wtls_http_pool_flush();
+}
+
 static void http_head_request(void) {
     wtls_http_pool_flush();
     wtls_http_request req = {0};
@@ -1035,6 +1067,7 @@ void wtls_suite_http(void) {
     RUN(http_truncated_length);
     RUN(http_truncated_chunked);
     RUN(http_trickle);
+    RUN(http_reused_takes_request_io_timeout);
     RUN(http_head_request);
     RUN(http_status_no_body);
     RUN(http_interim_100);

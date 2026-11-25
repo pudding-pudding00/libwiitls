@@ -35,6 +35,7 @@ ignored, so a test can tag its requests and count them with /count.
                                   close_notify (notify=0: TCP close without)
   GET /trunc?n=N&cut=K            CL N, TCP close without close_notify after K
   GET /trickle                    CL 13 "hello trickle", one TLS record per byte
+  GET /slowbody?ms=M              head (CL 2) at once, body "ok" after M ms
   GET /bighead?n=N                head of exactly N bytes (padded X-Big field)
   GET /status?code=C              status C; 204/304 without body, else CL 0
   GET /continue                   "100 Continue", then 200 "ok"
@@ -69,6 +70,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 import urllib.parse
 
 PLAIN_PORT = 4430
@@ -332,6 +334,10 @@ def http_respond(sock, secure, method, path, query, head, body, state):
     elif path == "/trickle":
         for b in http_response(200, [("Content-Length", 13)], b"hello trickle", b"OK"):
             send(bytes([b]))
+    elif path == "/slowbody":
+        send(http_response(200, [("Content-Length", 2)]))
+        time.sleep(int(query.get("ms", "0")) / 1000.0)
+        send(b"ok")
     elif path == "/bighead":
         pre = b"HTTP/1.1 200 X\r\nContent-Length: 0\r\nX-Big: "
         send(pre + b"a" * max(0, n - len(pre) - 4) + b"\r\n\r\n")
