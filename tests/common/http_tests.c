@@ -1049,6 +1049,528 @@ static void http_gzip_fetch_limit(void) {
     wtls_http_result_free(&res);
 }
 
+/* ---- streaming uploads (body_cb, WP2) ------------------------------------- */
+
+/* Streams byte (off + i) % 251 in pieces of at most s->piece bytes.
+ * premature_eof ends a fixed-length body early (returns 0), abort_after
+ * makes the callback fail once that many bytes were streamed. */
+typedef struct {
+    size_t len, off, piece;
+    bool premature_eof;
+    int abort_after;
+    int calls;
+} up_state;
+
+static int up_cb(void *ctx, void *buf, size_t len) {
+    up_state *s = ctx;
+    s->calls++;
+    if (s->abort_after >= 0 && s->off >= (size_t)s->abort_after) return -1;
+    if (s->premature_eof && s->off >= s->len / 2) return 0;
+    if (s->off >= s->len) return 0; /* chunked: end of the body */
+    size_t n = s->len - s->off;
+    if (n > s->piece) n = s->piece;
+    if (n > len) n = len;
+    for (size_t i = 0; i < n; i++) ((uint8_t *)buf)[i] = (uint8_t)((s->off + i) % 251);
+    s->off += n;
+    return (int)n;
+}
+
+static void up_check(wtls_http_response *r, size_t len) {
+    uint8_t buf[4096];
+    size_t n = 0;
+    int last = 1;
+    while (n < len) {
+        size_t want = len - n < sizeof buf ? len - n : sizeof buf;
+        int k = wtls_http_read(r, buf, want);
+        if (k <= 0) {
+            last = k;
+            break;
+        }
+        for (int i = 0; i < k; i++) CHECK_EQ_INT(buf[i], (uint8_t)((n + i) % 251));
+        n += (size_t)k;
+    }
+    CHECK_EQ_INT((long long)n, (long long)len);
+    if (n == len) { /* the end of the body is a normal event */
+        CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), 0);
+        last = 0;
+    }
+    CHECK_EQ_INT(last, 0);
+}
+
+static void http_upload_body_cb_fixed(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 1000, .piece = 61, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 1000;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    up_check(r, 1000);
+    wtls_http_close(r);
+}
+
+static void http_upload_body_cb_chunked(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 1000, .piece = 100, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_chunked = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    /* exactly ceil(1000/100) callback results, the last one shorter */
+    CHECK_EQ_INT(s.calls, 11);
+    up_check(r, 1000);
+    wtls_http_close(r);
+}
+
+static void http_upload_empty_chunked(void) {
+    wtls_http_pool_flush();
+    up_state s = {.abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_chunked = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "") == 0);
+    CHECK_EQ_INT(last, 0);
+    CHECK_EQ_INT(s.calls, 1);
+    wtls_http_close(r);
+}
+
+static void http_upload_premature_eof(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 100, .piece = 50, .premature_eof = true, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 100;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_IO);
+    CHECK(r == NULL);
+    /* the aborted connection is not pooled: the next request is fresh */
+    char ok[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/hello", NULL, ok, sizeof ok, &reused), 200);
+    CHECK(!reused);
+}
+
+static void http_upload_callback_abort(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 100, .piece = 50, .abort_after = 50};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 100;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_IO);
+    CHECK(r == NULL);
+}
+
+/* 307 keeps method and body: a stream cannot be rewound, so the request
+ * aborts with WTLS_ERR_HTTP_REDIRECT instead of following the Location. */
+static void http_upload_307_redirect(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 10, .piece = 4, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url(redirect_path(307, "/hello"));
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 10;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_HTTP_REDIRECT);
+    CHECK(r == NULL);
+}
+
+/* 302 turns POST into GET: the body (and the callback) is dropped for the
+ * follow-up request, which must succeed. */
+static void http_upload_302_post_becomes_get(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 10, .piece = 4, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url(redirect_path(302, "/hello"));
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 10;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    CHECK_EQ_INT(last, 0);
+    CHECK_EQ_INT(s.calls, 3); /* first hop only: 4 + 4 + 2 bytes */
+    wtls_http_close(r);
+}
+
+static void http_upload_256k(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 256u * 1024u, .piece = 16u * 1024u, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_chunked = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    up_check(r, 256u * 1024u);
+    wtls_http_close(r);
+}
+
+/* A streaming upload goes out over a pooled connection, and the connection
+ * is pooled again afterwards. */
+static void http_upload_keepalive_reuse(void) {
+    wtls_http_pool_flush();
+    char hello[32];
+    CHECK_EQ_INT(get_full("/hello", NULL, hello, sizeof hello, NULL), 200);
+    CHECK(strcmp(hello, "hello") == 0);
+
+    up_state s = {.len = 500, .piece = 200, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 500;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(info.reused_connection);
+    up_check(r, 500);
+    wtls_http_close(r);
+
+    s.off = 0;
+    s.calls = 0;
+    wtls_http_response *third = open_req(&req); /* the same request again */
+    if (!third) return;
+    wtls_http_info info2;
+    wtls_http_get_info(third, &info2);
+    CHECK(info2.reused_connection);
+    up_check(third, 500);
+    wtls_http_close(third);
+}
+
+/* A stale pooled connection must not re-run a streaming callback: once the
+ * callback produced bytes there is no rewind, so the request fails with
+ * WTLS_ERR_IO instead of being retried (the GET/HEAD equivalent retries). */
+static void http_upload_stale_no_retry(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get("/drop-next");
+    if (!r) return;
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "ok") == 0); /* read to the end: pooled */
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r); /* pooled; the next request on it is dropped */
+
+    up_state s = {.len = 300, .piece = 40, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT"; /* idempotent: only a never-started stream would retry */
+    req.url = url("/echo");
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 300;
+    wtls_http_response *r2 = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r2, &req), WTLS_ERR_IO);
+    CHECK(r2 == NULL);
+    CHECK(s.calls > 0);
+}
+
+static void http_upload_args(void) {
+    wtls_http_pool_flush();
+    up_state s = {.len = 10, .piece = 10, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.url = url("/echo");
+    req.body = "x";
+    req.body_len = 1;
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_ARG); /* body + body_cb */
+    CHECK(r == NULL);
+    req.body = NULL;
+    req.body_cb = NULL;
+    req.body_chunked = true;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_ARG); /* chunked without cb */
+    CHECK(r == NULL);
+}
+
+/* ---- mutual TLS over HTTP (WP3) -------------------------------------------- */
+
+#define P_MTLS_HTTP 4442
+#define P_MTLS_REQ 4441
+
+/* Fetches a client artifact (cert/key) from the server's plain port. */
+static uint8_t *cred_fetch(const char *cmd, size_t *len) {
+    *len = 0;
+    uint32_t ip;
+    int fd = -1;
+    if (wtls_plat_resolve(g_env.server_host, &ip) != WTLS_OK) return NULL;
+    if (wtls_plat_connect(ip, PLAIN_PORT, 3000, &fd) != WTLS_OK) return NULL;
+    uint8_t *buf = NULL;
+    char full[40];
+    int n = snprintf(full, sizeof full, "%s\n", cmd);
+    uint64_t deadline = wtls_plat_now_ms() + 3000;
+    if (n > 0 && n < (int)sizeof full && wtls_plat_send(fd, (const uint8_t *)full, (size_t)n) == n) {
+        char line[16] = {0};
+        size_t i = 0;
+        while (i < sizeof line - 1 && plain_recv_exact(fd, (uint8_t *)&line[i], 1, deadline) &&
+               line[i] != '\n')
+            i++;
+        long want = strtol(line, NULL, 10);
+        if (want > 0 && want < 16384 && (buf = malloc((size_t)want))) {
+            if (plain_recv_exact(fd, buf, (size_t)want, deadline)) *len = (size_t)want;
+            else {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    wtls_plat_close(fd);
+    return buf;
+}
+
+static wtls_client_cred *http_client_cred(const char *name) {
+    char cmd[40];
+    size_t clen = 0, klen = 0;
+    snprintf(cmd, sizeof cmd, "CLIENTCERT %s", name);
+    uint8_t *cert = cred_fetch(cmd, &clen);
+    snprintf(cmd, sizeof cmd, "CLIENTKEY %s", name);
+    uint8_t *key0 = cred_fetch(cmd, &klen);
+    uint8_t *key = NULL;
+    if (key0) {
+        key = malloc(klen + 1); /* PEM: append the terminating NUL */
+        if (key) {
+            memcpy(key, key0, klen);
+            key[klen] = 0;
+            klen += 1;
+        }
+        free(key0);
+    }
+    wtls_client_cred *cred = NULL;
+    if (cert && key) {
+        CHECK_EQ_INT(wtls_client_cred_load(&cred, cert, clen, key, klen), WTLS_OK);
+    } else {
+        CHECK(false); /* plain fetch failed */
+    }
+    free(cert);
+    free(key);
+    return cred;
+}
+
+/* /who on the optional-mTLS port shows the client certificate CN. */
+static void http_mtls_who(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *cred = http_client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_MTLS_HTTP, "/who");
+    req.tls = &opt;
+    wtls_http_response *r = open_req(&req);
+    if (r) {
+        int last = 1;
+        CHECK(strcmp(body_str(r, &last), "client-ec.test") == 0);
+        CHECK_EQ_INT(last, 0);
+        wtls_http_close(r);
+    }
+    wtls_client_cred_free(cred);
+}
+
+/* The pool key includes the client identity: a connection authenticated
+ * with a certificate never serves a request without it. */
+static void http_mtls_pool_isolated(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *a = http_client_cred("client-ec");
+    CHECK(a);
+    if (!a) return;
+    wtls_options with_a = {0};
+    with_a.client_cred = a;
+
+    wtls_http_request cred_req = {0};
+    cred_req.url = url_of("https", P_MTLS_HTTP, "/who");
+    cred_req.tls = &with_a;
+    wtls_http_response *r = open_req(&cred_req);
+    if (!r) return;
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "client-ec.test") == 0);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r); /* pooled under the client-ec identity */
+
+    wtls_http_request plain = {0};
+    plain.url = url_of("https", P_MTLS_HTTP, "/who");
+    wtls_http_response *r2 = open_req(&plain);
+    if (r2) {
+        wtls_http_info info;
+        wtls_http_get_info(r2, &info);
+        CHECK(!info.reused_connection);
+        last = 1;
+        CHECK(strcmp(body_str(r2, &last), "none") == 0);
+        wtls_http_close(r2);
+    }
+
+    wtls_http_response *r3 = open_req(&cred_req);
+    if (r3) {
+        wtls_http_info info;
+        wtls_http_get_info(r3, &info);
+        CHECK(info.reused_connection);
+        last = 1;
+        CHECK(strcmp(body_str(r3, &last), "client-ec.test") == 0);
+        wtls_http_close(r3);
+    }
+    wtls_client_cred_free(a);
+}
+
+/* Session tickets of an mTLS connection are keyed by the client identity.
+ * no_keepalive keeps the pool out of the way, so only tickets can make the
+ * third request fast. (r1's own resumption state is irrelevant: an earlier
+ * test may have left a ticket for client-ec; the point is that b never
+ * consumes a's, and a's next one works.) */
+static void http_mtls_tickets_isolated(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *a = http_client_cred("client-ec");
+    wtls_client_cred *b = http_client_cred("client-rsa");
+    CHECK(a && b);
+    if (!a || !b) {
+        wtls_client_cred_free(a);
+        wtls_client_cred_free(b);
+        return;
+    }
+    wtls_options oa = {0};
+    oa.client_cred = a;
+    wtls_options ob = {0};
+    ob.client_cred = b;
+
+    wtls_http_request ra = {0};
+    ra.url = url_of("https", P_MTLS_HTTP, "/hello");
+    ra.tls = &oa;
+    ra.no_keepalive = true;
+    wtls_http_request rb = ra;
+    rb.tls = &ob;
+
+    wtls_http_response *r = open_req(&ra); /* leaves a fresh ticket(a) */
+    if (r) {
+        int last = 1;
+        CHECK(strcmp(body_str(r, &last), "hello") == 0);
+        CHECK_EQ_INT(last, 0);
+        wtls_http_close(r);
+    }
+    wtls_http_response *r2 = open_req(&rb);
+    if (r2) {
+        wtls_http_info info;
+        wtls_http_get_info(r2, &info);
+        CHECK(!info.tls.resumed); /* b must not resume a's ticket */
+        wtls_http_close(r2);
+    }
+    wtls_http_response *r3 = open_req(&ra);
+    if (r3) {
+        wtls_http_info info;
+        wtls_http_get_info(r3, &info);
+        CHECK(info.tls.resumed); /* a's own ticket survived b's connection */
+        wtls_http_close(r3);
+    }
+    wtls_client_cred_free(b);
+    wtls_client_cred_free(a);
+}
+
+/* A cross-origin redirect strips the client certificate like the
+ * Authorization header: the follow-up to the port that requires a client
+ * certificate must fail with a handshake error. */
+static void http_mtls_cross_origin_stripped(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *cred = http_client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    char to[600];
+    snprintf(to, sizeof to, "https://%s:%u/hello", g_env.server_host, (unsigned)P_MTLS_REQ);
+    wtls_http_request req = {0};
+    req.url = url(redirect_path(302, to));
+    req.tls = &opt;
+    wtls_http_response *r = (wtls_http_response *)1;
+    int st = wtls_http_open(&r, &req);
+    /* The certificate was stripped, so the required-cert port rejects us.
+     * In TLS 1.3 that abort can surface during the connect or only at the
+     * first read (the response head); both prove the stripping, because
+     * with the certificate the follow-up would succeed. */
+    CHECK(st == WTLS_ERR_HANDSHAKE || st == WTLS_ERR_IO);
+    CHECK(r == NULL);
+    wtls_client_cred_free(cred);
+}
+
+/* A streaming upload while presenting a client certificate (WP2 + WP3). */
+static void http_mtls_upload(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *cred = http_client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    up_state s = {.len = 700, .piece = 128, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url_of("https", P_MTLS_HTTP, "/echo");
+    req.tls = &opt;
+    req.body_cb = up_cb;
+    req.body_ctx = &s;
+    req.body_len = 700;
+    wtls_http_response *r = open_req(&req);
+    if (r) {
+        up_check(r, 700);
+        wtls_http_close(r);
+    }
+    wtls_client_cred_free(cred);
+}
+
+/* wtls_client_cred_free while a pooled connection still holds a reference:
+ * flushing the pool releases it; nothing must crash or leak. */
+static void http_mtls_free_while_pooled(void) {
+    wtls_http_pool_flush();
+    wtls_client_cred *cred = http_client_cred("client-ec");
+    CHECK(cred);
+    if (!cred) return;
+    wtls_options opt = {0};
+    opt.client_cred = cred;
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_MTLS_HTTP, "/hello");
+    req.tls = &opt;
+    wtls_http_response *r = open_req(&req);
+    if (!r) {
+        wtls_client_cred_free(cred);
+        return;
+    }
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);          /* pooled; the connection holds a reference */
+    wtls_client_cred_free(cred); /* the application's reference */
+    wtls_http_pool_flush();       /* releases the last one: destroyed here */
+    /* the library still works */
+    char hello[32];
+    CHECK_EQ_INT(get_full("/hello", NULL, hello, sizeof hello, NULL), 200);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -1075,6 +1597,23 @@ void wtls_suite_http(void) {
     RUN(http_bighead_limit);
     RUN(http_header_timeout);
     RUN(http_post_echo);
+    RUN(http_upload_body_cb_fixed);
+    RUN(http_upload_body_cb_chunked);
+    RUN(http_upload_empty_chunked);
+    RUN(http_upload_premature_eof);
+    RUN(http_upload_callback_abort);
+    RUN(http_upload_307_redirect);
+    RUN(http_upload_302_post_becomes_get);
+    RUN(http_upload_256k);
+    RUN(http_upload_keepalive_reuse);
+    RUN(http_upload_stale_no_retry);
+    RUN(http_upload_args);
+    RUN(http_mtls_who);
+    RUN(http_mtls_pool_isolated);
+    RUN(http_mtls_tickets_isolated);
+    RUN(http_mtls_cross_origin_stripped);
+    RUN(http_mtls_upload);
+    RUN(http_mtls_free_while_pooled);
     RUN(http_request_headers);
     RUN(http_get_info);
     RUN(http_alpn_forced);

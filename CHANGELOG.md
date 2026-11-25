@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-26)
 
 ### Added
 
@@ -24,6 +24,40 @@
   Measured on a real Wii (2026-11-26): `ecdsa_p256_verify`
   25.7 → **5.3 ms**, `handshake_full_cpu` 66.4 → **25.8 ms** — the
   `<= 30 ms` target from 0.1 is met for the first time.
+- HTTP streaming uploads (`wtls_http_body_cb`, `<wiitls/http.h>`): a
+  request body produced by a callback, sent either with `Content-Length`
+  (`body_len`) or as `Transfer-Encoding: chunked` (`body_chunked`, the
+  callback ends the body by returning 0). A reader that stops early or
+  fails aborts with `WTLS_ERR_IO` and the connection is closed, never
+  pooled; the stale-connection retry happens only if the callback has not
+  been called yet and the method is idempotent; 303 (and 301/302 after
+  POST) drop the body without calling the callback again, every other
+  redirect with a streaming body is `WTLS_ERR_HTTP_REDIRECT` (a stream
+  cannot be rewound). Pinned by the `http` suite on host and Wii
+  (fixed-length and chunked uploads, 256 KiB, aborts, keep-alive reuse,
+  redirect rules).
+- Client certificates / mutual TLS (`wtls_client_cred_load`,
+  `wtls_client_cred_free`, `wtls_options::client_cred`): ECDSA and RSA key
+  pairs in PEM or DER, cert/key match validated at load. Reference-counted
+  per connection (including pooled HTTP connections), private key zeroized
+  on the last release. Session tickets and the HTTP keep-alive pool are
+  keyed by the leaf certificate's SHA-256 fingerprint (identities never mix),
+  and a redirect that leaves the origin strips the client certificate like
+  `Authorization` and `Cookie`. The parsing lives in its own object file
+  (`src/wtls_cred.c`); applications without mTLS link none of it (new
+  `cred_parse_not_linked_without_mtls` CTest).
+- HTTP helpers (`wtls_http_url_encode`, `wtls_http_parse_content_range`,
+  `<wiitls/http.h>`): RFC 3986 percent-encoding with a size-query mode and
+  an RFC 9110 Content-Range parser for resumable `206` downloads
+  (unsatisfied ranges, `start > end`, `end >= total` and overflow rejected).
+  Stateless in their own object file; host unit tests in
+  `tests/host/test_http_util.c`.
+- Test PKI (`tests/host/make_certs.py`): client certificates (ECDSA P-256,
+  RSA-2048, an untrusted one) with `clientAuth`; the test server gained
+  mutual-TLS ports (certificate required and optional, the latter answers
+  `/who` with the client CN) and `CLIENTCERT`/`CLIENTKEY` plain-port commands,
+  so the Wii hardware suites load credentials over the network without file
+  access.
 
 ## 0.2.0 (2026-11-25)
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libwiitls VERSION 0.2.0 LANGUAGES C)
+project(libwiitls VERSION 0.3.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -293,6 +293,7 @@ add_library(wiitls STATIC
     src/wtls_jitter.c
     src/wtls_time.c
     src/wtls_castore.c
+    src/wtls_cred.c
     src/wtls_conn.c
     src/wtls_scache.c
     src/wtls_dns.c
@@ -300,6 +301,7 @@ add_library(wiitls STATIC
     src/http/wtls_http_req.c
     src/http/wtls_http_parse.c
     src/http/wtls_http_chunked.c
+    src/http/wtls_http_util.c
     src/http/wtls_http.c
     src/http/wtls_http_pool.c
     ${WTLS_CA_BUNDLE_C}
@@ -432,6 +434,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_http_req)
     wtls_host_test(test_http_parse)
     wtls_host_test(test_http_chunked)
+    wtls_host_test(test_http_util)
     if(WTLS_GZIP)
         wtls_host_test(test_http_gzip)
     endif()
@@ -454,6 +457,11 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     if(CMAKE_NM)
         add_test(NAME http_not_linked_into_tls_only
                  COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_tls> -DPATTERN=wtls_http_
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
+        # An application without client certificates must not link the
+        # credential parsing (mbedtls_pk_parse_key and friends).
+        add_test(NAME cred_parse_not_linked_without_mtls
+                 COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_plat> -DPATTERN=wtls_client_cred_
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
     endif()
 
