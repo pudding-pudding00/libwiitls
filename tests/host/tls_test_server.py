@@ -23,7 +23,7 @@ CLOSE (close_notify), TRUNC (TCP close without close_notify), SILENT,
 CONNS (TCP connections accepted on this port so far).
 
 HTTP/1.1 ports (with --certs; TLS 1.2+1.3, ECDSA leaf, ALPN http/1.1): 4438 and
-4439. Keep-alive until the request says "Connection: close" or an endpoint
+4439; the same endpoints over plain TCP on 4440. Keep-alive until the request says "Connection: close" or an endpoint
 closes. Pattern bytes: i % 251. Unknown query parameters (e.g. id=...) are
 ignored, so a test can tag its requests and count them with /count.
   GET /hello                      200, text/plain, "hello"
@@ -52,10 +52,18 @@ ignored, so a test can tag its requests and count them with /count.
   GET /count?id=K                 requests received so far (all ports, dropped
                                   ones too) whose query has id=K; /count itself
                                   is not counted
+  GET /gzip?n=N[&chunked=1][&bad=1][&cut=1][&members=2][&enc=E]
+                                  N pattern bytes gzip'd (mtime 0), Content-
+                                  Encoding E (default gzip), CL or chunked;
+                                  bad=1: CRC flipped; cut=1: only the first
+                                  half of the gzip stream (framing complete);
+                                  members=2: two gzip members back to back
+  GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
 
 Prints "READY" on stdout once every listener is bound.
 """
 import argparse
+import gzip
 import os
 import socket
 import ssl
@@ -362,6 +370,27 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             send(http_response(302, [("Location", "/redirect-chain?n=%d" % (n - 1)), ("Content-Length", 0)]))
         else:
             send(http_response(200, [("Content-Length", 4)], b"done"))
+    elif path == "/gzip":
+        data = pattern(n)
+        if query.get("members") == "2":
+            z = gzip.compress(data[:n // 2], mtime=0) + gzip.compress(data[n // 2:], mtime=0)
+        else:
+            z = gzip.compress(data, mtime=0)
+        if query.get("bad") == "1":
+            z = z[:-8] + bytes([z[-8] ^ 1]) + z[-7:]
+        if query.get("cut") == "1":
+            z = z[:len(z) // 2]
+        enc = ("Content-Encoding", query.get("enc", "gzip"))
+        if query.get("chunked") == "1":
+            send(http_response(200, [enc, ("Transfer-Encoding", "chunked")]))
+            for k in range(0, len(z), 100):
+                piece = z[k:k + 100]
+                send(b"%x\r\n" % len(piece) + piece + b"\r\n")
+            send(b"0\r\n\r\n")
+        else:
+            send(http_response(200, [enc, ("Content-Length", len(z))], z))
+    elif path == "/encoding":
+        send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
     elif path == "/count":
         with HTTP_LOG_LOCK:
             c = sum(1 for q in HTTP_LOG if q.get("id") == query.get("id"))
@@ -444,7 +473,8 @@ def http_handler(ctx, counter):
 
 def http_listeners(bind):
     ctx = tls_context("ecdsa", alpn=["http/1.1"])
-    return [serve(bind, port, http_handler(ctx, Counter())) for port in (4438, 4439)]
+    tls = [serve(bind, port, http_handler(ctx, Counter())) for port in (4438, 4439)]
+    return tls + [serve(bind, 4440, http_handler(None, Counter()))]
 
 
 def serve(bind, port, handler):

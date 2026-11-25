@@ -19,6 +19,7 @@
 #define P_EXPIRED 4434
 #define P_HTTP 4438
 #define P_HTTP2 4439
+#define P_HTTP_PLAIN 4440
 #define P_CLOSED 4499
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -655,9 +656,9 @@ static void expect_open_err(const char *path, int want) {
     CHECK(r == NULL);
 }
 
-static void http_redirect_downgrade_refused(void) {
+static void http_redirect_https_to_plain_refused(void) {
     wtls_http_pool_flush();
-    expect_open_err(redirect_path(302, url_of("http", PLAIN_PORT, "/")), WTLS_ERR_HTTP_REDIRECT);
+    expect_open_err(redirect_path(302, url_of("http", P_HTTP_PLAIN, "/hello")), WTLS_ERR_HTTP_REDIRECT);
 }
 
 /* ASCII case-insensitive substring search. */
@@ -801,6 +802,220 @@ static void fetch_result_free_safe(void) {
     CHECK(res.body == NULL);
 }
 
+/* ---- plain http:// ---------------------------------------------------------------- */
+
+static wtls_http_response *get_url(const char *u) {
+    wtls_http_request req = {0};
+    req.url = u;
+    return open_req(&req);
+}
+
+static void http_plain_get(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get_url(url_of("http", P_HTTP_PLAIN, "/hello"));
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(!info.secure);
+    static const wtls_conn_info zero;
+    CHECK(memcmp(&info.tls, &zero, sizeof zero) == 0);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+    /* a body up to the end of the connection: the TCP end is the end */
+    r = get_url(url_of("http", P_HTTP_PLAIN, "/close?n=300&notify=0"));
+    if (!r) return;
+    uint8_t buf[400];
+    size_t n = read_all(r, buf, sizeof buf, 64, &last);
+    CHECK_EQ_INT(n, 300);
+    CHECK_EQ_INT(last, 0);
+    CHECK(is_pattern(buf, n, 0));
+    wtls_http_close(r);
+}
+
+static void http_plain_keepalive(void) {
+    wtls_http_pool_flush();
+    int first = -1;
+    for (int i = 1; i <= 2; i++) {
+        wtls_http_response *r = get_url(url_of("http", P_HTTP_PLAIN, "/conn"));
+        if (!r) return;
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(info.reused_connection == (i == 2));
+        int last = 1, id = 0, no = 0;
+        CHECK(sscanf(body_str(r, &last), "%d %d", &id, &no) == 2);
+        CHECK_EQ_INT(no, i);
+        if (i == 1) first = id;
+        else CHECK_EQ_INT(id, first);
+        wtls_http_close(r);
+    }
+    /* a plain connection never serves an https request on the same host:port key */
+    wtls_http_response *r = get("/conn");
+    if (!r) return;
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(info.secure && !info.reused_connection);
+    wtls_http_close(r);
+}
+
+static void http_redirect_plain_to_https_ok(void) {
+    wtls_http_pool_flush();
+    char path[700];
+    snprintf(path, sizeof path, "%s", redirect_path(302, url("/hello")));
+    wtls_http_response *r = get_url(url_of("http", P_HTTP_PLAIN, path));
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(info.secure);
+    CHECK_EQ_INT(info.redirects, 1);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    wtls_http_close(r);
+}
+
+/* ---- gzip ---------------------------------------------------------------------------- */
+
+static wtls_http_response *gz_open(const char *path, bool no_gzip, const wtls_http_header *h, size_t n) {
+    wtls_http_request req = {0};
+    req.url = url(path);
+    req.no_gzip = no_gzip;
+    req.headers = h;
+    req.n_headers = n;
+    return open_req(&req);
+}
+
+static void expect_gzip_pattern(const char *path, size_t n) {
+    wtls_http_response *r = gz_open(path, false, NULL, 0);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    CHECK(wtls_http_content_length(r) == -1);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(info.gzip);
+    static uint8_t buf[70000];
+    int last = 1;
+    size_t got = read_all(r, buf, sizeof buf, 777, &last);
+    CHECK_EQ_INT(got, n);
+    CHECK_EQ_INT(last, 0);
+    CHECK(is_pattern(buf, got, 0));
+    CHECK_EQ_INT(wtls_http_read(r, buf, 1), 0); /* stays at the end */
+    wtls_http_close(r);
+}
+
+static void http_gzip_length(void) {
+    wtls_http_pool_flush();
+    expect_gzip_pattern("/gzip?n=60000", 60000);
+    expect_gzip_pattern("/gzip?n=60000&enc=X-GZIP", 60000);
+    expect_gzip_pattern("/gzip?n=0", 0);
+    /* the decoded response was read to its end: the connection was pooled */
+    wtls_http_response *r = get("/hello");
+    if (!r) return;
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(info.reused_connection);
+    CHECK(!info.gzip);
+    wtls_http_close(r);
+}
+
+static void http_gzip_chunked(void) {
+    wtls_http_pool_flush();
+    expect_gzip_pattern("/gzip?n=60000&chunked=1", 60000);
+    expect_gzip_pattern("/gzip?n=5000&members=2", 5000);
+}
+
+static void http_gzip_offered(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get("/headers");
+    if (!r) return;
+    int last = 1;
+    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip\r\n") != NULL);
+    wtls_http_close(r);
+    r = gz_open("/headers", true, NULL, 0);
+    if (!r) return;
+    CHECK(!contains_ci(body_str(r, &last), "accept-encoding"));
+    wtls_http_close(r);
+}
+
+/* The body as sent: the gzip magic, Content-Length as on the wire. */
+static void expect_raw_gzip(wtls_http_response *r) {
+    if (!r) return;
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK(!info.gzip);
+    int64_t cl = wtls_http_content_length(r);
+    CHECK(cl > 10);
+    uint8_t buf[256];
+    int last = 1;
+    size_t n = read_all(r, buf, sizeof buf, sizeof buf, &last);
+    CHECK(n == (size_t)cl && n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b);
+    wtls_http_close(r);
+}
+
+static void http_gzip_no_gzip_raw(void) {
+    wtls_http_pool_flush();
+    expect_raw_gzip(gz_open("/gzip?n=100", true, NULL, 0));
+}
+
+static void http_gzip_own_accept_encoding_raw(void) {
+    wtls_http_pool_flush();
+    static const wtls_http_header ae = {"Accept-Encoding", "gzip"};
+    expect_raw_gzip(gz_open("/gzip?n=100", false, &ae, 1));
+}
+
+static void http_gzip_unknown_encoding(void) {
+    wtls_http_pool_flush();
+    expect_open_err("/encoding?name=br", WTLS_ERR_HTTP);
+    wtls_http_response *r = get("/encoding?name=identity");
+    if (!r) return;
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "raw") == 0);
+    wtls_http_close(r);
+    r = gz_open("/encoding?name=br", true, NULL, 0); /* not offered: passed through */
+    if (!r) return;
+    CHECK(strcmp(body_str(r, &last), "raw") == 0);
+    wtls_http_close(r);
+}
+
+static void expect_gzip_error(const char *path, int want) {
+    wtls_http_response *r = gz_open(path, false, NULL, 0);
+    if (!r) return;
+    uint8_t buf[8192];
+    int last = 1;
+    read_all(r, buf, sizeof buf, sizeof buf, &last);
+    CHECK_EQ_INT(last, want);
+    CHECK_EQ_INT(wtls_http_read(r, buf, 1), want); /* sticky */
+    wtls_http_close(r);
+}
+
+static void http_gzip_bad_crc(void) {
+    wtls_http_pool_flush();
+    expect_gzip_error("/gzip?n=3000&bad=1", WTLS_ERR_HTTP);
+    expect_gzip_error("/gzip?n=3000&bad=1&chunked=1", WTLS_ERR_HTTP);
+}
+
+static void http_gzip_truncated(void) {
+    wtls_http_pool_flush();
+    expect_gzip_error("/gzip?n=3000&cut=1", WTLS_ERR_IO);
+    expect_gzip_error("/gzip?n=3000&cut=1&chunked=1", WTLS_ERR_IO);
+}
+
+static void http_gzip_fetch_limit(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    /* 1000 compressed bytes would pass a Content-Length check: the decoded length counts */
+    CHECK_EQ_INT(fetch("/gzip?n=50000", 10000, &res), WTLS_ERR_HTTP_LIMIT);
+    CHECK(res.body == NULL);
+    CHECK_EQ_INT(res.status, 200);
+    wtls_http_result_free(&res);
+    CHECK_EQ_INT(fetch("/gzip?n=50000", 50000, &res), WTLS_OK);
+    CHECK_EQ_INT(res.body_len, 50000);
+    CHECK(res.body && is_pattern((const uint8_t *)res.body, res.body_len, 0));
+    wtls_http_result_free(&res);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -845,7 +1060,7 @@ void wtls_suite_http(void) {
     RUN(http_redirect_disabled);
     RUN(http_redirect_methods);
     RUN(http_redirect_relative);
-    RUN(http_redirect_downgrade_refused);
+    RUN(http_redirect_https_to_plain_refused);
     RUN(http_redirect_cross_origin_strips_credentials);
     RUN(http_redirect_same_origin_keeps_credentials);
     RUN(http_redirect_without_location);
@@ -857,5 +1072,19 @@ void wtls_suite_http(void) {
     RUN(fetch_limit_chunked);
     RUN(fetch_default_limit);
     RUN(fetch_result_free_safe);
+    RUN(http_plain_get);
+    RUN(http_plain_keepalive);
+    RUN(http_redirect_plain_to_https_ok);
+#if WTLS_GZIP
+    RUN(http_gzip_length);
+    RUN(http_gzip_chunked);
+    RUN(http_gzip_offered);
+    RUN(http_gzip_no_gzip_raw);
+    RUN(http_gzip_own_accept_encoding_raw);
+    RUN(http_gzip_unknown_encoding);
+    RUN(http_gzip_bad_crc);
+    RUN(http_gzip_truncated);
+    RUN(http_gzip_fetch_limit);
+#endif
     wtls_shutdown();
 }

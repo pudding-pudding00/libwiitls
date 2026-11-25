@@ -1,5 +1,7 @@
 /* HTTP/1.1 client: request, response head, body streaming (RFC 9112),
- * keep-alive pool reuse with a liveness check and one idempotent retry.
+ * keep-alive pool reuse with a liveness check and one idempotent retry,
+ * redirects, gzip Content-Encoding (WTLS_GZIP), over TLS (https) or plain
+ * TCP (http).
  *
  * The response keeps the connection and one buffer: the head (parsed in
  * place, so field names and values point into it) followed by the body bytes
@@ -11,11 +13,15 @@
 #include <wiitls/http.h>
 
 #include "http/wtls_http_chunked.h"
+#if WTLS_GZIP
+#include "http/wtls_http_gzip.h"
+#endif
 #include "http/wtls_http_parse.h"
 #include "http/wtls_http_pool.h"
 #include "http/wtls_http_req.h"
 #include "http/wtls_url.h"
 #include "plat/plat.h"
+#include "wtls_dns.h"
 #include "wtls_internal.h"
 
 #define HEAD_BUF_START 2048u
@@ -24,8 +30,15 @@
 /* wtls_conn_info.alpn points into this list, so it must outlive every connection. */
 static const char *const k_alpn[] = {"http/1.1", NULL};
 
+/* A transport: a TLS connection (https) or a plain TCP socket (http). */
+typedef struct {
+    wtls_conn *tls;         /* NULL: plain */
+    int fd;                 /* plain only */
+    uint32_t io_timeout_ms; /* plain only; TLS keeps its own */
+} http_tr;
+
 struct wtls_http_response {
-    wtls_conn *conn;
+    http_tr *conn;
     char *buf;           /* head, then extra body bytes */
     size_t extra_off;    /* first unread extra byte */
     size_t extra_end;    /* end of the extra bytes */
@@ -44,16 +57,61 @@ struct wtls_http_response {
     uint16_t port;
     char host[256];
     wtls_conn_info info;
+#if WTLS_GZIP
+    wtls_gzip *gz;       /* decoding Content-Encoding: gzip */
+    uint8_t *gz_in;      /* raw body bytes waiting for the decoder */
+    size_t gz_off, gz_end;
+    bool gz_raw_end;     /* the raw body has ended */
+#endif
 };
 
 /* ---- transport ------------------------------------------------------------ */
 
-static int tr_read(wtls_http_response *r, void *buf, size_t len) { return wtls_read(r->conn, buf, len); }
+#define DEF_CONNECT_MS 5000u
+#define DEF_IO_MS 15000u
 
-static int tr_write_all(wtls_conn *c, const void *buf, size_t len) {
+/* Plain TCP read: bytes, WTLS_ERR_CLOSED at the end of the stream (plain HTTP
+ * has no close_notify: a TCP end is the end), WTLS_ERR_TIMEOUT or WTLS_ERR_IO. */
+static int plain_read(http_tr *t, void *buf, size_t len) {
+    if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
+    uint64_t deadline = wtls_plat_now_ms() + t->io_timeout_ms;
+    for (;;) {
+        int k = wtls_plat_recv(t->fd, buf, len);
+        if (k > 0) return k;
+        if (k == 0) return WTLS_ERR_CLOSED;
+        if (k != WTLS_WANT_READ) return WTLS_ERR_IO;
+        uint64_t now = wtls_plat_now_ms();
+        if (now >= deadline) return WTLS_ERR_TIMEOUT;
+        int p = wtls_plat_poll(t->fd, true, false, (uint32_t)(deadline - now));
+        if (p < 0) return WTLS_ERR_IO;
+        if (p == 0) return WTLS_ERR_TIMEOUT;
+    }
+}
+
+static int plain_write(http_tr *t, const void *buf, size_t len) {
+    if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
+    uint64_t deadline = wtls_plat_now_ms() + t->io_timeout_ms;
+    for (;;) {
+        int k = wtls_plat_send(t->fd, buf, len);
+        if (k > 0) return k;
+        if (k != WTLS_WANT_WRITE) return WTLS_ERR_IO;
+        uint64_t now = wtls_plat_now_ms();
+        if (now >= deadline) return WTLS_ERR_TIMEOUT;
+        int p = wtls_plat_poll(t->fd, false, true, (uint32_t)(deadline - now));
+        if (p < 0) return WTLS_ERR_IO;
+        if (p == 0) return WTLS_ERR_TIMEOUT;
+    }
+}
+
+static int tr_read(wtls_http_response *r, void *buf, size_t len) {
+    http_tr *t = r->conn;
+    return t->tls ? wtls_read(t->tls, buf, len) : plain_read(t, buf, len);
+}
+
+static int tr_write_all(http_tr *t, const void *buf, size_t len) {
     const uint8_t *p = buf;
     while (len) {
-        int k = wtls_write(c, p, len);
+        int k = t->tls ? wtls_write(t->tls, p, len) : plain_write(t, p, len);
         if (k <= 0) return k == WTLS_ERR_CLOSED || k == 0 ? WTLS_ERR_IO : k;
         p += k;
         len -= (size_t)k;
@@ -61,22 +119,70 @@ static int tr_write_all(wtls_conn *c, const void *buf, size_t len) {
     return WTLS_OK;
 }
 
-void wtls_http_tr_close(void *c) { wtls_close((wtls_conn *)c); }
+static uint32_t tr_timeout(const http_tr *t) { return t->tls ? t->tls->io_timeout_ms : t->io_timeout_ms; }
 
-/* Liveness check of a pooled connection: alive if nothing is readable; if the
- * socket is readable, one non-blocking 1-byte read must report WTLS_WANT_READ
- * (only post-handshake messages such as a late TLS 1.3 ticket arrived). Data,
+static void tr_set_timeout(http_tr *t, uint32_t ms) {
+    if (t->tls) t->tls->io_timeout_ms = ms;
+    else t->io_timeout_ms = ms;
+}
+
+void wtls_http_tr_close(void *c) {
+    http_tr *t = c;
+    if (!t) return;
+    if (t->tls) wtls_close(t->tls);
+    else wtls_plat_close(t->fd);
+    free(t);
+}
+
+/* Liveness check of a pooled connection: alive if nothing is readable. A
+ * readable plain socket is dead (data or EOF nobody asked for). A readable TLS
+ * socket must answer one non-blocking 1-byte read with WTLS_WANT_READ (only
+ * post-handshake messages such as a late TLS 1.3 ticket arrived); data,
  * close_notify, EOF or an error mean the connection is dead. */
-static bool tr_alive(wtls_conn *c) {
-    if (wtls_pending(c)) return false;
-    int p = wtls_plat_poll(c->fd, true, false, 0);
+static bool tr_alive(http_tr *t) {
+    if (t->tls && wtls_pending(t->tls)) return false;
+    int p = wtls_plat_poll(t->tls ? t->tls->fd : t->fd, true, false, 0);
     if (p == 0) return true;
-    if (p < 0) return false;
+    if (p < 0 || !t->tls) return false;
     uint8_t b;
-    if (wtls_set_nonblocking(c, true) != WTLS_OK) return false;
-    int k = wtls_read(c, &b, 1);
-    wtls_set_nonblocking(c, false);
+    if (wtls_set_nonblocking(t->tls, true) != WTLS_OK) return false;
+    int k = wtls_read(t->tls, &b, 1);
+    wtls_set_nonblocking(t->tls, false);
     return k == WTLS_WANT_READ;
+}
+
+/* A new transport to host:port: TLS with opt, or plain TCP with opt's connect
+ * and I/O timeouts (DNS cache as wtls_connect). */
+static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t port, const wtls_options *opt) {
+    *out = NULL;
+    if (!wtls_core_initialized()) return WTLS_ERR_STATE;
+    http_tr *t = calloc(1, sizeof *t);
+    if (!t) return WTLS_ERR_NOMEM;
+    t->fd = -1;
+    int st;
+    if (secure) {
+        st = wtls_connect(&t->tls, host, port, opt);
+    } else {
+        uint32_t ip;
+        bool literal = wtls_plat_parse_ipv4(host, &ip);
+        st = literal ? WTLS_OK : wtls_dns_lookup(host, &ip, wtls_plat_now_ms());
+        if (st != WTLS_OK) st = WTLS_ERR_DNS;
+        if (st == WTLS_OK) {
+            st = wtls_plat_connect(ip, port, opt->connect_timeout_ms ? opt->connect_timeout_ms : DEF_CONNECT_MS,
+                                   &t->fd);
+            if (st != WTLS_OK) {
+                t->fd = -1;
+                if (!literal) wtls_dns_invalidate(host); /* the address may have moved */
+            }
+        }
+        t->io_timeout_ms = opt->io_timeout_ms ? opt->io_timeout_ms : DEF_IO_MS;
+    }
+    if (st != WTLS_OK) {
+        free(t);
+        return st;
+    }
+    *out = t;
+    return WTLS_OK;
 }
 
 /* ---- open ------------------------------------------------------------------- */
@@ -84,9 +190,22 @@ static bool tr_alive(wtls_conn *c) {
 static void response_free(wtls_http_response *r) {
     if (!r) return;
     if (r->conn) wtls_http_tr_close(r->conn);
+#if WTLS_GZIP
+    wtls_gzip_free(r->gz);
+    free(r->gz_in);
+#endif
     free(r->buf);
     free(r->url);
     free(r);
+}
+
+static bool decoding(const wtls_http_response *r) {
+#if WTLS_GZIP
+    return r->gz != NULL;
+#else
+    (void)r;
+    return false;
+#endif
 }
 
 /* One request as it goes out on the current hop: a redirect may change the
@@ -98,12 +217,13 @@ typedef struct {
     size_t body_len;
     const wtls_http_header *headers;
     size_t n_headers;
+    bool want_gzip; /* offer gzip and decode it */
     const char *head;
     size_t head_len;
     wtls_options opt;
 } request_ctx;
 
-static int send_request(wtls_conn *c, const request_ctx *x) {
+static int send_request(http_tr *c, const request_ctx *x) {
     size_t body_len = x->body ? x->body_len : 0;
     if (body_len && x->head_len + body_len <= SINGLE_WRITE_MAX) {
         char *all = malloc(x->head_len + body_len);
@@ -152,7 +272,7 @@ static int read_head(wtls_http_response *r, uint32_t timeout_ms, bool *got) {
         }
         uint64_t now = wtls_plat_now_ms();
         if (now >= deadline) return WTLS_ERR_TIMEOUT;
-        r->conn->io_timeout_ms = (uint32_t)(deadline - now);
+        tr_set_timeout(r->conn, (uint32_t)(deadline - now));
         int k = tr_read(r, buf + fill, cap - fill);
         if (k > 0) {
             fill += (size_t)k;
@@ -167,7 +287,7 @@ static int read_head(wtls_http_response *r, uint32_t timeout_ms, bool *got) {
 
 static int connect_fresh(wtls_http_response *r, request_ctx *x) {
     r->reused = false;
-    int st = wtls_connect(&r->conn, r->host, r->port, &x->opt);
+    int st = tr_connect(&r->conn, r->secure, r->host, r->port, &x->opt);
     if (st != WTLS_OK) r->conn = NULL;
     return st;
 }
@@ -190,13 +310,14 @@ static int acquire(wtls_http_response *r, request_ctx *x) {
  * restored afterwards (the head phase runs on the header deadline). */
 static int exchange(wtls_http_response *r, const request_ctx *x, bool *got) {
     *got = false;
-    wtls_get_info(r->conn, &r->info);
+    if (r->conn->tls) wtls_get_info(r->conn->tls, &r->info);
+    else memset(&r->info, 0, sizeof r->info);
     int st = send_request(r->conn, x);
     if (st != WTLS_OK) return st;
-    uint32_t io_timeout = r->conn->io_timeout_ms;
+    uint32_t io_timeout = tr_timeout(r->conn);
     uint32_t t = x->req->header_timeout_ms ? x->req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
     st = read_head(r, t, got);
-    r->conn->io_timeout_ms = io_timeout;
+    tr_set_timeout(r->conn, io_timeout);
     return st;
 }
 
@@ -233,7 +354,7 @@ static void drain_body(wtls_http_response *r) {
 static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     char *head = NULL;
     int st = wtls_http_build_head(x->method, u, x->headers, x->n_headers, x->body != NULL, x->body_len,
-                                  x->req->no_keepalive, false, &head, &x->head_len);
+                                  x->req->no_keepalive, x->want_gzip, &head, &x->head_len);
     if (st != WTLS_OK) return st;
     x->head = head;
     r->secure = u->secure;
@@ -322,6 +443,27 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
     return WTLS_OK;
 }
 
+#define GZ_IN_BUF 16384u
+
+/* Content-Encoding of the final response. Only when gzip was offered: gzip or
+ * x-gzip is decoded, identity or no field is raw, anything else is an error.
+ * Redirect bodies are drained raw, so only the final response gets here. */
+static int setup_encoding(wtls_http_response *r, bool want_gzip) {
+#if WTLS_GZIP
+    if (!want_gzip || r->fr.kind == WTLS_BODY_NONE) return WTLS_OK;
+    const char *ce = wtls_http_head_get(&r->head, "content-encoding");
+    if (!ce || !*ce || wtls_http_ieq(ce, "identity")) return WTLS_OK;
+    if (!wtls_http_ieq(ce, "gzip") && !wtls_http_ieq(ce, "x-gzip")) return WTLS_ERR_HTTP;
+    r->gz = wtls_gzip_new();
+    r->gz_in = malloc(GZ_IN_BUF);
+    if (!r->gz || !r->gz_in) return WTLS_ERR_NOMEM; /* response_free() frees what was made */
+#else
+    (void)r;
+    (void)want_gzip;
+#endif
+    return WTLS_OK;
+}
+
 wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *req) {
     if (!out) return WTLS_ERR_ARG;
     *out = NULL;
@@ -344,13 +486,20 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
 
     wtls_url u;
     int st = wtls_url_parse(r->url, &u);
-    if (st == WTLS_OK && !u.secure) st = WTLS_ERR_ARG; /* plain http:// comes with the plain transport */
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
-    request_ctx x = {req,          req->method ? req->method : "GET", req->body, req->body_len, req->headers,
-                     req->n_headers, NULL,                            0,         {0}};
+    request_ctx x = {.req = req,
+                     .method = req->method ? req->method : "GET",
+                     .body = req->body,
+                     .body_len = req->body_len,
+                     .headers = req->headers,
+                     .n_headers = req->n_headers};
+#if WTLS_GZIP
+    /* An application that sets Accept-Encoding itself gets the body as sent. */
+    x.want_gzip = !req->no_gzip && !wtls_http_headers_have(req->headers, req->n_headers, "Accept-Encoding");
+#endif
     if (req->tls) x.opt = *req->tls;
     x.opt.alpn = k_alpn;
     r->insecure = x.opt.insecure_skip_verify;
@@ -365,6 +514,7 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
         if (st != WTLS_OK) break;
     }
     free(filtered);
+    if (st == WTLS_OK) st = setup_encoding(r, x.want_gzip);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
@@ -402,7 +552,7 @@ static int64_t head_content_length(const wtls_http_response *r) {
 }
 
 int64_t wtls_http_content_length(const wtls_http_response *r) {
-    if (!r) return -1;
+    if (!r || decoding(r)) return -1; /* the decoded length is unknown */
     switch (r->fr.kind) {
     case WTLS_BODY_LENGTH:
         return r->fr.length > (uint64_t)INT64_MAX ? -1 : (int64_t)r->fr.length;
@@ -420,6 +570,7 @@ wtls_status wtls_http_get_info(const wtls_http_response *r, wtls_http_info *out)
     out->redirects = r->redirects;
     out->reused_connection = r->reused;
     out->secure = r->secure;
+    out->gzip = decoding(r);
     out->tls = r->info;
     return WTLS_OK;
 }
@@ -443,11 +594,9 @@ static int fail(wtls_http_response *r, int err) {
     return err;
 }
 
-int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
-    if (!r || (!buf && len)) return WTLS_ERR_ARG;
-    if (r->err) return r->err;
-    if (r->eof || !len) return 0;
-    if (len > INT_MAX) len = INT_MAX;
+/* The body as framed on the wire (len >= 1, <= INT_MAX). */
+static int raw_read(wtls_http_response *r, void *buf, size_t len) {
+    if (r->eof) return 0;
     switch (r->fr.kind) {
     case WTLS_BODY_LENGTH: {
         if ((uint64_t)len > r->remaining) len = (size_t)r->remaining;
@@ -485,6 +634,40 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     }
 }
 
+#if WTLS_GZIP
+/* The decoded body: raw bytes go through gz_in into the decoder. */
+static int gz_read(wtls_http_response *r, uint8_t *buf, size_t len) {
+    for (;;) {
+        size_t used = 0, produced = 0;
+        int st = wtls_gzip_inflate(r->gz, r->gz_in + r->gz_off, r->gz_end - r->gz_off, &used, buf, len, &produced);
+        r->gz_off += used;
+        if (st != WTLS_OK) return fail(r, st);
+        if (produced) return (int)produced;
+        /* All input taken and nothing came out: the decoder needs more. */
+        if (r->gz_raw_end) {
+            st = wtls_gzip_finish(r->gz); /* cut inside a member: WTLS_ERR_IO */
+            return st != WTLS_OK ? fail(r, st) : 0;
+        }
+        int k = raw_read(r, r->gz_in, GZ_IN_BUF);
+        if (k < 0) return k; /* raw_read made it sticky */
+        if (k == 0) r->gz_raw_end = true;
+        r->gz_off = 0;
+        r->gz_end = (size_t)k;
+    }
+}
+#endif
+
+int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
+    if (!r || (!buf && len)) return WTLS_ERR_ARG;
+    if (r->err) return r->err;
+    if (!len) return 0;
+    if (len > INT_MAX) len = INT_MAX;
+#if WTLS_GZIP
+    if (r->gz) return gz_read(r, buf, len);
+#endif
+    return raw_read(r, buf, len);
+}
+
 /* ---- close ------------------------------------------------------------------------- */
 
 void wtls_http_close(wtls_http_response *r) {
@@ -508,7 +691,7 @@ wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_
     out->status = r->head.status;
 
     size_t cap;
-    if (r->fr.kind == WTLS_BODY_LENGTH) {
+    if (r->fr.kind == WTLS_BODY_LENGTH && !decoding(r)) {
         if (r->fr.length > max_body) { /* refused before any body byte is read */
             wtls_http_close(r);
             return WTLS_ERR_HTTP_LIMIT;
