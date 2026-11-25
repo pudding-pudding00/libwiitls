@@ -133,7 +133,7 @@ static void halve_mod(fe r, const fe a, const fe m) {
         memcpy(t, a, sizeof(fe));
     }
     for (int i = 0; i < 8; i++) {
-        uint32_t hi = (i < 7) ? (uint32_t)((t[i + 1] & 1) << 31) : (uint32_t)(carry << 31);
+        uint32_t hi = (i < 7) ? ((t[i + 1] & 1u) << 31) : ((uint32_t)carry << 31);
         r[i] = (t[i] >> 1) | hi;
     }
 }

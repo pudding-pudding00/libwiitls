@@ -21,6 +21,9 @@
   `mbedtls_ecdsa_verify` on random keys with bit-flip mutations, host and
   Wii). `tools/gen_p256.py` regenerates the curve constants and the
   fixed-base table (checked in as `src/accel/p256_curve.inc`).
+  Measured on a real Wii (2026-11-26): `ecdsa_p256_verify`
+  25.7 → **5.3 ms**, `handshake_full_cpu` 66.4 → **25.8 ms** — the
+  `<= 30 ms` target from 0.1 is met for the first time.
 
 ## 0.2.0 (2026-11-25)
 
