@@ -8,3 +8,4 @@
 {"tls", wtls_suite_tls},
 {"realworld", wtls_suite_realworld},
 {"http", wtls_suite_http},
+{"soak", wtls_suite_soak},

@@ -4,9 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <fcntl.h>
 #include <malloc.h>
+#include <sys/ioctl.h>
 
 #include <wiitls/wiitls.h>
 
@@ -380,6 +382,55 @@ static void spike_send_truth_duplex(void) {
     }
 }
 
+/* Stalled-peer send probe (safe: clears O_NONBLOCK around net_send; also
+ * checks once whether IOS implements FIONSPACE / FIONWRITE via net_ioctl). */
+static void spike_stalled_peer_send(void) {
+    static const int chunks[] = {2048, 4080, 16384};
+    static uint8_t buf[16384];
+    memset(buf, 0xA5, sizeof buf);
+    for (size_t k = 0; k < sizeof chunks / sizeof chunks[0]; k++) {
+        int chunk = chunks[k];
+        TLOG("[12.%d] stalled-peer send probe (%d B chunks)\n", (int)k, chunk);
+        s32 fd = blocking_connect();
+        if (fd < 0) return;
+        if (k == 0) {
+            int sp = -1, wr = -1;
+            s32 r1 = net_ioctl(fd, FIONSPACE, &sp);
+            s32 r2 = net_ioctl(fd, FIONWRITE, &wr);
+            TLOG("    net_ioctl: FIONSPACE=%d (val=%d) FIONWRITE=%d (val=%d)\n",
+                 (int)r1, sp, (int)r2, wr);
+        }
+        send_all(fd, "STALL\n");
+        net_fcntl(fd, 4, IOS_O_NONBLOCK);
+        size_t sent = 0;
+        int calls = 0;
+        u32 max_call_us = 0;
+        s32 last_r = 0;
+        u64 t0 = gettime();
+        for (int iter = 0; iter < 64; iter++) {
+            struct pollsd p = {fd, IOS_POLLOUT, 0};
+            if (net_poll(&p, 1, 0) <= 0) {
+                last_r = -11;
+                break;
+            }
+            s32 fl = net_fcntl(fd, 3, 0);
+            if (fl >= 0 && (fl & IOS_O_NONBLOCK)) net_fcntl(fd, 4, fl & ~IOS_O_NONBLOCK);
+            u64 c0 = gettime();
+            last_r = net_send(fd, buf, chunk, 0);
+            u32 cus = us_since(c0);
+            if (cus > max_call_us) max_call_us = cus;
+            if (fl >= 0 && (fl & IOS_O_NONBLOCK)) net_fcntl(fd, 4, fl);
+            calls++;
+            if (last_r <= 0) break;
+            sent += (size_t)last_r;
+            if (us_since(t0) > 2000000u) break;
+        }
+        TLOG("    calls=%d sent=%u last=%d max_call=%u us total=%u us\n", calls, (unsigned)sent,
+             (int)last_r, (unsigned)max_call_us, (unsigned)us_since(t0));
+        net_close(fd);
+    }
+}
+
 void wtls_suite_spike(void) {
     spike_nonblocking_connect();
     spike_nodelay();
@@ -391,4 +442,5 @@ void wtls_suite_spike(void) {
     spike_send_truth();
     spike_send_truth_tls();
     spike_send_truth_duplex();
+    spike_stalled_peer_send();
 }

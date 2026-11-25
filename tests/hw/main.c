@@ -85,6 +85,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "suite=", 6)) suite = argv[i] + 6;
         else if (!strncmp(argv[i], "server=", 7)) g_env.server_host = argv[i] + 7;
         else if (!strncmp(argv[i], "pctime=", 7)) g_env.pc_time = strtoll(argv[i] + 7, NULL, 10);
+        else if (!strncmp(argv[i], "iters=", 6)) g_env.soak_iters = (unsigned)strtoul(argv[i] + 6, NULL, 10);
     }
     g_env.is_hw = true;
 
@@ -97,11 +98,29 @@ int main(int argc, char **argv) {
 
     int found = 0;
     if (r >= 0) {
-        for (size_t i = 0; i < sizeof k_suites / sizeof k_suites[0]; i++) {
-            if (!strcmp(k_suites[i].name, suite)) {
-                k_suites[i].fn();
-                found = 1;
+        const char *p = !strcmp(suite, "all") ? "time,plat,crypto,tls,http,soak,realworld" : suite;
+        while (*p) {
+            const char *comma = strchr(p, ',');
+            size_t len = comma ? (size_t)(comma - p) : strlen(p);
+            int matched = 0;
+            for (size_t i = 0; i < sizeof k_suites / sizeof k_suites[0]; i++) {
+                if (strlen(k_suites[i].name) == len && !strncmp(k_suites[i].name, p, len)) {
+                    int p0 = wtls_t_pass, f0 = wtls_t_fail, s0 = wtls_t_skip;
+                    wtls_hw_printf("=== suite %s ===\n", k_suites[i].name);
+                    k_suites[i].fn();
+                    wtls_hw_printf("=== suite %s: pass=%d fail=%d skip=%d ===\n",
+                                   k_suites[i].name, wtls_t_pass - p0, wtls_t_fail - f0,
+                                   wtls_t_skip - s0);
+                    matched = 1;
+                    found = 1;
+                    break;
+                }
             }
+            if (!matched) {
+                wtls_hw_printf("unknown suite: %.*s\n", (int)len, p);
+                wtls_t_fail++;
+            }
+            p = comma ? comma + 1 : p + len;
         }
     }
     if (!found) {

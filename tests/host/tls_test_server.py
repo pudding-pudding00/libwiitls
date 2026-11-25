@@ -132,6 +132,13 @@ def handle_plain(sock):
                 while sock.recv(65536):
                     pass
                 return
+            if cmd == b"STALL":
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                except OSError:
+                    pass
+                time.sleep(3.0)
+                return
             if cmd == b"BYE":
                 return
             if cmd.startswith(b"BIG "):
@@ -152,6 +159,12 @@ def handle_plain(sock):
                 path = os.path.join(CERT_DIR, name + ".key") if CERT_DIR else None
                 pem = open(path, "rb").read() if path and os.path.isfile(path) else b""
                 sock.sendall(b"%d\n" % len(pem) + pem)
+                continue
+            if cmd.startswith(b"SPKI "):
+                name = cmd[len(b"SPKI "):].decode()
+                path = os.path.join(CERT_DIR, name + ".spki") if CERT_DIR else None
+                pin = open(path, "rb").read() if path and os.path.isfile(path) else b""
+                sock.sendall(b"%d\n" % len(pin) + pin)
                 continue
             if cmd.startswith(b"SENDFUZZ "):
                 """Send-truthfulness probe: read exactly <total> pattern bytes

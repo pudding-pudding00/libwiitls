@@ -17,7 +17,10 @@ Writes into DIR (each cert as .pem and .der, each key as .key):
   client-untrusted client leaf, P-256, signed by untrusted-ca, clientAuth
 """
 import argparse
+import base64
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -60,6 +63,17 @@ def to_der(openssl, pem, der):
     run(openssl, "x509", "-in", pem, "-outform", "DER", "-out", der)
 
 
+def write_spki_sha256(openssl, pem, spki_path):
+    res = subprocess.run([openssl, "x509", "-in", pem, "-pubkey", "-noout"],
+                         check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    m = re.search(rb"-----BEGIN PUBLIC KEY-----\s*(.*?)\s*-----END PUBLIC KEY-----", res.stdout, re.S)
+    if not m:
+        raise RuntimeError(f"cannot extract SPKI from {pem}")
+    spki_der = base64.b64decode(b"".join(m.group(1).split()))
+    with open(spki_path, "wb") as f:
+        f.write(hashlib.sha256(spki_der).digest())
+
+
 def make_ca(openssl, out, name, cn):
     key = os.path.join(out, name + ".key")
     pem = os.path.join(out, name + ".pem")
@@ -69,6 +83,7 @@ def make_ca(openssl, out, name, cn):
         "-addext", "basicConstraints=critical,CA:TRUE",
         "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     to_der(openssl, pem, os.path.join(out, name + ".der"))
+    write_spki_sha256(openssl, pem, os.path.join(out, name + ".spki"))
 
 
 def make_leaf(openssl, out, name, ca, kind, san, start=None, end=None, eku="serverAuth"):
@@ -90,6 +105,7 @@ def make_leaf(openssl, out, name, ca, kind, san, start=None, end=None, eku="serv
             "-cert", os.path.join(out, ca + ".pem"), "-keyfile", os.path.join(out, ca + ".key"),
             "-in", csr, "-out", pem, *dates)
     to_der(openssl, pem, os.path.join(out, name + ".der"))
+    write_spki_sha256(openssl, pem, os.path.join(out, name + ".spki"))
 
 
 def main():

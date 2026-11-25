@@ -9,6 +9,7 @@ typedef struct {
     const char *server_host; /* host running tests/host/tls_test_server.py */
     bool is_hw;              /* running on real Wii hardware */
     int64_t pc_time;         /* Unix time of the PC when the run started (0 = unknown) */
+    unsigned soak_iters;     /* 0 = suite default */
 } wtls_test_env;
 
 extern wtls_test_env g_env;

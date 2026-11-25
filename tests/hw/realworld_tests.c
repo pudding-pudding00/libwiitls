@@ -227,6 +227,70 @@ static void rw_http_keepalive_example_com(void) {
     wtls_http_pool_flush();
 }
 
+/* Additional server-stack and CDN probes (WP5): skip on offline/unreachable. */
+static void rw_probe_tls(const char *host) {
+    wtls_conn *c = NULL;
+    int r = rw_connect(&c, host, 443);
+    if (unreachable(r)) {
+        SKIP("host unreachable");
+        return;
+    }
+    CHECK_EQ_INT(r, WTLS_OK);
+    if (r != WTLS_OK) return;
+    wtls_conn_info info;
+    log_info(c, &info);
+    CHECK(rw_get(c, host));
+    wtls_close(c);
+}
+
+static void rw_fastly_python_org(void) { rw_probe_tls("www.python.org"); }
+static void rw_letsencrypt_r1(void) { rw_probe_tls("valid-isrgrootx1.letsencrypt.org"); }
+static void rw_nginx_org(void) { rw_probe_tls("nginx.org"); }
+static void rw_caddyserver_com(void) { rw_probe_tls("caddyserver.com"); }
+
+static void rw_github_cdn_range_redirect(void) {
+    wtls_http_pool_flush();
+    static const wtls_http_header hdrs[] = {{"Range", "bytes=0-511"}};
+    wtls_http_request q = {0};
+    q.url = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz";
+    q.headers = hdrs;
+    q.n_headers = 1;
+    q.no_gzip = true;
+    wtls_http_response *h = NULL;
+    int r = wtls_http_open(&h, &q);
+    if (unreachable(r)) {
+        SKIP("github.com unreachable");
+        return;
+    }
+    CHECK_EQ_INT(r, WTLS_OK);
+    if (r != WTLS_OK) return;
+    int st = wtls_http_status(h);
+    TLOG("    github range status=%d\n", st);
+    CHECK(st == 206 || st == 200);
+    if (st == 206) {
+        const char *cr = wtls_http_get_header(h, "content-range");
+        CHECK(cr != NULL);
+        if (cr) {
+            wtls_http_content_range rng = {0};
+            CHECK_EQ_INT(wtls_http_parse_content_range(cr, &rng), WTLS_OK);
+            CHECK_EQ_INT((long long)rng.start, 0);
+            CHECK_EQ_INT((long long)rng.end, 511);
+            CHECK(rng.total > 1000000);
+        }
+    }
+    uint8_t buf[512];
+    size_t got = 0;
+    while (got < sizeof buf) {
+        int k = wtls_http_read(h, buf + got, sizeof buf - got);
+        if (k <= 0) break;
+        got += (size_t)k;
+    }
+    CHECK_EQ_INT((long long)got, 512);
+    CHECK(buf[0] == 0x1f && buf[1] == 0x8b); /* tar.gz magic */
+    wtls_http_close(h);
+    wtls_http_pool_flush();
+}
+
 void wtls_suite_realworld(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -241,5 +305,10 @@ void wtls_suite_realworld(void) {
     RUN(rw_http_example_com);
     RUN(rw_http_redirect_google);
     RUN(rw_http_keepalive_example_com);
+    RUN(rw_fastly_python_org);
+    RUN(rw_letsencrypt_r1);
+    RUN(rw_nginx_org);
+    RUN(rw_caddyserver_com);
+    RUN(rw_github_cdn_range_redirect);
     wtls_shutdown();
 }

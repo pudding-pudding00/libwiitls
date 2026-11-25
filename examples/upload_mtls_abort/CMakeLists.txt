@@ -1,0 +1,5 @@
+# upload_mtls_abort example: upload_mtls_abort.dol (Wii only)
+add_executable(upload_mtls_abort main.c)
+target_link_libraries(upload_mtls_abort PRIVATE wiitls)
+target_compile_options(upload_mtls_abort PRIVATE -Wall -Wextra)
+ogc_create_dol(upload_mtls_abort)

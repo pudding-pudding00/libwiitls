@@ -149,6 +149,44 @@ static void test_req_idempotent(void) {
     for (size_t i = 0; i < 3; i++) CHECK(!wtls_http_method_idempotent(no[i]));
 }
 
+/* Exercises dynamic buffer growth from 512 B up to WTLS_HTTP_MAX_HEAD (16 KiB). */
+static void test_req_growth_boundaries(void) {
+    int st;
+    static const size_t lens[] = {10, 400, 512, 1024, 4096, 16000};
+    char *v = malloc(16500);
+    if (!v) return;
+    for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        memset(v, 'a', lens[i]);
+        v[lens[i]] = 0;
+        wtls_http_header hd = {"X-Pad", v};
+        char *h = build("GET", "https://h/", &hd, 1, false, 0, false, false, &st);
+        CHECK_EQ_INT(st, WTLS_OK);
+        CHECK(h && strstr(h, v) != NULL);
+        free(h);
+    }
+    /* Exactly WTLS_HTTP_MAX_HEAD succeeds, +1 fails with WTLS_ERR_ARG. */
+    char *base = build("GET", "https://h/", NULL, 0, false, 0, false, false, &st);
+    CHECK_EQ_INT(st, WTLS_OK);
+    size_t base_len = base ? strlen(base) : 0;
+    free(base);
+    size_t overhead = strlen("X-Pad: \r\n");
+    size_t exact_vlen = WTLS_HTTP_MAX_HEAD - base_len - overhead;
+    memset(v, 'b', exact_vlen);
+    v[exact_vlen] = 0;
+    wtls_http_header exact = {"X-Pad", v};
+    char *ok_h = build("GET", "https://h/", &exact, 1, false, 0, false, false, &st);
+    CHECK_EQ_INT(st, WTLS_OK);
+    CHECK(ok_h && strlen(ok_h) == WTLS_HTTP_MAX_HEAD);
+    free(ok_h);
+
+    v[exact_vlen] = 'b';
+    v[exact_vlen + 1] = 0;
+    char *over_h = build("GET", "https://h/", &exact, 1, false, 0, false, false, &st);
+    CHECK_EQ_INT(st, WTLS_ERR_ARG);
+    CHECK(over_h == NULL);
+    free(v);
+}
+
 int main(void) {
     RUN(test_req_get_default);
     RUN(test_req_port_in_host);
@@ -158,5 +196,6 @@ int main(void) {
     RUN(test_req_gzip);
     RUN(test_req_rejects);
     RUN(test_req_idempotent);
+    RUN(test_req_growth_boundaries);
     return CHECK_DONE();
 }

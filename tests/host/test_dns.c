@@ -83,6 +83,47 @@ static void test_full_cache_evicts_lru(void) {
     CHECK_EQ_INT(calls, before + 1);
 }
 
+static int multi_calls;
+static int fake_multi_resolver(const char *host, uint32_t *addrs, size_t cap, size_t *count) {
+    (void)host;
+    multi_calls++;
+    static const uint32_t list[] = {0x01010101u, 0x02020202u, 0x03030303u, 0x04040404u, 0x05050505u};
+    size_t n = sizeof list / sizeof list[0];
+    if (n > cap) n = cap;
+    memcpy(addrs, list, n * sizeof(uint32_t));
+    *count = n;
+    return WTLS_OK;
+}
+
+static void test_multi_ip_commit_keeps_working(void) {
+    wtls_dns_clear();
+    wtls_dns_set_resolver_all(fake_multi_resolver);
+    multi_calls = 0;
+
+    uint32_t addrs[WTLS_DNS_MAX_ADDRS];
+    size_t count = 0;
+    bool from_cache = true;
+    CHECK_EQ_INT(wtls_dns_lookup_list("Multi.Test", addrs, &count, &from_cache, 10), WTLS_OK);
+    CHECK(!from_cache);
+    CHECK_EQ_INT(count, WTLS_DNS_MAX_ADDRS);
+    CHECK_EQ_INT(multi_calls, 1);
+
+    /* Not committed yet: a second lookup queries the resolver again. */
+    CHECK_EQ_INT(wtls_dns_lookup_list("multi.test", addrs, &count, &from_cache, 11), WTLS_OK);
+    CHECK(!from_cache);
+    CHECK_EQ_INT(multi_calls, 2);
+
+    /* Commit the 3rd IP (0x03030303): cached lookup now returns only that working IP. */
+    wtls_dns_commit("multi.test", addrs[2], 12);
+    CHECK_EQ_INT(wtls_dns_lookup_list("MULTI.TEST", addrs, &count, &from_cache, 13), WTLS_OK);
+    CHECK(from_cache);
+    CHECK_EQ_INT(count, 1);
+    CHECK(addrs[0] == 0x03030303u);
+    CHECK_EQ_INT(multi_calls, 2);
+
+    wtls_dns_set_resolver_all(NULL);
+}
+
 int main(void) {
     RUN(test_cache_hit_skips_resolver);
     RUN(test_ttl_expiry_requeries);
@@ -90,5 +131,6 @@ int main(void) {
     RUN(test_ip_literal_bypasses_resolver);
     RUN(test_failure_not_cached);
     RUN(test_full_cache_evicts_lru);
+    RUN(test_multi_ip_commit_keeps_working);
     return CHECK_DONE();
 }

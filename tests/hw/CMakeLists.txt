@@ -8,6 +8,7 @@ add_executable(wtls_hwtest
     ${PROJECT_SOURCE_DIR}/tests/common/crypto_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/tls_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/http_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/soak_tests.c
     realworld_tests.c
 )
 target_include_directories(wtls_hwtest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tests/common ${PROJECT_SOURCE_DIR}/src)
