@@ -226,6 +226,7 @@ add_library(wiitls STATIC
     src/http/wtls_http_req.c
     src/http/wtls_http_parse.c
     src/http/wtls_http_chunked.c
+    src/http/wtls_http.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -349,6 +350,9 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_server_test(test_tls tests/common/tls_tests.c)
     add_dependencies(test_tls wtls_test_certs)
     set_tests_properties(test_tls PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    wtls_host_server_test(test_http tests/common/http_tests.c)
+    add_dependencies(test_http wtls_test_certs)
+    set_tests_properties(test_http PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
 
     # Benchmarks on the host: proves every benchmark runs; the numbers are the PC's.
     add_executable(test_bench bench/host_main.c bench/bench_core.c bench/psa_prof.c)

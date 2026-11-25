@@ -12,12 +12,12 @@ static bool ieq_prefix(const char *s, const char *prefix) {
 }
 
 static bool host_char(unsigned char c) {
-    return isalnum(c) || c == '.' || c == '-' || c == '_';
+    return isalnum(c) || c == '.' || c == '-';
 }
 
 int wtls_url_parse(const char *url, wtls_url *u) {
     if (!url || !u) return WTLS_ERR_ARG;
-    if (strlen(url) > WTLS_URL_MAX) return WTLS_ERR_ARG;
+    if (strlen(url) > WTLS_HTTP_MAX_URL) return WTLS_ERR_ARG;
     memset(u, 0, sizeof *u);
     const char *p;
     if (ieq_prefix(url, "https://")) {

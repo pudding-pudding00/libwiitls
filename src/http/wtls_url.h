@@ -8,7 +8,7 @@
 
 #include <wiitls/wiitls.h>
 
-#define WTLS_URL_MAX 8192u
+#define WTLS_HTTP_MAX_URL 8192u
 
 typedef struct {
     bool secure;             /* https */
@@ -21,8 +21,8 @@ typedef struct {
 
 /* Strict absolute-URL parser: "http(s)://host[:port][/path][?query][#frag]".
  * Refused (WTLS_ERR_ARG): other schemes, userinfo, IPv6 literals, port
- * 0/>65535/empty/non-digit, host characters outside [A-Za-z0-9._-], bytes
- * outside 0x21..0x7E after the authority, more than WTLS_URL_MAX bytes.
+ * 0/>65535/empty/non-digit, host characters outside [A-Za-z0-9.-], bytes
+ * outside 0x21..0x7E after the authority, more than WTLS_HTTP_MAX_URL bytes.
  * u->target points into url: valid as long as url is. */
 int wtls_url_parse(const char *url, wtls_url *u);
 
