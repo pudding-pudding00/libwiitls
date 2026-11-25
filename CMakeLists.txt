@@ -224,6 +224,7 @@ add_library(wiitls STATIC
     src/wtls_dns.c
     src/http/wtls_url.c
     src/http/wtls_http_req.c
+    src/http/wtls_http_parse.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -337,6 +338,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_crypto tests/common/crypto_tests.c)
     wtls_host_test(test_http_url)
     wtls_host_test(test_http_req)
+    wtls_host_test(test_http_parse)
     add_dependencies(test_castore wtls_test_certs)
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"

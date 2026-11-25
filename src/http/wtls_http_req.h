@@ -7,9 +7,9 @@
 
 #include <wiitls/http.h>
 
+#include "http/wtls_http_parse.h"
 #include "http/wtls_url.h"
 
-#define WTLS_HTTP_MAX_HEAD 16384u       /* request and response heads */
 #define WTLS_HTTP_MAX_REQ_HEADERS 64u
 
 /* Builds the request head into a malloc'd, NUL-terminated buffer (*out, *len
