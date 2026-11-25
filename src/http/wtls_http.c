@@ -89,28 +89,33 @@ static void response_free(wtls_http_response *r) {
     free(r);
 }
 
+/* One request as it goes out on the current hop: a redirect may change the
+ * method, drop the body and strip credential headers. */
 typedef struct {
     const wtls_http_request *req;
     const char *method;
+    const void *body; /* NULL: no body */
+    size_t body_len;
+    const wtls_http_header *headers;
+    size_t n_headers;
     const char *head;
     size_t head_len;
     wtls_options opt;
 } request_ctx;
 
 static int send_request(wtls_conn *c, const request_ctx *x) {
-    const wtls_http_request *req = x->req;
-    size_t body_len = req->body ? req->body_len : 0;
+    size_t body_len = x->body ? x->body_len : 0;
     if (body_len && x->head_len + body_len <= SINGLE_WRITE_MAX) {
         char *all = malloc(x->head_len + body_len);
         if (!all) return WTLS_ERR_NOMEM;
         memcpy(all, x->head, x->head_len);
-        memcpy(all + x->head_len, req->body, body_len);
+        memcpy(all + x->head_len, x->body, body_len);
         int st = tr_write_all(c, all, x->head_len + body_len);
         free(all);
         return st;
     }
     int st = tr_write_all(c, x->head, x->head_len);
-    if (st == WTLS_OK && body_len) st = tr_write_all(c, req->body, body_len);
+    if (st == WTLS_OK && body_len) st = tr_write_all(c, x->body, body_len);
     return st;
 }
 
@@ -195,6 +200,128 @@ static int exchange(wtls_http_response *r, const request_ctx *x, bool *got) {
     return st;
 }
 
+/* Pools the connection if its response was read to its end, may carry another
+ * request and holds no unread bytes; closes it otherwise. */
+static void release_conn(wtls_http_response *r) {
+    if (!r->conn) return;
+    if (r->eof && !r->err && r->fr.reusable && r->extra_off == r->extra_end) {
+        wtls_shutdown_hook = wtls_http_pool_flush;
+        wtls_http_pool_put(r->conn, r->secure, r->host, r->port, r->insecure, wtls_plat_now_ms());
+    } else {
+        wtls_http_tr_close(r->conn);
+    }
+    r->conn = NULL;
+}
+
+/* Reads a redirect body away so the connection can be reused. A body of
+ * unknown length or over WTLS_HTTP_REDIRECT_DRAIN_MAX stays unread, and
+ * release_conn() then closes the connection. */
+static void drain_body(wtls_http_response *r) {
+    if (r->fr.kind == WTLS_BODY_CLOSE) return;
+    if (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length > WTLS_HTTP_REDIRECT_DRAIN_MAX) return;
+    char tmp[1024];
+    size_t total = 0;
+    while (!r->eof && total <= WTLS_HTTP_REDIRECT_DRAIN_MAX) {
+        int k = wtls_http_read(r, tmp, sizeof tmp);
+        if (k <= 0) return;
+        total += (size_t)k;
+    }
+}
+
+/* One request/response exchange against *u: head built, connection acquired
+ * (pooled or new), final head read and framed. */
+static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
+    char *head = NULL;
+    int st = wtls_http_build_head(x->method, u, x->headers, x->n_headers, x->body != NULL, x->body_len,
+                                  x->req->no_keepalive, false, &head, &x->head_len);
+    if (st != WTLS_OK) return st;
+    x->head = head;
+    r->secure = u->secure;
+    r->port = u->port;
+    memcpy(r->host, u->host, sizeof r->host);
+    r->head_request = strcmp(x->method, "HEAD") == 0;
+    r->err = 0;
+    r->eof = false;
+    r->extra_off = r->extra_end = 0;
+
+    bool got = false;
+    st = acquire(r, x);
+    if (st == WTLS_OK) st = exchange(r, x, &got);
+    /* The server closed a reused connection as the request went out: one
+     * second attempt on a new connection, for idempotent methods only. */
+    if (st == WTLS_ERR_IO && r->reused && !got && wtls_http_method_idempotent(x->method)) {
+        wtls_http_tr_close(r->conn);
+        r->conn = NULL;
+        st = connect_fresh(r, x);
+        if (st == WTLS_OK) st = exchange(r, x, &got);
+    }
+    free(head);
+    x->head = NULL;
+    if (st == WTLS_OK) st = wtls_http_frame(&r->head, r->head_request, !x->req->no_keepalive, &r->fr);
+    if (st != WTLS_OK) return st;
+    r->remaining = r->fr.length;
+    r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
+    wtls_chunked_init(&r->chunked);
+    return WTLS_OK;
+}
+
+static bool is_redirect(int s) { return s == 301 || s == 302 || s == 303 || s == 307 || s == 308; }
+
+static bool is_credential(const char *name) {
+    return wtls_http_ieq(name, "Authorization") || wtls_http_ieq(name, "Proxy-Authorization") ||
+           wtls_http_ieq(name, "Cookie");
+}
+
+/* Prepares the next hop for the redirect r holds: r->url, *u, the method and
+ * body, and after the first cross-origin step the headers without
+ * credentials (*filtered is that copy; the caller frees it). */
+static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char *location,
+                  wtls_http_header **filtered) {
+    int limit = x->req->max_redirects ? x->req->max_redirects : WTLS_HTTP_DEFAULT_REDIRECTS;
+    if (limit > UINT8_MAX) limit = UINT8_MAX;
+    if (r->redirects >= limit) return WTLS_ERR_HTTP_REDIRECT;
+
+    char *next = NULL;
+    int st = wtls_url_resolve(r->url, location, &next);
+    if (st == WTLS_ERR_NOMEM) return st;
+    wtls_url nu;
+    if (st != WTLS_OK || strlen(next) > WTLS_HTTP_MAX_URL || wtls_url_parse(next, &nu) != WTLS_OK ||
+        (u->secure && !nu.secure)) {
+        free(next);
+        return WTLS_ERR_HTTP_REDIRECT; /* bad Location, or https -> http */
+    }
+
+    if (!*filtered && x->n_headers && !wtls_url_same_origin(u, &nu)) {
+        wtls_http_header *h = malloc(x->n_headers * sizeof *h);
+        if (!h) {
+            free(next);
+            return WTLS_ERR_NOMEM;
+        }
+        size_t n = 0;
+        for (size_t i = 0; i < x->n_headers; i++)
+            if (!is_credential(x->headers[i].name)) h[n++] = x->headers[i];
+        *filtered = h;
+        x->headers = h;
+        x->n_headers = n;
+    }
+
+    int s = r->head.status;
+    if ((s == 303 && !r->head_request) || ((s == 301 || s == 302) && strcmp(x->method, "POST") == 0)) {
+        x->method = "GET";
+        x->body = NULL;
+        x->body_len = 0;
+    }
+
+    /* location points into r->buf, which the next hop replaces: use it first. */
+    drain_body(r);
+    release_conn(r);
+    free(r->url);
+    r->url = next;
+    *u = nu; /* nu.target points into next, now r->url */
+    r->redirects++;
+    return WTLS_OK;
+}
+
 wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *req) {
     if (!out) return WTLS_ERR_ARG;
     *out = NULL;
@@ -218,44 +345,30 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
     wtls_url u;
     int st = wtls_url_parse(r->url, &u);
     if (st == WTLS_OK && !u.secure) st = WTLS_ERR_ARG; /* plain http:// comes with the plain transport */
-    request_ctx x = {req, req->method ? req->method : "GET", NULL, 0, {0}};
-    char *head = NULL;
-    if (st == WTLS_OK)
-        st = wtls_http_build_head(x.method, &u, req->headers, req->n_headers, req->body != NULL, req->body_len,
-                                  req->no_keepalive, false, &head, &x.head_len);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
-    x.head = head;
+    request_ctx x = {req,          req->method ? req->method : "GET", req->body, req->body_len, req->headers,
+                     req->n_headers, NULL,                            0,         {0}};
     if (req->tls) x.opt = *req->tls;
     x.opt.alpn = k_alpn;
-    r->secure = true;
     r->insecure = x.opt.insecure_skip_verify;
-    r->port = u.port;
-    memcpy(r->host, u.host, sizeof r->host);
-    r->head_request = strcmp(x.method, "HEAD") == 0;
 
-    bool got = false;
-    st = acquire(r, &x);
-    if (st == WTLS_OK) st = exchange(r, &x, &got);
-    /* The server closed a reused connection as the request went out: one
-     * second attempt on a new connection, for idempotent methods only. */
-    if (st == WTLS_ERR_IO && r->reused && !got && wtls_http_method_idempotent(x.method)) {
-        wtls_http_tr_close(r->conn);
-        r->conn = NULL;
-        st = connect_fresh(r, &x);
-        if (st == WTLS_OK) st = exchange(r, &x, &got);
+    wtls_http_header *filtered = NULL;
+    for (;;) {
+        st = hop(r, &x, &u);
+        if (st != WTLS_OK) break;
+        const char *location = wtls_http_head_get(&r->head, "location");
+        if (req->max_redirects < 0 || !is_redirect(r->head.status) || !location) break;
+        st = follow(r, &x, &u, location, &filtered);
+        if (st != WTLS_OK) break;
     }
-    free(head);
-    if (st == WTLS_OK) st = wtls_http_frame(&r->head, r->head_request, !req->no_keepalive, &r->fr);
+    free(filtered);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
-    r->remaining = r->fr.length;
-    r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
-    wtls_chunked_init(&r->chunked);
     *out = r;
     return WTLS_OK;
 }
@@ -376,12 +489,81 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
 
 void wtls_http_close(wtls_http_response *r) {
     if (!r) return;
-    /* Pool only a connection whose response was read to its end, that may
-     * carry another request, and that holds no unread bytes. */
-    if (r->conn && r->eof && !r->err && r->fr.reusable && r->extra_off == r->extra_end) {
-        wtls_shutdown_hook = wtls_http_pool_flush;
-        wtls_http_pool_put(r->conn, r->secure, r->host, r->port, r->insecure, wtls_plat_now_ms());
-        r->conn = NULL;
-    }
+    release_conn(r);
     response_free(r);
+}
+
+/* ---- fetch --------------------------------------------------------------------------- */
+
+#define FETCH_BUF_START 16384u
+
+wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_http_result *out) {
+    if (!out) return WTLS_ERR_ARG;
+    memset(out, 0, sizeof *out);
+    if (!max_body) max_body = WTLS_HTTP_FETCH_DEFAULT_MAX;
+    if (max_body > (size_t)INT_MAX - 1) max_body = (size_t)INT_MAX - 1;
+    wtls_http_response *r;
+    int st = wtls_http_open(&r, req);
+    if (st != WTLS_OK) return st;
+    out->status = r->head.status;
+
+    size_t cap;
+    if (r->fr.kind == WTLS_BODY_LENGTH) {
+        if (r->fr.length > max_body) { /* refused before any body byte is read */
+            wtls_http_close(r);
+            return WTLS_ERR_HTTP_LIMIT;
+        }
+        cap = (size_t)r->fr.length;
+    } else {
+        cap = FETCH_BUF_START < max_body ? FETCH_BUF_START : max_body;
+    }
+    char *buf = malloc(cap + 1);
+    size_t fill = 0;
+    st = buf ? WTLS_OK : WTLS_ERR_NOMEM;
+    while (st == WTLS_OK) {
+        if (fill == cap) {
+            /* Full: one more byte tells the end of the body from an overrun. */
+            char b;
+            int k = wtls_http_read(r, &b, 1);
+            if (k == 0) break;
+            if (k < 0) {
+                st = k;
+                break;
+            }
+            if (cap >= max_body) {
+                st = WTLS_ERR_HTTP_LIMIT;
+                break;
+            }
+            size_t ncap = cap * 2 < max_body ? cap * 2 : max_body;
+            char *nb = realloc(buf, ncap + 1);
+            if (!nb) {
+                st = WTLS_ERR_NOMEM;
+                break;
+            }
+            buf = nb;
+            cap = ncap;
+            buf[fill++] = b;
+            continue;
+        }
+        int k = wtls_http_read(r, buf + fill, cap - fill);
+        if (k == 0) break;
+        if (k < 0) st = k;
+        else fill += (size_t)k;
+    }
+    wtls_http_close(r);
+    if (st != WTLS_OK) {
+        free(buf);
+        return st;
+    }
+    buf[fill] = '\0';
+    out->body = buf;
+    out->body_len = fill;
+    return WTLS_OK;
+}
+
+void wtls_http_result_free(wtls_http_result *res) {
+    if (!res) return;
+    free(res->body);
+    res->body = NULL;
+    res->body_len = 0;
 }

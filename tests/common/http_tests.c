@@ -556,6 +556,251 @@ static void http_shutdown_flushes_pool(void) {
     CHECK(!reused);
 }
 
+/* ---- redirects ---------------------------------------------------------------- */
+
+/* "/redirect?code=C&to=<to percent-encoded>" */
+static const char *redirect_path(int code, const char *to) {
+    static char p[700];
+    int n = snprintf(p, sizeof p, "/redirect?code=%d&to=", code);
+    for (const unsigned char *s = (const unsigned char *)to; *s && n < (int)sizeof p - 4; s++) {
+        if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '-' ||
+            *s == '.' || *s == '_' || *s == '~')
+            p[n++] = (char)*s;
+        else
+            n += snprintf(p + n, sizeof p - (size_t)n, "%%%02X", *s);
+    }
+    p[n] = 0;
+    return p;
+}
+
+static void http_redirect_chain(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get("/redirect-chain?n=3");
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK_EQ_INT(info.redirects, 3);
+    const char *tail = "/redirect-chain?n=0";
+    CHECK(info.url && strlen(info.url) > strlen(tail) && strcmp(info.url + strlen(info.url) - strlen(tail), tail) == 0);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "done") == 0);
+    wtls_http_close(r);
+}
+
+static void http_redirect_too_many(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url("/redirect-chain?n=6");
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_HTTP_REDIRECT);
+    CHECK(r == NULL);
+    req.max_redirects = 10;
+    r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    wtls_http_close(r);
+}
+
+static void http_redirect_disabled(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url(redirect_path(302, "/hello"));
+    req.max_redirects = -1;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 302);
+    const char *loc = wtls_http_get_header(r, "location");
+    CHECK(loc && strcmp(loc, "/hello") == 0);
+    wtls_http_close(r);
+}
+
+static void http_redirect_methods(void) {
+    wtls_http_pool_flush();
+    static const struct {
+        int code;
+        const char *want;
+    } cases[] = {{303, "GET 0"}, {301, "GET 0"}, {302, "GET 0"}, {307, "POST 3"}, {308, "POST 3"}};
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        wtls_http_request req = {0};
+        req.method = "POST";
+        req.url = url(redirect_path(cases[i].code, "/method"));
+        req.body = "abc";
+        req.body_len = 3;
+        wtls_http_response *r = open_req(&req);
+        if (!r) continue;
+        int last = 1;
+        const char *b = body_str(r, &last);
+        if (strcmp(b, cases[i].want) != 0) TLOG("  %d -> \"%s\"\n", cases[i].code, b);
+        CHECK(strcmp(b, cases[i].want) == 0);
+        wtls_http_close(r);
+    }
+}
+
+static void http_redirect_relative(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get(redirect_path(302, "hello"));
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    wtls_http_close(r);
+}
+
+static void expect_open_err(const char *path, int want) {
+    wtls_http_request req = {0};
+    req.url = url(path);
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), want);
+    CHECK(r == NULL);
+}
+
+static void http_redirect_downgrade_refused(void) {
+    wtls_http_pool_flush();
+    expect_open_err(redirect_path(302, url_of("http", PLAIN_PORT, "/")), WTLS_ERR_HTTP_REDIRECT);
+}
+
+/* ASCII case-insensitive substring search. */
+static bool contains_ci(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < n && hay[i] && (hay[i] | 0x20) == (needle[i] | 0x20)) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+
+static const wtls_http_header k_cred_headers[] = {
+    {"Authorization", "secret"}, {"Cookie", "c=1"}, {"Proxy-Authorization", "p"}, {"X-Keep", "1"}};
+
+static const char *redirected_headers(const char *to) {
+    wtls_http_request req = {0};
+    req.url = url(redirect_path(302, to));
+    req.headers = k_cred_headers;
+    req.n_headers = 4;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return "";
+    int last = 1;
+    const char *b = body_str(r, &last);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+    return b;
+}
+
+static void http_redirect_cross_origin_strips_credentials(void) {
+    wtls_http_pool_flush();
+    const char *b = redirected_headers(url_of("https", P_HTTP2, "/headers"));
+    CHECK(!contains_ci(b, "authorization"));
+    CHECK(!contains_ci(b, "cookie"));
+    CHECK(!contains_ci(b, "proxy-authorization"));
+    CHECK(strstr(b, "X-Keep: 1") != NULL);
+}
+
+static void http_redirect_same_origin_keeps_credentials(void) {
+    wtls_http_pool_flush();
+    const char *b = redirected_headers("/headers");
+    CHECK(strstr(b, "Authorization: secret") != NULL);
+    CHECK(strstr(b, "Cookie: c=1") != NULL);
+}
+
+static void http_redirect_without_location(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get("/status?code=302");
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 302);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    CHECK_EQ_INT(info.redirects, 0);
+    wtls_http_close(r);
+}
+
+static void http_redirect_bad_location(void) {
+    wtls_http_pool_flush();
+    expect_open_err(redirect_path(302, "https://[x"), WTLS_ERR_HTTP_REDIRECT);
+}
+
+static void http_redirect_reuses_connection(void) {
+    wtls_http_pool_flush();
+    char body[32];
+    CHECK_EQ_INT(get_full(redirect_path(302, "/conn"), NULL, body, sizeof body, NULL), 200);
+    int id = 0, n = 0;
+    CHECK(sscanf(body, "%d %d", &id, &n) == 2);
+    CHECK_EQ_INT(n, 2);
+}
+
+/* ---- fetch ---------------------------------------------------------------------- */
+
+static int fetch(const char *path, size_t max_body, wtls_http_result *res) {
+    wtls_http_request req = {0};
+    req.url = url(path);
+    return wtls_http_fetch(&req, max_body, res);
+}
+
+static void fetch_hello(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    CHECK_EQ_INT(fetch("/hello", 0, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK_EQ_INT(res.body_len, 5);
+    CHECK(res.body && memcmp(res.body, "hello", 5) == 0 && res.body[5] == '\0');
+    wtls_http_result_free(&res);
+    CHECK(res.body == NULL);
+}
+
+static void fetch_404(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    CHECK_EQ_INT(fetch("/status?code=404", 0, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 404);
+    CHECK_EQ_INT(res.body_len, 0);
+    CHECK(res.body && res.body[0] == '\0');
+    wtls_http_result_free(&res);
+}
+
+static void fetch_limit_by_length(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    CHECK_EQ_INT(fetch("/len?n=2000", 1000, &res), WTLS_ERR_HTTP_LIMIT);
+    CHECK(res.body == NULL);
+    CHECK_EQ_INT(res.status, 200);
+    wtls_http_result_free(&res);
+}
+
+static void fetch_limit_chunked(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    CHECK_EQ_INT(fetch("/chunked?n=2000&size=100", 1000, &res), WTLS_ERR_HTTP_LIMIT);
+    CHECK(res.body == NULL);
+    wtls_http_result_free(&res);
+    CHECK_EQ_INT(fetch("/chunked?n=1000&size=100", 1000, &res), WTLS_OK); /* exactly the limit */
+    CHECK_EQ_INT(res.body_len, 1000);
+    CHECK(res.body && is_pattern((const uint8_t *)res.body, 1000, 0));
+    wtls_http_result_free(&res);
+}
+
+static void fetch_default_limit(void) {
+    wtls_http_pool_flush();
+    wtls_http_result res;
+    CHECK_EQ_INT(fetch("/len?n=1048576", 0, &res), WTLS_OK);
+    CHECK_EQ_INT(res.body_len, 1048576);
+    CHECK(res.body && is_pattern((const uint8_t *)res.body, res.body_len, 0));
+    wtls_http_result_free(&res);
+    CHECK_EQ_INT(fetch("/len?n=1048577", 0, &res), WTLS_ERR_HTTP_LIMIT);
+    CHECK(res.body == NULL);
+    wtls_http_result_free(&res);
+}
+
+static void fetch_result_free_safe(void) {
+    wtls_http_pool_flush();
+    wtls_http_result_free(NULL);
+    wtls_http_result res = {0};
+    wtls_http_result_free(&res);
+    CHECK(res.body == NULL);
+    CHECK_EQ_INT(wtls_http_fetch(NULL, 0, &res), WTLS_ERR_ARG);
+    CHECK(res.body == NULL);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -595,5 +840,22 @@ void wtls_suite_http(void) {
     RUN(http_post_not_retried);
     RUN(http_insecure_not_shared);
     RUN(http_shutdown_flushes_pool);
+    RUN(http_redirect_chain);
+    RUN(http_redirect_too_many);
+    RUN(http_redirect_disabled);
+    RUN(http_redirect_methods);
+    RUN(http_redirect_relative);
+    RUN(http_redirect_downgrade_refused);
+    RUN(http_redirect_cross_origin_strips_credentials);
+    RUN(http_redirect_same_origin_keeps_credentials);
+    RUN(http_redirect_without_location);
+    RUN(http_redirect_bad_location);
+    RUN(http_redirect_reuses_connection);
+    RUN(fetch_hello);
+    RUN(fetch_404);
+    RUN(fetch_limit_by_length);
+    RUN(fetch_limit_chunked);
+    RUN(fetch_default_limit);
+    RUN(fetch_result_free_safe);
     wtls_shutdown();
 }
