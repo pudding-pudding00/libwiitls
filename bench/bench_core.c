@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include <psa/crypto.h>
+#include <wiitls/http.h>
 #include <wiitls/wiitls.h>
 
 #include "bench.h"
@@ -28,10 +29,11 @@
 #define BLOCK 16384
 #define PLAIN_PORT 4430
 #define TLS_PORT 4431
+#define HTTP_PORT 4438
 #define STREAM_BYTES (4u * 1024u * 1024u)
 
 /* Results for the gate evaluation (0 = not measured). */
-static double s_chacha_mbs, s_x25519_ms, s_hs_full_cpu_ms, s_hs_res_cpu_ms, s_read_ratio;
+static double s_chacha_mbs, s_x25519_ms, s_hs_full_cpu_ms, s_hs_res_cpu_ms, s_read_ratio, s_http_pooled_cpu_ms;
 
 static uint8_t s_in[BLOCK], s_out[BLOCK + 16];
 
@@ -493,6 +495,72 @@ static void bench_stream_4m(void) {
     report("wtls_read_vs_raw", s_read_ratio, "%");
 }
 
+/* ---- HTTP client ------------------------------------------------------- */
+
+static char s_hello_url[128];
+
+/* GET /hello on the keep-alive test port, body read to the end so the
+ * connection goes back to the pool. Reports reuse and TLS resumption. */
+static int http_hello(bool *reused, bool *resumed) {
+    wtls_http_request q = {0};
+    q.url = s_hello_url;
+    wtls_http_response *r = NULL;
+    int st = wtls_http_open(&r, &q);
+    if (st != WTLS_OK) return st;
+    char buf[256];
+    int n;
+    while ((n = wtls_http_read(r, buf, sizeof buf)) > 0) {
+    }
+    wtls_http_info info;
+    if (wtls_http_get_info(r, &info) == WTLS_OK) {
+        *reused = info.reused_connection;
+        *resumed = info.tls.resumed;
+    }
+    int status = wtls_http_status(r);
+    wtls_http_close(r);
+    if (n < 0) return n;
+    return status == 200 ? WTLS_OK : WTLS_ERR_HTTP;
+}
+
+static int timed_hello(uint64_t *wall_us, uint64_t *cpu_us, bool *reused, bool *resumed) {
+    uint64_t w0 = wtls_plat_poll_wait_us, t0 = wtls_plat_now_us();
+    int r = http_hello(reused, resumed);
+    *wall_us = wtls_plat_now_us() - t0;
+    uint64_t waited = wtls_plat_poll_wait_us - w0;
+    *cpu_us = *wall_us > waited ? *wall_us - waited : 0;
+    return r;
+}
+
+/* New connection per request (pool flushed, ticket allowed: resumed
+ * handshake + request), then the same request over the pooled connection. */
+static void bench_http_get(void) {
+    snprintf(s_hello_url, sizeof s_hello_url, "https://%s:%d/hello", g_env.server_host, HTTP_PORT);
+    bool reused = false, resumed = false;
+    wtls_http_pool_flush();
+    CHECK_EQ_INT(http_hello(&reused, &resumed), WTLS_OK); /* primes the ticket cache */
+    uint64_t wall[RUNS], cpu[RUNS];
+    for (int i = 0; i < RUNS; i++) {
+        wtls_http_pool_flush();
+        int r = timed_hello(&wall[i], &cpu[i], &reused, &resumed);
+        CHECK_EQ_INT(r, WTLS_OK);
+        if (r != WTLS_OK) return;
+        CHECK(!reused);
+        CHECK(resumed);
+    }
+    report("http_get_new_wall", (double)median(wall, RUNS) / 1000.0, "ms");
+    CHECK_EQ_INT(http_hello(&reused, &resumed), WTLS_OK); /* leaves one pooled connection */
+    for (int i = 0; i < RUNS; i++) {
+        int r = timed_hello(&wall[i], &cpu[i], &reused, &resumed);
+        CHECK_EQ_INT(r, WTLS_OK);
+        if (r != WTLS_OK) return;
+        CHECK(reused);
+    }
+    report("http_get_pooled_wall", (double)median(wall, RUNS) / 1000.0, "ms");
+    s_http_pooled_cpu_ms = (double)median(cpu, RUNS) / 1000.0;
+    report("http_get_pooled_cpu", s_http_pooled_cpu_ms, "ms");
+    wtls_http_pool_flush();
+}
+
 /* ---- gate --------------------------------------------------------------- */
 
 static void gate(const char *what, double value, bool met) {
@@ -507,6 +575,9 @@ static void print_gates(void) {
     gate("chacha20_poly1305 >= 20 MB/s", s_chacha_mbs, s_chacha_mbs >= 20.0);
     gate("x25519 <= 5 ms", s_x25519_ms, s_x25519_ms <= 5.0);
     gate("wtls_read >= 90 % of net_recv", s_read_ratio, s_read_ratio >= 90.0);
+    /* informational: a pooled request should cost far less than a resumed handshake */
+    gate("http_get_pooled_cpu < handshake_resumed_cpu", s_http_pooled_cpu_ms,
+         s_http_pooled_cpu_ms > 0.0 && s_http_pooled_cpu_ms < s_hs_res_cpu_ms);
 }
 
 void wtls_bench_run(void) {
@@ -524,6 +595,7 @@ void wtls_bench_run(void) {
         RUN(bench_handshake_full);
         RUN(bench_handshake_resumed);
         RUN(bench_stream_4m);
+        RUN(bench_http_get);
     } else {
         TLOG("cannot fetch the test CA from %s:%d - network benchmarks not run\n",
              g_env.server_host ? g_env.server_host : "-", PLAIN_PORT);

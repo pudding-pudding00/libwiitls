@@ -7,3 +7,4 @@
 {"time", wtls_suite_time},
 {"tls", wtls_suite_tls},
 {"realworld", wtls_suite_realworld},
+{"http", wtls_suite_http},

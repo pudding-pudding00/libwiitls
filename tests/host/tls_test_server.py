@@ -22,14 +22,56 @@ TLS commands: PING, SNI (received SNI or "-"), BIG n (byte i = i & 0xFF),
 CLOSE (close_notify), TRUNC (TCP close without close_notify), SILENT,
 CONNS (TCP connections accepted on this port so far).
 
+HTTP/1.1 ports (with --certs; TLS 1.2+1.3, ECDSA leaf, ALPN http/1.1): 4438 and
+4439; the same endpoints over plain TCP on 4440. Keep-alive until the request says "Connection: close" or an endpoint
+closes. Pattern bytes: i % 251. Unknown query parameters (e.g. id=...) are
+ignored, so a test can tag its requests and count them with /count.
+  GET /hello                      200, text/plain, "hello"
+  GET|HEAD /len?n=N               200, Content-Length N, N pattern bytes
+  GET /chunked?n=N&size=S[&cut=1] chunked in S-byte chunks, first chunk with
+                                  ";ext=1", trailer "X-T: 1"; cut=1: TCP close
+                                  without close_notify before the last chunk
+  GET /close?n=N[&notify=0]       no CL/TE, "Connection: close", N bytes, then
+                                  close_notify (notify=0: TCP close without)
+  GET /trunc?n=N&cut=K            CL N, TCP close without close_notify after K
+  GET /trickle                    CL 13 "hello trickle", one TLS record per byte
+  GET /slowbody?ms=M              head (CL 2) at once, body "ok" after M ms
+  GET /bighead?n=N                head of exactly N bytes (padded X-Big field)
+  GET /status?code=C              status C; 204/304 without body, else CL 0
+  GET /continue                   "100 Continue", then 200 "ok"
+  GET /slowhead                   status line only, then silence
+  POST /echo                      body = request body
+  * /method                       "<METHOD> <body_len>"
+  GET /headers                    body = request head as received
+  GET /conn                       "<conn_id> <req_no>" (per port / per connection)
+  GET /drop-next                  200 "ok"; the next request on this connection
+                                  is read and answered by a TCP close
+  GET /idle-close?ms=M[&notify=0] 200 "ok"; after M ms idle close_notify + close
+                                  (notify=0: TCP close without)
+  GET /redirect?code=C&to=URL     status C, Location: URL (percent-decoded)
+  GET /redirect-chain?n=K         K > 0: 302 to n=K-1; K = 0: 200 "done"
+  GET /count?id=K                 requests received so far (all ports, dropped
+                                  ones too) whose query has id=K; /count itself
+                                  is not counted
+  GET /gzip?n=N[&chunked=1][&bad=1][&cut=1][&members=2][&enc=E]
+                                  N pattern bytes gzip'd (mtime 0), Content-
+                                  Encoding E (default gzip), CL or chunked;
+                                  bad=1: CRC flipped; cut=1: only the first
+                                  half of the gzip stream (framing complete);
+                                  members=2: two gzip members back to back
+  GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+
 Prints "READY" on stdout once every listener is bound.
 """
 import argparse
+import gzip
 import os
 import socket
 import ssl
 import sys
 import threading
+import time
+import urllib.parse
 
 PLAIN_PORT = 4430
 CERT_DIR = None
@@ -191,6 +233,256 @@ def tls_listeners(bind):
     return [serve(bind, port, tls_handler(tls_context(**kw), Counter())) for port, kw in specs]
 
 
+# ---- HTTP/1.1 -------------------------------------------------------------
+
+HTTP_LOG = []  # query dicts of every request received (for /count)
+HTTP_LOG_LOCK = threading.Lock()
+
+
+class HttpReader:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def fill(self):
+        data = self.sock.recv(65536)
+        if not data:
+            return False
+        self.buf += data
+        return True
+
+    def head(self):
+        """Raw request head (up to and including the empty line) or None at EOF."""
+        while True:
+            for sep in (b"\r\n\r\n", b"\n\n"):
+                i = self.buf.find(sep)
+                if i >= 0:
+                    head, self.buf = self.buf[:i + len(sep)], self.buf[i + len(sep):]
+                    return head
+            if not self.fill():
+                return None
+
+    def body(self, n):
+        while len(self.buf) < n:
+            if not self.fill():
+                return None
+        body, self.buf = self.buf[:n], self.buf[n:]
+        return body
+
+
+def http_response(status, headers=(), body=b"", reason=b"X"):
+    out = b"HTTP/1.1 %d %s\r\n" % (status, reason)
+    for k, v in headers:
+        out += k.encode() + b": " + (v if isinstance(v, bytes) else str(v).encode()) + b"\r\n"
+    return out + b"\r\n" + body
+
+
+def tcp_abort(sock):
+    """TCP close without close_notify."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def clean_close(sock, secure):
+    """close_notify (TLS) or FIN (plain), not waiting long for the peer."""
+    if not secure:
+        tcp_abort(sock)
+        return
+    try:
+        sock.settimeout(2)
+        sock.unwrap()
+    except (OSError, ssl.SSLError, ValueError):
+        pass
+
+
+def http_respond(sock, secure, method, path, query, head, body, state):
+    """Answers one request. Returns False when the connection is finished."""
+    send = sock.sendall
+    n = int(query.get("n", "0"))
+    if path == "/hello":
+        send(http_response(200, [("Content-Type", "text/plain"), ("Content-Length", 5)], b"hello", b"OK"))
+    elif path == "/len":
+        send(http_response(200, [("Content-Length", n)]))
+        if method != "HEAD":
+            send_big(send, n)
+    elif path == "/chunked":
+        size = max(1, int(query.get("size", "1000")))
+        send(http_response(200, [("Transfer-Encoding", "chunked")]))
+        data = pattern(n)
+        for k in range(0, n, size):
+            piece = data[k:k + size]
+            ext = b";ext=1" if k == 0 else b""
+            send(b"%x%s\r\n" % (len(piece), ext) + piece + b"\r\n")
+        if query.get("cut") == "1":
+            tcp_abort(sock)
+            return False
+        send(b"0\r\nX-T: 1\r\n\r\n")
+    elif path == "/close":
+        send(http_response(200, [("Connection", "close")]) + pattern(n))
+        if query.get("notify") == "0":
+            tcp_abort(sock)
+        else:
+            clean_close(sock, secure)
+        return False
+    elif path == "/trunc":
+        cut = int(query.get("cut", "0"))
+        send(http_response(200, [("Content-Length", n)]) + pattern(n)[:cut])
+        tcp_abort(sock)
+        return False
+    elif path == "/trickle":
+        for b in http_response(200, [("Content-Length", 13)], b"hello trickle", b"OK"):
+            send(bytes([b]))
+    elif path == "/slowbody":
+        send(http_response(200, [("Content-Length", 2)]))
+        time.sleep(int(query.get("ms", "0")) / 1000.0)
+        send(b"ok")
+    elif path == "/bighead":
+        pre = b"HTTP/1.1 200 X\r\nContent-Length: 0\r\nX-Big: "
+        send(pre + b"a" * max(0, n - len(pre) - 4) + b"\r\n\r\n")
+    elif path == "/status":
+        code = int(query.get("code", "200"))
+        send(http_response(code) if code in (204, 304) else http_response(code, [("Content-Length", 0)]))
+    elif path == "/continue":
+        send(b"HTTP/1.1 100 Continue\r\n\r\n")
+        send(http_response(200, [("Content-Length", 2)], b"ok"))
+    elif path == "/slowhead":
+        send(b"HTTP/1.1 200 OK\r\n")
+        while sock.recv(65536):
+            pass
+        return False
+    elif path == "/echo":
+        send(http_response(200, [("Content-Length", len(body))], body))
+    elif path == "/method":
+        out = b"%s %d" % (method.encode(), len(body))
+        send(http_response(200, [("Content-Length", len(out))], b"" if method == "HEAD" else out))
+    elif path == "/headers":
+        send(http_response(200, [("Content-Length", len(head))], head))
+    elif path == "/conn":
+        out = b"%d %d" % (state["conn_id"], state["req_no"])
+        send(http_response(200, [("Content-Length", len(out))], out))
+    elif path == "/drop-next":
+        send(http_response(200, [("Content-Length", 2)], b"ok"))
+        state["drop_next"] = True
+    elif path == "/idle-close":
+        send(http_response(200, [("Content-Length", 2)], b"ok"))
+        state["idle"] = (int(query.get("ms", "1000")), query.get("notify") != "0")
+    elif path == "/redirect":
+        code = int(query.get("code", "302"))
+        send(http_response(code, [("Location", query.get("to", "/hello")), ("Content-Length", 0)]))
+    elif path == "/redirect-chain":
+        if n > 0:
+            send(http_response(302, [("Location", "/redirect-chain?n=%d" % (n - 1)), ("Content-Length", 0)]))
+        else:
+            send(http_response(200, [("Content-Length", 4)], b"done"))
+    elif path == "/gzip":
+        data = pattern(n)
+        if query.get("members") == "2":
+            z = gzip.compress(data[:n // 2], mtime=0) + gzip.compress(data[n // 2:], mtime=0)
+        else:
+            z = gzip.compress(data, mtime=0)
+        if query.get("bad") == "1":
+            z = z[:-8] + bytes([z[-8] ^ 1]) + z[-7:]
+        if query.get("cut") == "1":
+            z = z[:len(z) // 2]
+        enc = ("Content-Encoding", query.get("enc", "gzip"))
+        if query.get("chunked") == "1":
+            send(http_response(200, [enc, ("Transfer-Encoding", "chunked")]))
+            for k in range(0, len(z), 100):
+                piece = z[k:k + 100]
+                send(b"%x\r\n" % len(piece) + piece + b"\r\n")
+            send(b"0\r\n\r\n")
+        else:
+            send(http_response(200, [enc, ("Content-Length", len(z))], z))
+    elif path == "/encoding":
+        send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
+    elif path == "/count":
+        with HTTP_LOG_LOCK:
+            c = sum(1 for q in HTTP_LOG if q.get("id") == query.get("id"))
+        out = b"%d" % c
+        send(http_response(200, [("Content-Length", len(out))], out))
+    else:
+        send(http_response(404, [("Content-Length", 0)]))
+    return True
+
+
+def http_handler(ctx, counter):
+    """HTTP/1.1 over TLS (ctx) or plain TCP (ctx None)."""
+    secure = ctx is not None
+
+    def handle(raw):
+        counter.inc()
+        state = {"conn_id": counter.n, "req_no": 0, "drop_next": False, "idle": None}
+        if secure:
+            try:
+                sock = ctx.wrap_socket(raw, server_side=True)
+            except (OSError, ssl.SSLError):
+                raw.close()
+                return
+        else:
+            sock = raw
+        rd = HttpReader(sock)
+        try:
+            while True:
+                idle = state["idle"]
+                if idle:
+                    sock.settimeout(idle[0] / 1000.0)
+                    try:
+                        head = rd.head()
+                    except (socket.timeout, TimeoutError):
+                        if idle[1]:
+                            clean_close(sock, secure)
+                        else:
+                            tcp_abort(sock)
+                        return
+                    sock.settimeout(None)
+                    state["idle"] = None
+                else:
+                    head = rd.head()
+                if head is None:
+                    return
+                lines = head.replace(b"\r\n", b"\n").split(b"\n")
+                method, target, _ = lines[0].decode().split(" ", 2)
+                fields = {}
+                for line in lines[1:]:
+                    if b":" in line:
+                        k, v = line.split(b":", 1)
+                        fields[k.strip().lower().decode()] = v.strip().decode()
+                body = rd.body(int(fields.get("content-length", "0")))
+                if body is None:
+                    return
+                url = urllib.parse.urlsplit(target)
+                query = dict(urllib.parse.parse_qsl(url.query))
+                if url.path != "/count":
+                    with HTTP_LOG_LOCK:
+                        HTTP_LOG.append(query)
+                state["req_no"] += 1
+                if state["drop_next"]:
+                    tcp_abort(sock)
+                    return
+                if not http_respond(sock, secure, method, url.path, query, head, body, state):
+                    return
+                if "close" in fields.get("connection", "").lower():
+                    clean_close(sock, secure)
+                    return
+        except (OSError, ssl.SSLError, ValueError):
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    return handle
+
+
+def http_listeners(bind):
+    ctx = tls_context("ecdsa", alpn=["http/1.1"])
+    tls = [serve(bind, port, http_handler(ctx, Counter())) for port in (4438, 4439)]
+    return tls + [serve(bind, 4440, http_handler(None, Counter()))]
+
+
 def serve(bind, port, handler):
     ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -220,6 +512,7 @@ def main():
     listeners = [serve(args.bind, PLAIN_PORT, handle_plain)]
     if CERT_DIR:
         listeners += tls_listeners(args.bind)
+        listeners += http_listeners(args.bind)
     print("READY", flush=True)
     try:
         threading.Event().wait()

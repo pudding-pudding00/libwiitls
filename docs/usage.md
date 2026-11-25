@@ -2,7 +2,8 @@
 
 A guide for homebrew developers: setting up, the patterns that work on the
 Wii, what each error means for your code, and what the library does not do.
-The API reference is [include/wiitls/wiitls.h](../include/wiitls/wiitls.h);
+The API reference is [include/wiitls/wiitls.h](../include/wiitls/wiitls.h)
+and, for HTTP, [include/wiitls/http.h](../include/wiitls/http.h);
 performance numbers are in [performance.md](performance.md).
 
 ## 1. Add it to your project
@@ -124,17 +125,112 @@ Points that trip people up:
 - **`wtls_read` never returns 0.** End of stream is `WTLS_ERR_CLOSED`. A
   stream that just stops (`WTLS_ERR_IO`) may be truncated by an attacker or a
   broken connection: discard the data, or check it against `Content-Length`.
-- **libwiitls speaks TLS, not HTTP.** With `HTTP/1.1` most servers answer with
-  `Transfer-Encoding: chunked` (hex chunk lengths between the data, as you see
-  in the example's output); parse that yourself, or send `HTTP/1.0` to get a
-  plain body.
+- **This is raw TLS: you speak the protocol yourself.** For HTTP, use the
+  client in 5 instead: it handles chunked and gzip bodies, keep-alive and
+  redirects. Speaking HTTP by hand means parsing `Transfer-Encoding: chunked`
+  (hex chunk lengths between the data) yourself, or sending `HTTP/1.0` to get
+  a plain body.
 - **The ALPN list is stored by pointer.** Keep it `static` or alive until
   `wtls_close`.
 - **Host names:** DNS names are case-insensitive and a trailing dot is
   ignored. An IPv4 literal works too, but then the server's certificate must
   list that IP (most public certificates don't).
 
-## 5. Faster second connections
+## 5. HTTP requests
+
+`<wiitls/http.h>` is an HTTP/1.1 client on top of the TLS layer: it builds
+the request, parses the response head, decodes chunked and gzip bodies,
+follows redirects and keeps connections alive for the next request. It needs
+the same start-up (`net_init`, `wtls_init`) and the same single thread.
+
+Streaming, for large bodies or when you want the headers first:
+
+```c
+#include <wiitls/http.h>
+
+wtls_http_request req = {0};          /* zero = GET, defaults everywhere */
+req.url = "https://example.com/data.json";
+
+wtls_http_response *res;
+int r = wtls_http_open(&res, &req);   /* connect (or reuse), send, read the head */
+if (r != WTLS_OK) { printf("%s\n", wtls_strerror(r)); return; }
+
+printf("status %d, type %s\n", wtls_http_status(res),
+       wtls_http_get_header(res, "Content-Type"));   /* NULL if absent */
+char buf[4096];
+int n;
+while ((n = wtls_http_read(res, buf, sizeof buf)) > 0) consume(buf, n);
+if (n < 0) report(n);                 /* WTLS_ERR_IO: body cut short, discard it */
+wtls_http_close(res);                 /* read to the end -> connection is pooled */
+```
+
+The whole body in one call, for small answers (JSON, text):
+
+```c
+wtls_http_request req = {0};
+req.url = "https://example.com/api/version";
+wtls_http_result res;
+if (wtls_http_fetch(&req, 64 * 1024, &res) == WTLS_OK) {   /* 0 = 1 MiB limit */
+    printf("%d: %s\n", res.status, res.body);             /* body is NUL-terminated */
+    wtls_http_result_free(&res);
+}
+```
+
+POST: set `req.method = "POST"`, `req.body`/`req.body_len` (sent with
+`Content-Length`) and your headers, e.g.
+`static const wtls_http_header h[] = {{"Content-Type", "application/json"}};`
+with `req.headers = h; req.n_headers = 1;`. `Host`, `Content-Length`,
+`Transfer-Encoding` and `Connection` are set by the library and refused in
+`req.headers`.
+
+Points that trip people up:
+
+- **An HTTP status ≥ 400 is not an error.** `wtls_http_open` returns
+  `WTLS_OK` for a 404 or 500; check `wtls_http_status`. Errors are things that
+  went wrong on the way: network, TLS, a malformed response.
+- **`wtls_http_read` returns 0 at the end of the body** (and again on every
+  later call). This is the opposite of `wtls_read`, which never returns 0 and
+  ends with `WTLS_ERR_CLOSED`: at the HTTP layer the end of a body is a normal
+  event, a cut-off body (`WTLS_ERR_IO`) is not.
+- **Keep-alive.** A response read to its end (`wtls_http_read` returned 0)
+  goes back into a pool of 4 idle connections when you close it; idle
+  connections are dropped after 60 s. The next request to the same scheme,
+  host and port skips the connect and the handshake
+  (`wtls_http_get_info` → `reused_connection`). A connection that died while
+  idle is detected before use; if a reused connection still fails before any
+  response byte arrives, GET, HEAD, PUT, DELETE, OPTIONS and TRACE are retried
+  once on a new connection, POST and PATCH are not.
+  `req.no_keepalive` or closing a response early opts out;
+  `wtls_http_pool_flush` (and `wtls_shutdown`) closes the idle ones.
+- **Redirects** (301, 302, 303, 307, 308) are followed, at most 5 by default
+  (`req.max_redirects`; -1 hands the 3xx to you). 303, and 301/302 after a
+  POST, become GET without a body; 307/308 keep method and body. When a
+  redirect leaves the original scheme, host and port, `Authorization`,
+  `Proxy-Authorization` and `Cookie` are dropped for the rest of the chain.
+  `https` → `http` is refused (`WTLS_ERR_HTTP_REDIRECT`); `http` → `https` is
+  followed. `wtls_http_get_info` has the final URL and the redirect count.
+- **gzip.** Requests offer `Accept-Encoding: gzip` and gzip bodies are
+  decompressed while you read; `wtls_http_content_length` is then -1 (the
+  compressed length says nothing about the decoded size). `req.no_gzip`, or
+  your own `Accept-Encoding` header, turns this off and hands you the bytes as
+  sent. A corrupt gzip body is `WTLS_ERR_HTTP`, a cut one `WTLS_ERR_IO`.
+- **`http://`** works too, without TLS: only for servers you trust on a
+  network you trust. `wtls_http_get_info` → `secure` tells you which one a
+  response came over.
+- **Timeouts:** `req.tls` (a `wtls_options`) sets connect and I/O timeouts,
+  `req.header_timeout_ms` (default 15 s) the time from sending the request to
+  the complete response head.
+
+Limits: URL 8 KiB; request and response head 16 KiB each; 100 response
+header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
+(`WTLS_ERR_HTTP_LIMIT` above that, checked against the decoded size).
+
+Not supported: HTTP/2 and HTTP/3, proxies, cookies (send your own `Cookie`
+header), authentication schemes (send your own `Authorization`), request
+bodies of unknown length (chunked uploads), `Expect: 100-continue`, ranges,
+caching, and `deflate`/`br` encodings.
+
+## 6. Faster second connections
 
 The library keeps the last 8 TLS 1.3 session tickets and 16 DNS answers. A
 later `wtls_connect` to the same host and port reuses both: no DNS lookup, no
@@ -146,7 +242,7 @@ you `wtls_read`/`wtls_write` on the connection. Reading the response as above
 is enough. A connection closed right after `wtls_connect` stores nothing. To
 opt out (e.g. for privacy between user accounts), set `opt.no_resumption`.
 
-## 6. Non-blocking I/O for an event loop
+## 7. Non-blocking I/O for an event loop
 
 `wtls_connect` always blocks. After it, `wtls_set_nonblocking(c, true)` makes
 `wtls_read`/`wtls_write` return at once:
@@ -170,7 +266,7 @@ for (;;) {
 After `WTLS_WANT_WRITE` from `wtls_write`, call it again with **the same
 buffer and length**.
 
-## 7. Your own server / self-signed certificates
+## 8. Your own server / self-signed certificates
 
 Add your CA (DER, or PEM including the terminating NUL in `len`) after
 `wtls_init`:
@@ -184,7 +280,7 @@ It is trusted in addition to the built-in Mozilla roots until
 `wtls_shutdown`. Do **not** use `insecure_skip_verify` for this. That option
 turns off all certificate checks and exists for tests only.
 
-## 8. What to do with each error
+## 9. What to do with each error
 
 | Return | Typical cause | What your app should do |
 |--------|---------------|-------------------------|
@@ -199,16 +295,21 @@ turns off all certificate checks and exists for tests only.
 | `WTLS_ERR_IO` | connection reset or truncated | discard partial data; retry |
 | `WTLS_ERR_CLOSED` | clean end of stream | done |
 | `WTLS_ERR_NOMEM` | heap exhausted | close connections, free memory |
+| `WTLS_ERR_HTTP` | malformed or unsupported HTTP response, corrupt gzip body | report; the server is broken or not HTTP/1.1 |
+| `WTLS_ERR_HTTP_LIMIT` | response head over 16 KiB / 100 fields, or `wtls_http_fetch` body over its limit | stream with `wtls_http_read`, or raise `max_body` |
+| `WTLS_ERR_HTTP_REDIRECT` | more than `max_redirects`, bad `Location`, or `https` → `http` | report; do not follow the downgrade yourself |
 
-## 9. Shutting down
+## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets
 (they contain secrets) and frees the CA store and caches. `wtls_init` can be
 called again afterwards.
 
-## 10. Limits and security notes
+## 11. Limits and security notes
 
 - **Client only.** No server mode, no client certificates.
+- **HTTP:** HTTP/1.1 only, limits and non-goals in 5. `http://` has no
+  encryption and no authentication of the server.
 - **TLS 1.3 preferred, TLS 1.2 minimum.** Ciphers: ChaCha20-Poly1305 first
   (fast without AES hardware), AES-GCM. Key exchange X25519, P-256, P-384.
 - **No revocation checks** (OCSP/CRL), like most embedded TLS clients.
