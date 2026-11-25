@@ -307,31 +307,33 @@ are public, so it is variable time by design:
   wrap-around as a second comparison — no field inversion for the result.
 
 Wii, default build (`EVEREST=ON`, `OPT=O3`, `ACCEL=ON`, `BN_ASM=ON`,
-`ACCEL_P256=ON`), 2026-11-26, Wi-Fi, PC test server on the same network:
+`ACCEL_P256=ON`), 2026-11-26, Wi-Fi, PC test server on the same network
+(including the `wtls_plat_send` `POLLOUT` + `O_NONBLOCK`-clear workaround for
+IOS non-blocking `net_send`, which adds ~1.5 ms of socket IPC to a handshake):
 
 | | builtin (0.2.0) | `WTLS_ACCEL_P256` |
 |---|---:|---:|
-| `ecdsa_p256_verify` | 25.6 ms | **5.33 ms** |
+| `ecdsa_p256_verify` | 25.6 ms | **5.30 ms** |
 | `ecdsa_p256_verify_p256m` (reference) | 35.9 ms | 35.9 ms |
 | `psa_verify_hash` in a full handshake (2 verifies) | 51.4 ms | **10.7 ms** |
-| `handshake_full_cpu` | 66.4 ms | **25.8 ms** |
-| `handshake_full_wall` | 81.0 ms | 35.5 ms |
-| `handshake_resumed_cpu` (no verify in that path) | 14.0 ms | 14.1 ms |
+| `handshake_full_cpu` | 66.4 ms | **27.8 ms** |
+| `handshake_full_wall` | 81.0 ms | 37.3 ms |
+| `handshake_resumed_cpu` (no verify in that path) | 14.0 ms | 15.6 ms |
 
 ```
-BENCH ecdsa_p256_verify 5.326 ms
-BENCH handshake_full_wall 35.528 ms
-BENCH handshake_full_cpu 25.849 ms
-BENCH hs_full_crypto_cpu 16.738 ms
-GATE handshake_full_cpu <= 30 ms        25.849 met
-GATE handshake_resumed_cpu <= 10 ms     14.116 MISSED
+BENCH ecdsa_p256_verify 5.300 ms
+BENCH handshake_full_wall 37.328 ms
+BENCH handshake_full_cpu 27.752 ms
+BENCH hs_full_crypto_cpu 16.747 ms
+GATE handshake_full_cpu <= 30 ms        27.752 met
+GATE handshake_resumed_cpu <= 10 ms     15.594 MISSED
 ```
 
 Gate status after 0.3.0: **the full-handshake target (≤ 30 ms CPU) is met
-for the first time** (25.8 ms, with 4.2 ms headroom). The resumed target
-stays missed exactly as before (14.0 → 14.1 ms, unchanged within noise —
-the resumed path verifies no signature; about 8 ms of its CPU are IOS
-socket IPC, see the handshake breakdown above). A 5.3 ms verify sits at
+for the first time** (27.8 ms, with 2.2 ms headroom). The resumed target
+stays missed (14.0 → 15.6 ms; the resumed path verifies no signature, and
+about 9.7 ms of its CPU are IOS socket/connect IPCs — `connect_cpu` 2.6 ms
+plus `io` 7.1 ms). A 5.3 ms verify sits at
 the top of the 2–5 ms design window; the Phase-2 Broadway-FPU backend
 (`double fmadd`) could go further but is not needed for any gate — it
 stays an optional follow-up, to be judged against these numbers.
@@ -339,7 +341,8 @@ stays an optional follow-up, to be judged against these numbers.
 Suites on the same console: `crypto` 14/14 (the P-256 tests included:
 RFC 6979 A.2.5, edge cases, a constructed x_R = r + n wrap-around vector,
 a constructed R = O vector, differential against the builtin on random
-keys), bench 10/10.
+keys), `tls` 34/34, `http` 76/76, `plat` 12/12, `time` 1/1, `realworld` 10/10,
+bench 10/10.
 
 ## HTTP
 
@@ -354,18 +357,18 @@ server's keep-alive port 4438, body read to the end):
 
 The informational gate `http_get_pooled_cpu < handshake_resumed_cpu` says
 whether keeping the connection pays off; on the Wii the resumed handshake
-costs 13.6 ms CPU.
+costs 15.6 ms CPU.
 
-Wii, default build (`WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`, `WTLS_BN_ASM=ON`), 2026-11-25 (Wi-Fi, PC test server on the same network):
+Wii, default build (`WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`, `WTLS_BN_ASM=ON`, `WTLS_ACCEL_P256=ON`), 2026-11-26 (Wi-Fi, PC test server on the same network):
 
 ```
-BENCH http_get_new_wall 86.892 ms
-BENCH http_get_pooled_wall 5.327 ms
-BENCH http_get_pooled_cpu 2.438 ms
-GATE http_get_pooled_cpu < handshake_resumed_cpu 2.438 met
+BENCH http_get_new_wall 87.342 ms
+BENCH http_get_pooled_wall 5.855 ms
+BENCH http_get_pooled_cpu 2.969 ms
+GATE http_get_pooled_cpu < handshake_resumed_cpu 2.969 met
 ```
 
-In the same run, `handshake_resumed_wall` was 23.008 ms and `handshake_resumed_cpu` was 14.038 ms.
+In the same run, `handshake_resumed_wall` was 24.334 ms and `handshake_resumed_cpu` was 15.594 ms.
 
 Host smoke run, 2026-11-25 (PC, localhost; not the target):
 

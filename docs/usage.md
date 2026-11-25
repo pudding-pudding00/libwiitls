@@ -280,7 +280,7 @@ with `wtls_http_parse_content_range`.
 
 The library keeps the last 8 TLS 1.3 session tickets and 16 DNS answers. A
 later `wtls_connect` to the same host and port reuses both: no DNS lookup, no
-certificate chain check, about 25 ms instead of 80 ms on Wi-Fi.
+certificate chain check, about 24 ms instead of 37 ms on Wi-Fi.
 `wtls_get_info(c, &info)` tells you whether it happened (`info.resumed`).
 
 The server sends its ticket after the handshake, so it is captured only while

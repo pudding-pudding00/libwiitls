@@ -113,6 +113,12 @@ class LineConn:
         line, self.buf = self.buf.split(b"\n", 1)
         return line + b"\n"
 
+    def recv(self, n):
+        if self.buf:
+            out, self.buf = self.buf[:n], self.buf[n:]
+            return out
+        return self.sock.recv(n)
+
 
 def handle_plain(sock):
     conn = LineConn(sock)
@@ -154,7 +160,7 @@ def handle_plain(sock):
                 got = 0
                 bad = None
                 while got < total and bad is None:
-                    data = sock.recv(min(65536, total - got))
+                    data = conn.recv(min(65536, total - got))
                     if not data:
                         break
                     for i, b in enumerate(data):
@@ -173,11 +179,11 @@ def handle_plain(sock):
                 """Bidirectional-pressure probe: while reading the <total> pattern
                 bytes (like SENDFUZZ), a thread pushes junk back, the way a TLS
                 server's post-handshake records arrive during a big upload."""
-                total = int(cmd[13:])
+                total = int(cmd[12:])
 
                 def push_junk(sock=sock, n=256 * 1024):
                     try:
-                        junk = bytes(i % 251 for i in range(4096))
+                        junk = b"J" * 4096
                         for _ in range(n // len(junk)):
                             sock.sendall(junk)
                     except OSError:
@@ -189,7 +195,7 @@ def handle_plain(sock):
                 got = 0
                 bad = None
                 while got < total and bad is None:
-                    data = sock.recv(min(65536, total - got))
+                    data = conn.recv(min(65536, total - got))
                     if not data:
                         break
                     for i, b in enumerate(data):
@@ -618,11 +624,8 @@ def http_handler(ctx, counter):
                 if "close" in fields.get("connection", "").lower():
                     clean_close(sock, secure)
                     return
-        except (OSError, ssl.SSLError, ValueError) as e:
-            import traceback
-            sys.stderr.write("HTTP HANDLER EXCEPTION: %r\n" % (e,))
-            traceback.print_exc()
-            sys.stderr.flush()
+        except (OSError, ssl.SSLError, ValueError):
+            pass
         finally:
             try:
                 sock.close()

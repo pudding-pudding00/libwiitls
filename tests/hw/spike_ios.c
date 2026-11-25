@@ -239,7 +239,7 @@ static void spike_send_truth(void) {
             return;
         }
         char cmd[48];
-        int n = snprintf(cmd, sizeof cmd, "SENDFUZZ %ld\n", total);
+        snprintf(cmd, sizeof cmd, "SENDFUZZ %ld\n", total);
         send_all(fd, cmd);
         uint8_t *buf = malloc((size_t)chunk);
         if (!buf) {
@@ -298,6 +298,9 @@ static void spike_send_truth_tls(void) {
             TLOG("    connect: %d\n", (int)st);
             return;
         }
+        wtls_conn_info info;
+        if (wtls_get_info(c, &info) == WTLS_OK)
+            TLOG("    %s %s\n", info.tls_version, info.ciphersuite);
         char head[128];
         int hn = snprintf(head, sizeof head,
                           "PUT /echo HTTP/1.1\r\nHost: x\r\nContent-Length: %ld\r\n\r\n", total);
@@ -314,9 +317,7 @@ static void spike_send_truth_tls(void) {
             for (size_t i = 0; i < want; i++) buf[i] = (uint8_t)((off + (long)i) % 251);
             r = wtls_write(c, buf, want);
             if (r <= 0) {
-                extern int wtls_plat_dbg_last_send;
-                TLOG("    write failed at off=%ld (record %ld): %d, raw net_send=%d\n", off,
-                     off / step, r, wtls_plat_dbg_last_send);
+                TLOG("    write failed at off=%ld (record %ld): %d\n", off, off / step, r);
                 break;
             }
             off += r;
@@ -340,7 +341,7 @@ static void spike_send_truth_duplex(void) {
         s32 fd = blocking_connect();
         if (fd < 0) return;
         char cmd[48];
-        int n = snprintf(cmd, sizeof cmd, "SENDFUZZDUP %ld\n", total);
+        snprintf(cmd, sizeof cmd, "SENDFUZZDUP %ld\n", total);
         send_all(fd, cmd);
         long sent = 0;
         s32 r = 0;
@@ -358,15 +359,23 @@ static void spike_send_truth_duplex(void) {
         TLOG("    net_send: %d calls, %d short, last r=%d, sum=%ld\n", calls, short_sends, (int)r,
              sent);
         char line[96] = {0};
-        size_t got = 0;
-        while (got < sizeof line - 1) {
-            s32 g = net_recv(fd, (uint8_t *)line + got, 1, 0);
+        size_t got = 0, skipped = 0;
+        uint8_t rx[4096];
+        for (;;) {
+            s32 g = net_recv(fd, rx, sizeof rx, 0);
             if (g <= 0) break;
-            if (line[got] == '\n') break;
-            got += (size_t)g;
+            for (s32 i = 0; i < g; i++) {
+                if (rx[i] == 'J' && got == 0) {
+                    skipped++;
+                    continue;
+                }
+                if (rx[i] == '\n') goto done_line;
+                if (got < sizeof line - 1) line[got++] = (char)rx[i];
+            }
         }
+    done_line:
         line[got] = 0;
-        TLOG("    server: %s\n", line);
+        TLOG("    server (skipped %u junk): %s\n", (unsigned)skipped, line);
         net_close(fd);
     }
 }

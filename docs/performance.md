@@ -8,8 +8,8 @@ variant and the history of each number.
 
 ## In short
 
-- **A new HTTPS connection costs about 26 ms CPU / 36 ms wall**, a repeated
-  one to the same server about 14 ms CPU / 23 ms wall (Wi-Fi to a server on
+- **A new HTTPS connection costs about 28 ms CPU / 37 ms wall**, a repeated
+  one to the same server about 16 ms CPU / 24 ms wall (Wi-Fi to a server on
   the same network; add your Internet round trips).
 - **Downloads are limited by the Wii's Wi-Fi, not by TLS.** Decryption runs at
   24 MB/s; the Wi-Fi delivered 0.2–1 MB/s in our measurements, and
@@ -20,25 +20,25 @@ variant and the history of each number.
 
 | | CPU | Wall clock (LAN, Wi-Fi) |
 |---|---:|---:|
-| Full TLS 1.3 handshake (DNS cached, ECDSA P-256 certificate chain) | 26 ms | 36 ms |
-| Resumed handshake (session ticket, same host) | 14 ms | 23 ms |
+| Full TLS 1.3 handshake (DNS cached, ECDSA P-256 certificate chain) | 28 ms | 37 ms |
+| Resumed handshake (session ticket, same host) | 16 ms | 24 ms |
 | Resumed handshake against example.com over the Internet (Cloudflare, Frankfurt) | | 35 ms |
-| Further HTTP request over a kept-alive connection (`wtls_http`, no handshake) | 2.4 ms | 5.3 ms |
+| Further HTTP request over a kept-alive connection (`wtls_http`, no handshake) | 3.0 ms | 5.9 ms |
 
 Where the full handshake's CPU time goes: about 11 ms verifying two P-256
 ECDSA signatures (server certificate chain and handshake signature, through
 the accelerated `WTLS_ACCEL_P256` verify), 4.7 ms for the X25519 key
 exchange, the rest for hashing, key schedule and record processing. The
 resumed handshake skips the certificate chain; what remains is X25519 plus
-about 5 ms of socket calls to IOS.
+about 7 ms of socket calls to IOS.
 
 Servers with RSA certificates are slower to verify (RSA-2048 verify: 8.6 ms,
 no acceleration) — an ECDSA P-256 certificate chain is now the faster choice.
 
 The HTTP client keeps idle connections open (see the usage guide), so a
 further request to the same server costs neither of the handshakes above,
-only the request and response records. On the Wii the benchmark measures 2.4 ms CPU (5.3 ms wall) for such a request
-against 14.0 ms CPU (23.0 ms wall) for a resumed handshake; see `http_get_*`
+only the request and response records. On the Wii the benchmark measures 3.0 ms CPU (5.9 ms wall) for such a request
+against 15.6 ms CPU (24.3 ms wall) for a resumed handshake; see `http_get_*`
 in [benchmarks.md](benchmarks.md#http).
 
 ## Primitives
@@ -60,7 +60,7 @@ speed, which is still well above Wi-Fi throughput.
 
 | | |
 |---|---:|
-| `https_get.dol` (complete example program, HTTP client and gzip included) | 792 KB |
+| `https_get.dol` (complete example program, HTTP client and gzip included) | 805 KB |
 | Built-in Mozilla CA bundle (118 roots, parsed lazily) | in `.rodata` of `libwiitls.a` |
 | Per connection | about 2 × 16 KiB record buffers plus Mbed TLS state, on the heap |
 
@@ -68,7 +68,7 @@ speed, which is still well above Wi-Fi throughput.
 
 The project set itself targets of ≤ 30 ms CPU for a full handshake and ≤ 10 ms
 for a resumed one. **The full-handshake target is met** since the P-256
-verify acceleration (25.8 ms). The resumed one is still missed (14.1 ms),
-and about a third of it is IOS socket overhead that no crypto change can
+verify acceleration (27.8 ms). The resumed one is still missed (15.6 ms),
+and over half of it is IOS socket/connect overhead that no crypto change can
 remove; it is recorded as a follow-up. In practice the network round trips
 cost more than either.

@@ -22,8 +22,8 @@
   Wii). `tools/gen_p256.py` regenerates the curve constants and the
   fixed-base table (checked in as `src/accel/p256_curve.inc`).
   Measured on a real Wii (2026-11-26): `ecdsa_p256_verify`
-  25.7 → **5.3 ms**, `handshake_full_cpu` 66.4 → **25.8 ms** — the
-  `<= 30 ms` target from 0.1 is met for the first time.
+  25.7 → **5.3 ms**, `handshake_full_cpu` 66.4 → **27.8 ms** — the
+  `<= 30 ms` target from 0.1 is met.
 - HTTP streaming uploads (`wtls_http_body_cb`, `<wiitls/http.h>`): a
   request body produced by a callback, sent either with `Content-Length`
   (`body_len`) or as `Transfer-Encoding: chunked` (`body_chunked`, the
@@ -58,6 +58,18 @@
   `/who` with the client CN) and `CLIENTCERT`/`CLIENTKEY` plain-port commands,
   so the Wii hardware suites load credentials over the network without file
   access.
+
+### Fixed
+
+- Wii `wtls_plat_send` (`src/plat/plat_ogc.c`): IOS `/dev/net/ip/top` queues a
+  partial prefix into the TCP stream while still returning `-EAGAIN` (`-11`)
+  when a non-blocking `net_send` exceeds the remaining ~4080-byte socket send
+  buffer, causing retries to duplicate bytes and corrupt TLS records during
+  sustained uploads (such as `http_upload_256k`). `wtls_plat_send` now checks
+  `IOS_POLLOUT` with a zero timeout (returning `WTLS_WANT_WRITE` when full)
+  and temporarily clears `IOS_O_NONBLOCK` around `net_send`. Pinned on host
+  and Wii by `test_send_truthfulness` (`plat`), `spike` `[8]`–`[11]` and
+  `http_upload_256k` (`http`).
 
 ## 0.2.0 (2026-11-25)
 
