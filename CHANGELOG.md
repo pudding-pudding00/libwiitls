@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- P-256 ECDSA verify with 32-bit limbs (`WTLS_ACCEL_P256`, default ON,
+  `src/accel/p256_verify.c`), hooked into the builtin driver's
+  `mbedtls_psa_ecdsa_verify_hash` at configure time. Public inputs only, so
+  it is variable time by design: Shamir's trick over interleaved wNAF
+  (w = 6 against the generated affine fixed-base table `k_p256_g_odd`,
+  w = 5 against eight odd multiples of the peer key, normalised with a
+  single mod-p inversion), Jacobian arithmetic with a = -3 (3M + 5S doubling,
+  8M + 3S mixed addition), Solinas field reduction over 8x32 limbs (the
+  shifts are whole limbs) and a projective final comparison that covers the
+  x_R = r + n wrap-around without a field inversion. Matches the builtin's
+  psa_status_t mapping exactly; r/s range, point-on-curve, SEC 1 4.1.4
+  hash truncation for 20/32/48/64-byte hashes and the wrap-around case are
+  pinned by `tests/common/crypto_tests.c` (RFC 6979 A.2.5 vectors, a
+  generated wrap-around vector, and differential tests against
+  `mbedtls_ecdsa_verify` on random keys with bit-flip mutations, host and
+  Wii). `tools/gen_p256.py` regenerates the curve constants and the
+  fixed-base table (checked in as `src/accel/p256_curve.inc`).
+
 ## 0.2.0 (2026-11-25)
 
 ### Added
