@@ -23,7 +23,7 @@ history of each number.
 | Full TLS 1.3 handshake (DNS cached, ECDSA P-256 certificate chain) | 66 ms | 81 ms |
 | Resumed handshake (session ticket, same host) | 14 ms | 25 ms |
 | Resumed handshake against example.com over the Internet (Cloudflare, Frankfurt) | | 35 ms |
-| Further HTTP request over a kept-alive connection (`wtls_http`, no handshake) | not yet measured on the Wii | not yet measured on the Wii |
+| Further HTTP request over a kept-alive connection (`wtls_http`, no handshake) | 2.4 ms | 5.3 ms |
 
 Where the full handshake's CPU time goes: about 51 ms verifying two P-256
 ECDSA signatures (server certificate chain and handshake signature), 4.6 ms for
@@ -35,10 +35,9 @@ Servers with RSA certificates are faster to verify (RSA-2048 verify: 8.6 ms).
 
 The HTTP client keeps idle connections open (see the usage guide), so a
 further request to the same server costs neither of the handshakes above,
-only the request and response records. On the PC the benchmark measures
-0.02 ms CPU for such a request against 1.2 ms for a resumed handshake; the
-Wii numbers (`http_get_*` in [benchmarks.md](benchmarks.md#http)) are still
-to be recorded.
+only the request and response records. On the Wii the benchmark measures 2.4 ms CPU (5.3 ms wall) for such a request
+against 14.0 ms CPU (23.0 ms wall) for a resumed handshake; see `http_get_*`
+in [benchmarks.md](benchmarks.md#http).
 
 ## Primitives
 

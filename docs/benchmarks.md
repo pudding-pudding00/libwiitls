@@ -297,10 +297,16 @@ The informational gate `http_get_pooled_cpu < handshake_resumed_cpu` says
 whether keeping the connection pays off; on the Wii the resumed handshake
 costs 13.6 ms CPU.
 
-Wii: not yet measured (2026-11-25: the 0.2.0 HTTP client was built for the
-Wii, `wtls_bench.dol` contains the benchmark, but no hardware run has been
-done). Run `python tools/hwtest.py --wii <ip> --dol build-wii/bench/wtls_bench.dol --suite bench`
-and record the three lines here.
+Wii, default build (`WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`, `WTLS_BN_ASM=ON`), 2026-11-25 (Wi-Fi, PC test server on the same network):
+
+```
+BENCH http_get_new_wall 86.892 ms
+BENCH http_get_pooled_wall 5.327 ms
+BENCH http_get_pooled_cpu 2.438 ms
+GATE http_get_pooled_cpu < handshake_resumed_cpu 2.438 met
+```
+
+In the same run, `handshake_resumed_wall` was 23.008 ms and `handshake_resumed_cpu` was 14.038 ms.
 
 Host smoke run, 2026-11-25 (PC, localhost; not the target):
 
