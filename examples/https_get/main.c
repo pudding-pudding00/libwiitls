@@ -5,8 +5,9 @@
  * The main thread only draws a spinner; every wtls_* call happens on one
  * dedicated network thread (libwiitls is single-threaded by contract). The
  * thread brings the network up, initialises libwiitls, syncs the clock via SNTP
- * if needed, fetches the URL twice and prints the response and the connection
- * info. The second request shows TLS 1.3 session resumption (resumed=yes). */
+ * if needed, fetches the URL twice with the HTTP client (wtls_http_open) and
+ * prints status, headers, the start of the body and the request info. The
+ * second request reuses the kept-alive connection (reused=yes). */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@
 #include <ogc/mutex.h>
 
 #include <mbedtls/x509.h> /* MBEDTLS_X509_BADCERT_* */
+#include <wiitls/http.h>
 #include <wiitls/wiitls.h>
 
 #define NET_STACK_SIZE (64 * 1024)
@@ -28,9 +30,7 @@ static uint8_t s_net_stack[NET_STACK_SIZE] __attribute__((aligned(32)));
 static mutex_t s_con;            /* guards the console: two threads print */
 static volatile bool s_done;
 
-static char s_host[256];
-static uint16_t s_port = 443;
-static char s_path[512] = "/";
+static const char *s_url = "https://example.com/";
 
 #define LOCKED_PRINTF(...)            \
     do {                              \
@@ -39,34 +39,8 @@ static char s_path[512] = "/";
         LWP_MutexUnlock(s_con);       \
     } while (0)
 
-/* Splits https://host[:port]/path. Only https is supported. */
-static bool parse_url(const char *url) {
-    const char *p = url;
-    if (strncmp(p, "https://", 8) != 0) return false;
-    p += 8;
-    size_t hlen = strcspn(p, ":/");
-    if (hlen == 0 || hlen >= sizeof s_host) return false;
-    memcpy(s_host, p, hlen);
-    s_host[hlen] = '\0';
-    p += hlen;
-    if (*p == ':') {
-        char *end;
-        long port = strtol(p + 1, &end, 10);
-        if (end == p + 1 || port <= 0 || port > 65535) return false;
-        s_port = (uint16_t)port;
-        p = end;
-    }
-    if (*p == '\0') p = "/";
-    if (*p != '/' || strlen(p) >= sizeof s_path) return false;
-    strcpy(s_path, p);
-    return true;
-}
-
-static int connect_with_clock_fix(wtls_conn **c) {
-    static const char *const alpn[] = {"http/1.1", NULL};
-    wtls_options opt = {0};
-    opt.alpn = alpn;
-    int r = wtls_connect(c, s_host, s_port, &opt);
+static int open_with_clock_fix(wtls_http_response **res, const wtls_http_request *req) {
+    int r = wtls_http_open(res, req);
     /* The Wii RTC is often wrong; certificates cannot be checked without a
      * clock. A clock off by only a few years shows up as an expired or
      * not-yet-valid certificate instead of WTLS_ERR_CLOCK. */
@@ -77,69 +51,59 @@ static int connect_with_clock_fix(wtls_conn **c) {
         LOCKED_PRINTF("Clock looks wrong, syncing via SNTP...\n");
         int s = wtls_time_sync_sntp(NULL, 3000);
         LOCKED_PRINTF("SNTP: %s\n", wtls_strerror(s));
-        if (s == WTLS_OK) r = wtls_connect(c, s_host, s_port, &opt);
+        if (s == WTLS_OK) r = wtls_http_open(res, req);
     }
     return r;
 }
 
 static void fetch(int round) {
-    LOCKED_PRINTF("\n--- request %d: https://%s:%u%s ---\n", round, s_host, s_port, s_path);
-    wtls_conn *c = NULL;
-    int r = connect_with_clock_fix(&c);
+    LOCKED_PRINTF("\n--- request %d: %s ---\n", round, s_url);
+    static const wtls_http_header hdrs[] = {{"User-Agent", "libwiitls-https_get"}};
+    wtls_http_request req = {0};
+    req.url = s_url;
+    req.headers = hdrs;
+    req.n_headers = 1;
+    wtls_http_response *res = NULL;
+    int r = open_with_clock_fix(&res, &req);
     if (r != WTLS_OK) {
-        LOCKED_PRINTF("connect failed: %s (verify flags 0x%x)\n", wtls_strerror(r),
+        LOCKED_PRINTF("request failed: %s (verify flags 0x%x)\n", wtls_strerror(r),
                       (unsigned)wtls_last_verify_flags());
         return;
     }
 
-    char req[1024];
-    int n = snprintf(req, sizeof req,
-                     "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: libwiitls-https_get\r\n"
-                     "Accept: */*\r\nConnection: close\r\n\r\n",
-                     s_path, s_host);
-    if (n <= 0 || (size_t)n >= sizeof req || wtls_write(c, req, (size_t)n) != n) {
-        LOCKED_PRINTF("write failed\n");
-        wtls_close(c);
-        return;
-    }
+    /* A status >= 400 is a response, not an error: print it like any other. */
+    LOCKED_PRINTF("HTTP %d\n", wtls_http_status(res));
+    const char *name, *value;
+    for (size_t i = 0; wtls_http_header_at(res, i, &name, &value); i++) LOCKED_PRINTF("%s: %s\n", name, value);
+    LOCKED_PRINTF("\n");
 
-    /* Print the header block in full and the first BODY_PREVIEW bytes of the
-     * body, but keep reading to the end: that also captures the session ticket. */
+    /* Show the first BODY_PREVIEW bytes but read to the end: only a fully read
+     * response lets the connection go back to the keep-alive pool. */
     static char buf[4096];
-    size_t total = 0, body_shown = 0;
-    bool in_body = false;
-    int match = 0; /* progress through "\r\n\r\n" */
-    for (;;) {
-        r = wtls_read(c, buf, sizeof buf);
-        if (r <= 0) break;
-        total += (size_t)r;
-        LWP_MutexLock(s_con);
-        for (int i = 0; i < r; i++) {
-            char ch = buf[i];
-            if (!in_body) {
-                if (ch != '\r') putchar(ch);
-                match = (ch == "\r\n\r\n"[match]) ? match + 1 : (ch == '\r' ? 1 : 0);
-                if (match == 4) in_body = true;
-            } else if (body_shown < BODY_PREVIEW) {
-                if (ch != '\r') putchar(ch);
-                body_shown++;
-            }
+    size_t total = 0, shown = 0;
+    while ((r = wtls_http_read(res, buf, sizeof buf)) > 0) {
+        if (shown < BODY_PREVIEW) {
+            size_t n = (size_t)r < BODY_PREVIEW - shown ? (size_t)r : BODY_PREVIEW - shown;
+            LWP_MutexLock(s_con);
+            for (size_t i = 0; i < n; i++)
+                if (buf[i] != '\r') putchar(buf[i]);
+            LWP_MutexUnlock(s_con);
+            shown += n;
         }
-        LWP_MutexUnlock(s_con);
+        total += (size_t)r;
     }
-    if (r == WTLS_ERR_IO)
-        /* Many HTTP servers just drop TCP after "Connection: close"; a TLS client
-         * still cannot tell that from an attacker cutting the response short. */
-        LOCKED_PRINTF("\n(stream ended without close_notify: the response may be truncated)\n");
-    else if (r != WTLS_ERR_CLOSED)
-        LOCKED_PRINTF("\nread: %s\n", wtls_strerror(r));
+    if (r < 0) LOCKED_PRINTF("\nread: %s (the body is incomplete)\n", wtls_strerror(r));
 
-    wtls_conn_info info;
-    if (wtls_get_info(c, &info) == WTLS_OK)
-        LOCKED_PRINTF("\n[%u bytes] %s %s alpn=%s resumed=%s handshake=%u ms\n", (unsigned)total,
-                      info.tls_version, info.ciphersuite, info.alpn ? info.alpn : "-",
-                      info.resumed ? "yes" : "no", (unsigned)info.handshake_ms);
-    wtls_close(c);
+    wtls_http_info info;
+    if (wtls_http_get_info(res, &info) == WTLS_OK) {
+        LOCKED_PRINTF("\n[%u body bytes%s] reused=%s redirects=%u url=%s\n", (unsigned)total,
+                      info.gzip ? ", gunzipped" : "", info.reused_connection ? "yes" : "no",
+                      (unsigned)info.redirects, info.url);
+        if (info.secure)
+            LOCKED_PRINTF("%s %s resumed=%s handshake=%u ms\n", info.tls.tls_version, info.tls.ciphersuite,
+                          info.tls.resumed ? "yes" : "no", (unsigned)info.tls.handshake_ms);
+    }
+    wtls_http_close(res);
 }
 
 static void *net_thread(void *arg) {
@@ -152,7 +116,7 @@ static void *net_thread(void *arg) {
         LOCKED_PRINTF("wtls_init failed: %s\n", wtls_strerror(r));
     } else {
         fetch(1);
-        fetch(2); /* same host: resumes the TLS 1.3 session */
+        fetch(2); /* same host: reuses the pooled connection */
         wtls_shutdown();
     }
     s_done = true;
@@ -177,11 +141,10 @@ int main(int argc, char **argv) {
     video_init();
     printf("libwiitls https_get example\n");
 
-    const char *url = "https://example.com/";
     for (int i = 0; i < argc; i++) /* wiiload may put the first argument in argv[0] */
-        if (!strncmp(argv[i], "url=", 4)) url = argv[i] + 4;
-    if (!parse_url(url)) {
-        printf("bad url: %s (expected https://host[:port]/path)\n", url);
+        if (!strncmp(argv[i], "url=", 4)) s_url = argv[i] + 4;
+    if (strncmp(s_url, "https://", 8) != 0 && strncmp(s_url, "http://", 7) != 0) {
+        printf("bad url: %s (expected https://host[:port]/path or http://...)\n", s_url);
         for (int i = 0; i < 60 * 5; i++) VIDEO_WaitVSync();
         return 1;
     }
