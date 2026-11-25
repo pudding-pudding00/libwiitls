@@ -75,8 +75,15 @@ wtls_status wtls_init(void) {
     return WTLS_OK;
 }
 
+void (*wtls_shutdown_hook)(void);
+
 void wtls_shutdown(void) {
     if (!s_initialized) return;
+    if (wtls_shutdown_hook) {
+        void (*hook)(void) = wtls_shutdown_hook;
+        wtls_shutdown_hook = NULL;
+        hook(); /* closes pooled connections while the TLS state still exists */
+    }
     wtls_castore_free();
     wtls_scache_clear(); /* holds resumption secrets */
     wtls_dns_clear();

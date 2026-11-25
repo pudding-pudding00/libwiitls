@@ -227,6 +227,7 @@ add_library(wiitls STATIC
     src/http/wtls_http_parse.c
     src/http/wtls_http_chunked.c
     src/http/wtls_http.c
+    src/http/wtls_http_pool.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -343,6 +344,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_http_parse)
     wtls_host_test(test_http_chunked)
     wtls_host_test(test_http_fuzz)
+    wtls_host_test(test_http_pool)
     add_dependencies(test_castore wtls_test_certs)
     target_compile_definitions(test_castore PRIVATE
         WTLS_TEST_CERT_DIR="${WTLS_TEST_CERT_DIR}"
@@ -353,6 +355,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_server_test(test_http tests/common/http_tests.c)
     add_dependencies(test_http wtls_test_certs)
     set_tests_properties(test_http PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    # A TLS-only application must not link the HTTP layer.
+    if(CMAKE_NM)
+        add_test(NAME http_not_linked_into_tls_only
+                 COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_tls> -DPATTERN=wtls_http_
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
+    endif()
 
     # Benchmarks on the host: proves every benchmark runs; the numbers are the PC's.
     add_executable(test_bench bench/host_main.c bench/bench_core.c bench/psa_prof.c)

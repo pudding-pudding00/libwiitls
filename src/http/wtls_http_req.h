@@ -11,6 +11,9 @@
 #include "http/wtls_url.h"
 
 #define WTLS_HTTP_MAX_REQ_HEADERS 64u
+#define WTLS_HTTP_DEFAULT_REDIRECTS 5
+#define WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS 15000u /* request sent -> response head complete */
+#define WTLS_HTTP_REDIRECT_DRAIN_MAX 65536u        /* body bytes read to keep a redirect's connection */
 
 /* Builds the request head into a malloc'd, NUL-terminated buffer (*out, *len
  * without the NUL). Order: request line, Host (port only if not the scheme's

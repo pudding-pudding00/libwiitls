@@ -412,6 +412,150 @@ static void http_errors_pass_through(void) {
     CHECK(r == NULL);
 }
 
+/* ---- keep-alive pool ------------------------------------------------------- */
+
+/* GET path, body read to its end, closed; returns the status (0 on failure)
+ * and copies the body (NUL-terminated) and the reuse flag. */
+static int get_full(const char *path, const wtls_options *tls, char *body, size_t cap, bool *reused) {
+    wtls_http_request req = {0};
+    req.url = url(path);
+    req.tls = tls;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return 0;
+    int last = 1;
+    size_t n = read_all(r, (uint8_t *)body, cap - 1, cap, &last);
+    body[n] = 0;
+    CHECK_EQ_INT(last, 0);
+    wtls_http_info info;
+    wtls_http_get_info(r, &info);
+    if (reused) *reused = info.reused_connection;
+    int st = wtls_http_status(r);
+    wtls_http_close(r);
+    return st;
+}
+
+static long count_of(const char *id) {
+    char path[64], body[32];
+    snprintf(path, sizeof path, "/count?id=%s", id);
+    if (get_full(path, NULL, body, sizeof body, NULL) != 200) return -1;
+    return strtol(body, NULL, 10);
+}
+
+static void http_keepalive_reuse(void) {
+    wtls_http_pool_flush();
+    char b1[32], b2[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, b1, sizeof b1, &reused), 200);
+    CHECK(!reused);
+    CHECK_EQ_INT(get_full("/conn", NULL, b2, sizeof b2, &reused), 200);
+    CHECK(reused);
+    int id1 = -1, n1 = -1, id2 = -2, n2 = -1;
+    CHECK(sscanf(b1, "%d %d", &id1, &n1) == 2 && sscanf(b2, "%d %d", &id2, &n2) == 2);
+    CHECK_EQ_INT(id1, id2);
+    CHECK_EQ_INT(n1, 1);
+    CHECK_EQ_INT(n2, 2);
+}
+
+static void http_partial_read_not_pooled(void) {
+    wtls_http_pool_flush();
+    wtls_http_response *r = get("/len?n=100000");
+    if (!r) return;
+    char buf[10];
+    CHECK_EQ_INT(wtls_http_read(r, buf, sizeof buf), 10);
+    wtls_http_close(r);
+    char body[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+    int id = 0, n = 0;
+    CHECK(sscanf(body, "%d %d", &id, &n) == 2 && n == 1);
+}
+
+static void http_no_keepalive_not_pooled(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url("/hello");
+    req.no_keepalive = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    int last = 1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+    char body[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/hello", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+}
+
+static void stale_case(const char *idle_path) {
+    wtls_http_pool_flush();
+    char body[32];
+    CHECK_EQ_INT(get_full(idle_path, NULL, body, sizeof body, NULL), 200);
+    uint64_t until = wtls_plat_now_ms() + 500;
+    while (wtls_plat_now_ms() < until) wtls_plat_poll(-1, false, false, 50);
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/hello", NULL, body, sizeof body, &reused), 200);
+    CHECK(strcmp(body, "hello") == 0);
+    CHECK(!reused);
+}
+
+static void http_stale_after_server_close(void) { stale_case("/idle-close?ms=200"); }
+static void http_stale_without_close_notify(void) { stale_case("/idle-close?ms=200&notify=0"); }
+
+static void http_retry_idempotent(void) {
+    wtls_http_pool_flush();
+    char body[32];
+    CHECK_EQ_INT(get_full("/drop-next", NULL, body, sizeof body, NULL), 200);
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/hello?id=retry", NULL, body, sizeof body, &reused), 200);
+    CHECK(strcmp(body, "hello") == 0);
+    CHECK(!reused);
+    CHECK_EQ_INT(count_of("retry"), 2);
+}
+
+static void http_post_not_retried(void) {
+    wtls_http_pool_flush();
+    char body[32];
+    CHECK_EQ_INT(get_full("/drop-next", NULL, body, sizeof body, NULL), 200);
+    wtls_http_request req = {0};
+    req.method = "POST";
+    req.url = url("/echo?id=noretry");
+    req.body = "x";
+    req.body_len = 1;
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_IO);
+    CHECK(r == NULL);
+    CHECK_EQ_INT(count_of("noretry"), 1);
+}
+
+static void http_insecure_not_shared(void) {
+    wtls_http_pool_flush();
+    wtls_options opt = {0};
+    opt.insecure_skip_verify = true;
+    char body[32];
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/hello", &opt, body, sizeof body, &reused), 200);
+    CHECK_EQ_INT(get_full("/hello", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+    CHECK_EQ_INT(get_full("/hello", &opt, body, sizeof body, &reused), 200);
+    CHECK(reused); /* the insecure one was still waiting in the pool */
+}
+
+static void http_shutdown_flushes_pool(void) {
+    wtls_http_pool_flush();
+    char body[32];
+    CHECK_EQ_INT(get_full("/hello", NULL, body, sizeof body, NULL), 200);
+    wtls_shutdown();
+    CHECK_EQ_INT(wtls_init(), WTLS_OK);
+    bool trusted = trust_test_ca();
+    CHECK(trusted);
+    if (!trusted) return;
+    bool reused = true;
+    CHECK_EQ_INT(get_full("/conn", NULL, body, sizeof body, &reused), 200);
+    CHECK(!reused);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -442,5 +586,14 @@ void wtls_suite_http(void) {
     RUN(http_alpn_forced);
     RUN(http_bad_url);
     RUN(http_errors_pass_through);
+    RUN(http_keepalive_reuse);
+    RUN(http_partial_read_not_pooled);
+    RUN(http_no_keepalive_not_pooled);
+    RUN(http_stale_after_server_close);
+    RUN(http_stale_without_close_notify);
+    RUN(http_retry_idempotent);
+    RUN(http_post_not_retried);
+    RUN(http_insecure_not_shared);
+    RUN(http_shutdown_flushes_pool);
     wtls_shutdown();
 }

@@ -1,4 +1,5 @@
-/* HTTP/1.1 client: request, response head, body streaming (RFC 9112).
+/* HTTP/1.1 client: request, response head, body streaming (RFC 9112),
+ * keep-alive pool reuse with a liveness check and one idempotent retry.
  *
  * The response keeps the connection and one buffer: the head (parsed in
  * place, so field names and values point into it) followed by the body bytes
@@ -11,13 +12,13 @@
 
 #include "http/wtls_http_chunked.h"
 #include "http/wtls_http_parse.h"
+#include "http/wtls_http_pool.h"
 #include "http/wtls_http_req.h"
 #include "http/wtls_url.h"
 #include "plat/plat.h"
 #include "wtls_internal.h"
 
 #define HEAD_BUF_START 2048u
-#define DEFAULT_HEADER_TIMEOUT_MS 15000u
 #define SINGLE_WRITE_MAX 16384u
 
 /* wtls_conn_info.alpn points into this list, so it must outlive every connection. */
@@ -39,6 +40,9 @@ struct wtls_http_response {
     uint8_t redirects;
     bool reused;
     bool secure;
+    bool insecure;       /* insecure_skip_verify: part of the pool key */
+    uint16_t port;
+    char host[256];
     wtls_conn_info info;
 };
 
@@ -50,48 +54,73 @@ static int tr_write_all(wtls_conn *c, const void *buf, size_t len) {
     const uint8_t *p = buf;
     while (len) {
         int k = wtls_write(c, p, len);
-        if (k <= 0) return k < 0 ? k : WTLS_ERR_IO;
+        if (k <= 0) return k == WTLS_ERR_CLOSED || k == 0 ? WTLS_ERR_IO : k;
         p += k;
         len -= (size_t)k;
     }
     return WTLS_OK;
 }
 
-static void tr_close(wtls_conn *c) { wtls_close(c); }
+void wtls_http_tr_close(void *c) { wtls_close((wtls_conn *)c); }
+
+/* Liveness check of a pooled connection: alive if nothing is readable; if the
+ * socket is readable, one non-blocking 1-byte read must report WTLS_WANT_READ
+ * (only post-handshake messages such as a late TLS 1.3 ticket arrived). Data,
+ * close_notify, EOF or an error mean the connection is dead. */
+static bool tr_alive(wtls_conn *c) {
+    if (wtls_pending(c)) return false;
+    int p = wtls_plat_poll(c->fd, true, false, 0);
+    if (p == 0) return true;
+    if (p < 0) return false;
+    uint8_t b;
+    if (wtls_set_nonblocking(c, true) != WTLS_OK) return false;
+    int k = wtls_read(c, &b, 1);
+    wtls_set_nonblocking(c, false);
+    return k == WTLS_WANT_READ;
+}
 
 /* ---- open ------------------------------------------------------------------- */
 
 static void response_free(wtls_http_response *r) {
     if (!r) return;
-    if (r->conn) tr_close(r->conn);
+    if (r->conn) wtls_http_tr_close(r->conn);
     free(r->buf);
     free(r->url);
     free(r);
 }
 
-static int send_request(wtls_conn *c, char *head, size_t head_len, const wtls_http_request *req) {
+typedef struct {
+    const wtls_http_request *req;
+    const char *method;
+    const char *head;
+    size_t head_len;
+    wtls_options opt;
+} request_ctx;
+
+static int send_request(wtls_conn *c, const request_ctx *x) {
+    const wtls_http_request *req = x->req;
     size_t body_len = req->body ? req->body_len : 0;
-    if (head_len + body_len <= SINGLE_WRITE_MAX && body_len) {
-        char *all = malloc(head_len + body_len);
+    if (body_len && x->head_len + body_len <= SINGLE_WRITE_MAX) {
+        char *all = malloc(x->head_len + body_len);
         if (!all) return WTLS_ERR_NOMEM;
-        memcpy(all, head, head_len);
-        memcpy(all + head_len, req->body, body_len);
-        int st = tr_write_all(c, all, head_len + body_len);
+        memcpy(all, x->head, x->head_len);
+        memcpy(all + x->head_len, req->body, body_len);
+        int st = tr_write_all(c, all, x->head_len + body_len);
         free(all);
         return st;
     }
-    int st = tr_write_all(c, head, head_len);
+    int st = tr_write_all(c, x->head, x->head_len);
     if (st == WTLS_OK && body_len) st = tr_write_all(c, req->body, body_len);
     return st;
 }
 
 /* Reads until a final (non-1xx) response head is parsed. On success r->buf
- * holds it and r->extra_* the body bytes behind it. */
-static int read_head(wtls_http_response *r, uint32_t timeout_ms) {
+ * holds it and r->extra_* the body bytes behind it. *got: a response byte arrived. */
+static int read_head(wtls_http_response *r, uint32_t timeout_ms, bool *got) {
     size_t cap = HEAD_BUF_START, fill = 0;
-    char *buf = malloc(cap);
+    free(r->buf);
+    char *buf = r->buf = malloc(cap);
     if (!buf) return WTLS_ERR_NOMEM;
-    r->buf = buf;
     uint64_t deadline = wtls_plat_now_ms() + timeout_ms;
     for (;;) {
         size_t end = wtls_http_head_end(buf, fill);
@@ -120,10 +149,50 @@ static int read_head(wtls_http_response *r, uint32_t timeout_ms) {
         if (now >= deadline) return WTLS_ERR_TIMEOUT;
         r->conn->io_timeout_ms = (uint32_t)(deadline - now);
         int k = tr_read(r, buf + fill, cap - fill);
-        if (k > 0) fill += (size_t)k;
-        else if (k == WTLS_ERR_CLOSED) return WTLS_ERR_IO; /* closed before a complete head */
-        else return k;
+        if (k > 0) {
+            fill += (size_t)k;
+            *got = true;
+        } else if (k == WTLS_ERR_CLOSED) {
+            return WTLS_ERR_IO; /* closed before a complete head */
+        } else {
+            return k;
+        }
     }
+}
+
+static int connect_fresh(wtls_http_response *r, request_ctx *x) {
+    r->reused = false;
+    int st = wtls_connect(&r->conn, r->host, r->port, &x->opt);
+    if (st != WTLS_OK) r->conn = NULL;
+    return st;
+}
+
+/* A live pooled connection for the key, else a new one. */
+static int acquire(wtls_http_response *r, request_ctx *x) {
+    void *c;
+    while ((c = wtls_http_pool_take(r->secure, r->host, r->port, r->insecure, wtls_plat_now_ms()))) {
+        if (tr_alive(c)) {
+            r->conn = c;
+            r->reused = true;
+            return WTLS_OK;
+        }
+        wtls_http_tr_close(c);
+    }
+    return connect_fresh(r, x);
+}
+
+/* Request out, final response head in. The connection's own I/O timeout is
+ * restored afterwards (the head phase runs on the header deadline). */
+static int exchange(wtls_http_response *r, const request_ctx *x, bool *got) {
+    *got = false;
+    wtls_get_info(r->conn, &r->info);
+    int st = send_request(r->conn, x);
+    if (st != WTLS_OK) return st;
+    uint32_t io_timeout = r->conn->io_timeout_ms;
+    uint32_t t = x->req->header_timeout_ms ? x->req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+    st = read_head(r, t, got);
+    r->conn->io_timeout_ms = io_timeout;
+    return st;
 }
 
 wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *req) {
@@ -149,33 +218,36 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
     wtls_url u;
     int st = wtls_url_parse(r->url, &u);
     if (st == WTLS_OK && !u.secure) st = WTLS_ERR_ARG; /* plain http:// comes with the plain transport */
+    request_ctx x = {req, req->method ? req->method : "GET", NULL, 0, {0}};
     char *head = NULL;
-    size_t head_len = 0;
-    const char *method = req->method ? req->method : "GET";
     if (st == WTLS_OK)
-        st = wtls_http_build_head(method, &u, req->headers, req->n_headers, req->body != NULL, req->body_len,
-                                  req->no_keepalive, false, &head, &head_len);
+        st = wtls_http_build_head(x.method, &u, req->headers, req->n_headers, req->body != NULL, req->body_len,
+                                  req->no_keepalive, false, &head, &x.head_len);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
+    x.head = head;
+    if (req->tls) x.opt = *req->tls;
+    x.opt.alpn = k_alpn;
+    r->secure = true;
+    r->insecure = x.opt.insecure_skip_verify;
+    r->port = u.port;
+    memcpy(r->host, u.host, sizeof r->host);
+    r->head_request = strcmp(x.method, "HEAD") == 0;
 
-    wtls_options opt = {0};
-    if (req->tls) opt = *req->tls;
-    opt.alpn = k_alpn;
-    st = wtls_connect(&r->conn, u.host, u.port, &opt);
-    if (st == WTLS_OK) {
-        r->secure = true;
-        wtls_get_info(r->conn, &r->info);
-        st = send_request(r->conn, head, head_len, req);
+    bool got = false;
+    st = acquire(r, &x);
+    if (st == WTLS_OK) st = exchange(r, &x, &got);
+    /* The server closed a reused connection as the request went out: one
+     * second attempt on a new connection, for idempotent methods only. */
+    if (st == WTLS_ERR_IO && r->reused && !got && wtls_http_method_idempotent(x.method)) {
+        wtls_http_tr_close(r->conn);
+        r->conn = NULL;
+        st = connect_fresh(r, &x);
+        if (st == WTLS_OK) st = exchange(r, &x, &got);
     }
     free(head);
-    if (st == WTLS_OK) {
-        uint32_t io_timeout = r->conn->io_timeout_ms;
-        r->head_request = strcmp(method, "HEAD") == 0;
-        st = read_head(r, req->header_timeout_ms ? req->header_timeout_ms : DEFAULT_HEADER_TIMEOUT_MS);
-        r->conn->io_timeout_ms = io_timeout;
-    }
     if (st == WTLS_OK) st = wtls_http_frame(&r->head, r->head_request, !req->no_keepalive, &r->fr);
     if (st != WTLS_OK) {
         response_free(r);
@@ -300,6 +372,16 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     }
 }
 
-void wtls_http_close(wtls_http_response *r) { response_free(r); }
+/* ---- close ------------------------------------------------------------------------- */
 
-void wtls_http_pool_flush(void) {}
+void wtls_http_close(wtls_http_response *r) {
+    if (!r) return;
+    /* Pool only a connection whose response was read to its end, that may
+     * carry another request, and that holds no unread bytes. */
+    if (r->conn && r->eof && !r->err && r->fr.reusable && r->extra_off == r->extra_end) {
+        wtls_shutdown_hook = wtls_http_pool_flush;
+        wtls_http_pool_put(r->conn, r->secure, r->host, r->port, r->insecure, wtls_plat_now_ms());
+        r->conn = NULL;
+    }
+    response_free(r);
+}
