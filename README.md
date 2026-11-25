@@ -165,7 +165,7 @@ add_subdirectory(third_party/libwiitls)
 target_link_libraries(my_app PRIVATE wiitls::wiitls)
 
 # Or after `cmake --install <build> --prefix <prefix>`:
-find_package(wiitls 0.4 REQUIRED)
+find_package(wiitls 1.0 REQUIRED)
 target_link_libraries(my_app PRIVATE wiitls::wiitls)
 ```
 

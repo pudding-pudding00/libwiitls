@@ -32,11 +32,11 @@ extern "C" {
 #endif
 
 /** Library version components; equal the CMake project version (checked at configure time). */
-#define WTLS_VERSION_MAJOR 0
-#define WTLS_VERSION_MINOR 4
+#define WTLS_VERSION_MAJOR 1
+#define WTLS_VERSION_MINOR 0
 #define WTLS_VERSION_PATCH 0
 /** Library version string; equals the CMake project version (checked at configure time). */
-#define WTLS_VERSION "0.4.0"
+#define WTLS_VERSION "1.0.0"
 
 /** Returns the library version string (equals WTLS_VERSION). */
 const char *wtls_version(void);

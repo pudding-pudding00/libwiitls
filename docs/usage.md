@@ -27,7 +27,7 @@ for the `MBEDTLS_X509_BADCERT_*` flags below); they must match the
 configuration the archives were built with, which the package ships.
 `example/Makefile` in the package builds the example this way.
 
-**As a subdirectory or installed package (`find_package`, 0.4.0):**
+**As a subdirectory or installed package (`find_package`, 1.0.0):**
 
 ```cmake
 # Subdirectory (fetches Mbed TLS + zlib on the first configure):
@@ -35,7 +35,7 @@ add_subdirectory(third_party/libwiitls)
 target_link_libraries(my_app PRIVATE wiitls::wiitls)
 
 # Or from `cmake --install <build> --prefix <prefix>`:
-find_package(wiitls 0.4 REQUIRED)
+find_package(wiitls 1.0 REQUIRED)
 target_link_libraries(my_app PRIVATE wiitls::wiitls)
 ```
 
@@ -290,7 +290,7 @@ Points that trip people up:
 - **Timeouts:** `req.tls` (a `wtls_options`) sets connect and I/O timeouts,
   `req.header_timeout_ms` (default 15 s) the time from sending the request to
   the complete response head.
-- **Cooperative cancellation & progress (0.4.0):** set
+- **Cooperative cancellation & progress (1.0.0):** set
   `opt.abort_cb` / `opt.abort_ctx` in `wtls_options` (shared via `req.tls` for
   both `https://` and `http://`). Polling sleeps in <= 100 ms slices, so
   pressing **B/HOME** cancels blocked connects, handshakes, header waits, or
@@ -393,7 +393,7 @@ the certificate's fingerprint: a connection with one identity never resumes
 or reuses a connection of another. And like `Authorization` and `Cookie`,
 the client certificate is stripped when a redirect leaves the origin.
 
-### Public-key (SPKI) pinning (0.4.0)
+### Public-key (SPKI) pinning (1.0.0)
 
 In addition to normal chain + date + hostname verification, you can pin up to
 `WTLS_SPKI_MAX_PINS` (2: primary + backup) SHA-256 digests of ASN.1 DER

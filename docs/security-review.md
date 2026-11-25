@@ -1,4 +1,4 @@
-# Security & Code Review (v0.4.0 / Pre-1.0 Audit)
+# Security & Code Review (v1.0.0 Audit)
 
 Audit scope (per WP4 of the 1.0.0 roadmap):
 - `src/accel/x25519_fe32.c`
@@ -41,6 +41,10 @@ Audit scope (per WP4 of the 1.0.0 roadmap):
 8. **`src/wtls_conn.c` — Sticky transport error check in `wtls_write()` (Low)**
    - *Finding:* Calling `wtls_write()` again after `c->bio_err` was already set still entered `mbedtls_ssl_write()` before failing.
    - *Fix:* Return `c->bio_err` immediately at entry to `wtls_write()`.
+
+9. **`src/http/wtls_http.c` & `src/http/wtls_http_req.c` — Pre-1.0 review hardening (Medium)**
+   - *Findings:* `wtls_http_open()` called `wtls_http_headers_have()` before validating `(req->n_headers && !req->headers)`; `send_body_cb()` allocated a 16 KiB buffer on LWP stacks and mis-handled 0-byte fixed-length streaming uploads; HTTP-level `abort_cb` exits did not mark `tls->aborted = true` (still attempting `close_notify`); `wtls_scache` wiped tickets with `memset` instead of `mbedtls_platform_zeroize`; `wtls_http_url_encode()` lacked a `size_t` overflow guard.
+   - *Fixes:* Added early NULL guards, moved the upload buffer to the heap with a 0-byte fast path, marked `tls->aborted` via `tr_mark_aborted()` on all HTTP cancellation exits, switched `wtls_scache` to `mbedtls_platform_zeroize()`, and added a `size_t` overflow guard to `wtls_http_url_encode()`.
 
 ## Verified Security Invariants
 

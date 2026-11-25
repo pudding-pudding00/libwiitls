@@ -82,17 +82,17 @@ and the RCT/APT cutoffs in `src/wtls_jitter.h` are sized for that credit.
 Cost on the Wii: `psa_crypto_init()` (inside `wtls_init`) takes about 400 ms,
 once per process; 64 KiB of health-tested raw samples take 5.1 s.
 
-## Measured Wii hardware verification (`0.4.0`, 2026-11-25)
+## Measured Wii hardware verification (`1.0.0`, 2026-11-25)
 
 1. **Stalled-peer & `ioctl` probe (`suite=spike`, `[12]`):**
    - `net_ioctl(FIONSPACE)` and `net_ioctl(FIONWRITE)` both return `-22` (`-EINVAL`).
    - Blocking `4080` B and `16384` B calls hit `POLLOUT=1` on a partial buffer tail at `73440 B` / `65536 B` and block up to `~2.9 s` (`last=-104` on server close), whereas power-of-2 aligned `2048` B (`OGC_SEND_MAX = 2048`) avoids drift and cleanly hits `-11` (`WTLS_WANT_WRITE`) at `73728 B` (`max_call=51 ms`).
-2. **Full hardware matrix (`suite=all`, `--extra iters=128`):**
-   - `time` (`1/1`), `plat` (`13/13`, `test_stalled_peer_nonblocking` `73728 B -> WANT_WRITE`), `crypto` (`14/14`), `tls` (`40/40`, `test_abort_during_read_poll` `49 ms`, SPKI pinning + multi-IP fallback), `http` (`84/84`, `http_abort_slowhead` `27 ms`, SPKI pinning + pool isolation), `soak` (`1/1`, `128` iterations, `uordblks` `619180 -> 618492 B`, `-688 B` delta), `realworld` (`15/15`, incl. Fastly, Let's Encrypt, `nginx.org`, `caddyserver.com`, and GitHub CDN `206` Range): **`pass=168 fail=0 skip=0`**.
+2. **Full hardware matrix (`suite=all`, `--extra iters=128` + `wtls_bench.dol`):**
+   - `time` (`1/1`), `plat` (`13/13`, `test_stalled_peer_nonblocking` `73728 B -> WANT_WRITE`), `crypto` (`14/14`), `tls` (`40/40`, `test_abort_during_read_poll` `49 ms`, SPKI pinning + multi-IP fallback), `http` (`86/86`, `http_abort_slowhead` `27–29 ms`, SPKI pinning + pool isolation + pre-1.0 regression tests), `soak` (`1/1`, `128` iterations, `uordblks` `619180 -> 618492 B`, `-688 B` delta), `realworld` (`15/15`, incl. Fastly, Let's Encrypt, `nginx.org`, `caddyserver.com`, and GitHub CDN `206` Range), and `wtls_bench.dol` (`10/10`, `handshake_full_cpu = 27.3 ms`, `wtls_read_vs_raw = 96.7 %`).
 
-## Remaining hardware verification before `v1.0.0`
+## Ongoing hardware matrix (`1.0.x` follow-up)
 
-- **Multi-console / USB-Ethernet entropy verification (`jitterdump`):** repeat on a second Wii revision / vWii and via USB-Ethernet adapter to confirm >= 3x margin for `WTLS_JITTER_BITS_PER_SAMPLE = 1`, and optionally run an extended overnight `soak` (`iters=1000`):
+- **Multi-console / USB-Ethernet entropy verification (`jitterdump`):** repeat on a second Wii revision / vWii and via USB-Ethernet adapter to confirm >= 3x margin for `WTLS_JITTER_BITS_PER_SAMPLE = 1`, and optionally run an extended `soak` (`iters=1000`):
   ```sh
   python tools/hwtest.py --wii <wii-ip> --dol build-wii-win/tests/hw/wtls_hwtest.dol --suite jitterdump --timeout 300 > jd_console2.log
   python tools/jitter_assess.py jd_console2.log

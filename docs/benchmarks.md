@@ -344,11 +344,11 @@ a constructed R = O vector, differential against the builtin on random
 keys), `tls` 34/34, `http` 76/76, `plat` 12/12, `time` 1/1, `realworld` 10/10,
 bench 10/10.
 
-### v0.4.0 / Pre-1.0 re-verification (OGC_SEND_MAX = 2048 + `pt_jadd` cleanup)
+### v1.0.0 verification (`OGC_SEND_MAX = 2048` + `pt_jadd` cleanup)
 
 Re-measured on the same Wii over Wi-Fi on 2026-11-25 after reducing
 `OGC_SEND_MAX` to 2048 B (`src/plat/plat_ogc.c`), removing duplicate field
-ops in `pt_jadd()` (`src/accel/p256_verify.c`), and adding the 0.4.0
+ops in `pt_jadd()` (`src/accel/p256_verify.c`), and adding the 1.0.0
 features (SPKI pinning, cooperative `abort_cb`, multi-IPv4 failover,
 `wtls_net_reset`). Bench 10/10 pass (`WTLS-HWTEST DONE pass=10 fail=0 skip=0`):
 

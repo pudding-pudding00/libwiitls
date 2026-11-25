@@ -1,10 +1,18 @@
 # Changelog
 
-## 0.4.0 (2026-11-25)
+## 1.0.0 (2026-11-25)
 
-Pre-1.0 production-hardening release (WP1–WP4 & WP6 complete; host 30/30 +
-Debug thread-guard + Wii hardware `suite=all` 168/168 verified. Remaining `1.0.0`
-gate: second-console / USB-Ethernet `jitterdump` matrix before tagging `1.0.0`).
+First stable SemVer release of `libwiitls` for Wii homebrew (devkitPPC / libogc),
+built on Mbed TLS 4.1.1 LTS (TF-PSA-Crypto) and zlib 1.3.1.
+
+Verified across host Release (`30/30`), host Debug (`WTLS_THREAD_CHECK=1`),
+ASan/UBSan/LSan, Clang libFuzzer (6 harnesses), Windows UCRT64 + Ninja, Wii
+CMake install/consumer checks, and real Wii hardware over Wi-Fi (`time` 1/1,
+`plat` 13/13, `crypto` 14/14, `tls` 40/40, `http` 86/86, `soak` 128 iterations
+with 0 heap growth, `realworld` 15/15, `wtls_bench.dol` 10/10 with
+`handshake_full_cpu = 27.3 ms`). Note: Wii IOS jitter entropy has been verified
+on one retail Wii over Wi-Fi; additional console revisions / USB-Ethernet
+`jitterdump` reports are tracked as 1.0.x follow-up.
 
 ### Added
 
@@ -51,16 +59,27 @@ gate: second-console / USB-Ethernet `jitterdump` matrix before tagging `1.0.0`).
 
 - `wtls_http_build_head()` starts at 512 B and doubles on demand up to
   `WTLS_HTTP_MAX_HEAD` instead of allocating 16 KiB upfront per request hop.
+- Streaming upload buffer (`UPLOAD_BUF_SIZE = 16 KiB` in `send_body_cb()`) is
+  heap-allocated instead of living on Wii LWP network-thread stacks.
 - Interim HTTP `1xx` header loops are capped at 16 responses (`WTLS_ERR_HTTP_LIMIT`).
+- `cmake --install` suppresses Mbed TLS's own header/package install rules so
+  installed prefixes contain only `libwiitls`, its bundled static archives,
+  headers, and `lib/cmake/wiitls/*`.
 
 ### Fixed
 
 - Removed duplicate step in `pt_jadd` (`src/accel/p256_verify.c`), zeroized
-  scratch buffers in `x25519_base` (`src/accel/x25519_fe32.c`) and
-  `wtls_jitter_collect` (`mbedtls_platform_zeroize`), guarded empty cert chains
-  (`src/wtls_cred.c`), avoided `NULL + 0` pointer arithmetic and missing NULL
-  guards in `src/http/`, prevented uint64 overflow in `cl_elem`, and preserved
-  sticky I/O errors in `wtls_write`.
+  scratch buffers in `x25519_base` (`src/accel/x25519_fe32.c`),
+  `wtls_jitter_collect`, and `wtls_scache` (`mbedtls_platform_zeroize`),
+  guarded empty cert chains (`src/wtls_cred.c`), avoided `NULL + 0` pointer
+  arithmetic and missing NULL guards in `src/http/` (including `headers == NULL`
+  with `n_headers > 0` in `wtls_http_open()` / `wtls_http_headers_have()`),
+  handled 0-byte fixed-length streaming uploads cleanly (`body_cb != NULL`,
+  `body_len == 0`, `!body_chunked`), ensured all HTTP `abort_cb` cancellation
+  paths skip `mbedtls_ssl_close_notify()`, stopped plain `http://` hops from
+  partitioning their keep-alive pool by TLS pins/credentials, guarded `size_t`
+  overflow in `wtls_http_url_encode()`, prevented `uint64_t` overflow in
+  `cl_elem`, and preserved sticky I/O errors in `wtls_write`.
 
 ## 0.3.0 (2026-11-26)
 

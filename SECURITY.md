@@ -4,9 +4,8 @@
 
 | Version | Status |
 |---|---|
-| `0.4.x` (pre-1.0 hardening) | Active maintenance |
-| `1.0.x` (upcoming SemVer release) | Target production line |
-| `< 0.4.0` | End of life — please upgrade |
+| `1.0.x` | Active maintenance (SemVer 1.x production line) |
+| `< 1.0.0` | End of life — please upgrade |
 
 ## Reporting a Vulnerability
 

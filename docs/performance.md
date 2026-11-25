@@ -2,7 +2,7 @@
 
 What to expect on a real Wii (Broadway, 729 MHz) with the default build
 (`WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`, `WTLS_ACCEL_P256=ON`,
-`WTLS_BN_ASM=ON`). Measured 2026-11-25 (v0.4.0, `OGC_SEND_MAX=2048`) over Wi-Fi
+`WTLS_BN_ASM=ON`). Measured 2026-11-25 (v1.0.0, `OGC_SEND_MAX=2048`) over Wi-Fi
 with the benchmark runner in `bench/`; [benchmarks.md](benchmarks.md) has the
 method, every build variant and the history of each number.
 
