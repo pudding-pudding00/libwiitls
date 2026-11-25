@@ -505,7 +505,10 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
      * max_redirects = -1 and follow Location themselves. When the body is
      * dropped, the callback is not called for the follow-up request. */
     if (x->body_cb) {
-        if (!dropped) return WTLS_ERR_HTTP_REDIRECT;
+        if (!dropped) {
+            free(next);
+            return WTLS_ERR_HTTP_REDIRECT;
+        }
         x->body_cb = NULL;
         x->body_ctx = NULL;
         x->body_chunked = false;
