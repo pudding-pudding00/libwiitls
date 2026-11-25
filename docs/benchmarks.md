@@ -37,6 +37,7 @@ All values are medians of 20 runs (streams: 3 runs).
 | `rsa2048_verify` | PKCS#1 v1.5 / SHA-256 `psa_verify_hash` (fixed vector, `bench/rsa_vector.h`) | ms |
 | `handshake_full_wall` / `_cpu` | `wtls_connect` to port 4431 (TLS 1.3, ECDSA leaf), `no_resumption` | ms |
 | `handshake_resumed_wall` / `_cpu` | `wtls_connect` with a session ticket (checked: `resumed == true`) | ms |
+| `http_get_new_wall` / `http_get_pooled_wall` / `_cpu` | `GET /hello` (port 4438) on a new connection (resumed handshake) or a pooled one, see "HTTP" | ms |
 | `net_recv_4m` | 4 MiB over raw TCP (`wtls_plat_recv`), first byte to last | MB/s |
 | `wtls_read_4m` | 4 MiB through `wtls_read`, first byte to last | MB/s |
 | `wtls_read_vs_raw` | `wtls_read_4m` / `net_recv_4m` | % |
@@ -280,6 +281,35 @@ The handshake targets stay missed: the resumed one is now 13.6 ms CPU, of which
 5.2 ms is socket I/O (IPC to IOS), not crypto. The full one is dominated by
 P-256 verification (51 ms). **Ruling: ChaCha20-Poly1305 is not accelerated.**
 At 24 MB/s it is above its target and far above what the Wi-Fi delivers.
+
+## HTTP
+
+Three lines from `bench_http_get` (median of 20, `GET /hello` on the test
+server's keep-alive port 4438, body read to the end):
+
+- `http_get_new_wall`: pool flushed before every request, session ticket
+  allowed, so this is a resumed handshake plus one request/response.
+- `http_get_pooled_wall`: the same request over the pooled connection.
+- `http_get_pooled_cpu`: `http_get_pooled_wall` minus the time spent blocked
+  in `wtls_plat_poll`, measured like the handshake CPU numbers.
+
+The informational gate `http_get_pooled_cpu < handshake_resumed_cpu` says
+whether keeping the connection pays off; on the Wii the resumed handshake
+costs 13.6 ms CPU.
+
+Wii: not yet measured (2026-11-25: the 0.2.0 HTTP client was built for the
+Wii, `wtls_bench.dol` contains the benchmark, but no hardware run has been
+done). Run `python tools/hwtest.py --wii <ip> --dol build-wii/bench/wtls_bench.dol --suite bench`
+and record the three lines here.
+
+Host smoke run, 2026-11-25 (PC, localhost; not the target):
+
+```
+BENCH http_get_new_wall 11.379 ms
+BENCH http_get_pooled_wall 0.058 ms
+BENCH http_get_pooled_cpu 0.019 ms
+GATE http_get_pooled_cpu < handshake_resumed_cpu 0.019 met
+```
 
 ## Results: host smoke run (PC, localhost; not the target)
 

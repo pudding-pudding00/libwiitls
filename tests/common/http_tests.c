@@ -65,7 +65,8 @@ static const char *url_of(const char *scheme, uint16_t port, const char *path) {
     static char bufs[4][600];
     static unsigned next;
     char *b = bufs[next++ % 4];
-    snprintf(b, sizeof bufs[0], "%s://%s:%u%s", scheme, g_env.server_host, (unsigned)port, path);
+    int n = snprintf(b, sizeof bufs[0], "%s://%s:%u%s", scheme, g_env.server_host, (unsigned)port, path);
+    CHECK(n > 0 && (size_t)n < sizeof bufs[0]); /* test paths are short */
     return b;
 }
 

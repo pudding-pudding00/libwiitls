@@ -11,5 +11,6 @@ void wtls_suite_crypto(void);
 void wtls_suite_time(void);
 void wtls_suite_tls(void);
 void wtls_suite_realworld(void);
+void wtls_suite_http(void);
 
 #endif

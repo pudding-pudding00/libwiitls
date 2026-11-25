@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include <mbedtls/x509.h>
+#include <wiitls/http.h>
 #include <wiitls/wiitls.h>
 
 #include "check.h"
@@ -161,6 +162,71 @@ static void rw_resumption_example_com(void) {
     }
 }
 
+/* ---- HTTP client against real servers ---------------------------------- */
+
+static void rw_http_example_com(void) {
+    wtls_http_request q = {0};
+    q.url = "https://example.com/";
+    wtls_http_result res;
+    int r = wtls_http_fetch(&q, 0, &res);
+    if (unreachable(r)) {
+        SKIP("example.com unreachable");
+        return;
+    }
+    CHECK_EQ_INT(r, WTLS_OK);
+    if (r != WTLS_OK) return;
+    CHECK_EQ_INT(res.status, 200);
+    CHECK(res.body && strstr(res.body, "Example Domain") != NULL);
+    wtls_http_result_free(&res);
+}
+
+static void rw_http_redirect_google(void) {
+    wtls_http_request q = {0};
+    q.url = "https://google.com/";
+    wtls_http_response *h = NULL;
+    int r = wtls_http_open(&h, &q);
+    if (unreachable(r)) {
+        SKIP("google.com unreachable");
+        return;
+    }
+    CHECK_EQ_INT(r, WTLS_OK);
+    if (r != WTLS_OK) return;
+    wtls_http_info info;
+    CHECK_EQ_INT(wtls_http_get_info(h, &info), WTLS_OK);
+    TLOG("    %d after %u redirect(s): %s\n", wtls_http_status(h), (unsigned)info.redirects,
+         info.url ? info.url : "-");
+    CHECK(info.redirects >= 1);
+    CHECK_EQ_INT(wtls_http_status(h), 200);
+    CHECK(info.url && strncmp(info.url, "https://www.google.com/", 23) == 0);
+    wtls_http_close(h);
+}
+
+static void rw_http_keepalive_example_com(void) {
+    wtls_http_pool_flush();
+    for (int i = 0; i < 2; i++) {
+        wtls_http_request q = {0};
+        q.url = "https://example.com/";
+        wtls_http_response *h = NULL;
+        int r = wtls_http_open(&h, &q);
+        if (i == 0 && unreachable(r)) {
+            SKIP("example.com unreachable");
+            return;
+        }
+        CHECK_EQ_INT(r, WTLS_OK);
+        if (r != WTLS_OK) return;
+        char buf[512];
+        int n;
+        while ((n = wtls_http_read(h, buf, sizeof buf)) > 0) {
+        }
+        CHECK_EQ_INT(n, 0);
+        wtls_http_info info;
+        CHECK_EQ_INT(wtls_http_get_info(h, &info), WTLS_OK);
+        CHECK(info.reused_connection == (i == 1));
+        wtls_http_close(h);
+    }
+    wtls_http_pool_flush();
+}
+
 void wtls_suite_realworld(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -172,5 +238,8 @@ void wtls_suite_realworld(void) {
     RUN(rw_expired);
     RUN(rw_wrong_host);
     RUN(rw_resumption_example_com);
+    RUN(rw_http_example_com);
+    RUN(rw_http_redirect_google);
+    RUN(rw_http_keepalive_example_com);
     wtls_shutdown();
 }
