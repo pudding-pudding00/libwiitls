@@ -36,8 +36,7 @@ before public disclosure.
 - **Entropy on Wii:** Randomness is collected from IOS IPC timing jitter and
   continuously health-tested (SP 800-90B RCT/APT). `wtls_init()` fails closed
   with `WTLS_ERR_ENTROPY` if health tests fail.
-- **Non-goals:** Server mode, DTLS, HTTP/2, HTTP/3, and password-protected
-  private keys are outside the library scope.
+- **Non-goals:** Server mode, DTLS and HTTP/3 are outside the library scope.
 
 ## Maintenance Lifecycle (CA Bundle & Mbed TLS)
 

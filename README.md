@@ -170,7 +170,7 @@ wiiload https_get.dol url=https://example.com/
   is often wrong. Sync with `wtls_time_sync_sntp()` at start-up, or on
   `WTLS_ERR_CLOCK` / an expired-certificate error.
 - **`wtls_init()` takes about 400 ms** to seed the random generator.
-- **Client only.** No server mode, no DTLS, no HTTP/2, no certificate
+- **Client only.** No server mode, no DTLS, no HTTP/3, no certificate
   revocation checks (OCSP/CRL).
 
 ## Using it from CMake

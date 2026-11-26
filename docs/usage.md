@@ -331,9 +331,9 @@ Limits: URL 8 KiB; request and response head 16 KiB each; 100 response
 header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
 (`WTLS_ERR_HTTP_LIMIT` above that, checked against the decoded size).
 
-Not supported: HTTP/2 and HTTP/3, cookies (send your own `Cookie` header),
-authentication schemes (send your own `Authorization`), caching, and `br`
-encoding.
+Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
+push, cookies (send your own `Cookie` header), authentication schemes (send
+your own `Authorization`), caching, and `br` encoding.
 
 ## 6. Faster second connections
 

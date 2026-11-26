@@ -1,6 +1,6 @@
 /**
  * @file http.h
- * @brief libwiitls HTTP/1.1 client on top of wiitls.h.
+ * @brief libwiitls HTTP/2 and HTTP/1.1 client on top of wiitls.h.
  *
  * https:// (TLS through wtls_connect) and plain http://. Responses are
  * streamed; wtls_http_fetch() reads a whole body into memory. Idle
@@ -65,8 +65,9 @@ typedef struct {
     uint32_t header_timeout_ms;      /**< 0 => 15000: request sent -> response head complete */
     bool no_keepalive;               /**< send "Connection: close" and never pool the connection */
     bool no_gzip;                    /**< do not offer gzip/deflate; bodies are returned as sent */
-    const wtls_options *tls;         /**< NULL => defaults; ALPN is always "http/1.1"; for http:// only
-                                          connect_timeout_ms, io_timeout_ms, and abort_cb/abort_ctx are used */
+    const wtls_options *tls;         /**< NULL => defaults; alpn is ignored (the client offers "h2" and
+                                          "http/1.1", see no_h2); for http:// only connect_timeout_ms,
+                                          io_timeout_ms, and abort_cb/abort_ctx are used */
     wtls_http_body_cb body_cb;        /**< streaming upload; mutually exclusive with body (when body_len == 0
                                            and !body_chunked, sends Content-Length: 0 without invoking body_cb) */
     void *body_ctx;                   /**< opaque pointer passed to body_cb */
