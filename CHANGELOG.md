@@ -4,13 +4,6 @@ All notable changes to libwiitls are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
-## [Unreleased]
-
-### Fixed
-
-- HTTP/2: following a redirect no longer leaks the previous response's header
-  buffer.
-
 ## [1.0.0] - 2026-11-27
 
 Initial public release of **libwiitls** for Nintendo Wii homebrew
@@ -104,5 +97,10 @@ zlib 1.3.1.
     (`tests/hw/`), benchmark runner (`bench/`), [security
     review](docs/security-review.md), [security policy](SECURITY.md), and
     monthly CA bundle / Mbed TLS LTS check workflow.
+
+### Fixed
+
+- HTTP/2: following a redirect no longer leaks the previous response's header
+  buffer.
 
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0
