@@ -1,4 +1,4 @@
-/* Suite "entropy": the timebase-jitter source on real hardware (Task 3). */
+/* Suite "entropy": the timebase-jitter source on real hardware. */
 #include <malloc.h>
 #include <stdlib.h>
 #include <string.h>

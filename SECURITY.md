@@ -4,15 +4,15 @@
 
 | Version | Status |
 |---|---|
-| `1.0.x` | Active maintenance (SemVer 1.x production line) |
-| `< 1.0.0` | End of life — please upgrade |
+| `1.0.x` | Supported: security fixes are released as patch versions |
+| `< 1.0.0` | Not supported — please upgrade |
 
 ## Reporting a Vulnerability
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
-Report vulnerabilities privately via GitHub Security Advisories
-("Report a vulnerability" in the repository's **Security** tab) or contact the
-maintainers directly through their GitHub profile contact information.
+Report them privately via
+[GitHub Security Advisories](https://github.com/pudding-pudding00/wii_tls/security/advisories/new)
+("Report a vulnerability" in the repository's **Security** tab).
 
 Please include:
 - A description of the issue and affected component/API.

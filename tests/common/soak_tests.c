@@ -1,4 +1,4 @@
-/* Long-running soak / endurance suite (WP5): exercises keep-alive reuse, cold
+/* Long-running soak / endurance suite: exercises keep-alive reuse, cold
  * and resumed TLS 1.3/1.2 handshakes, mTLS streaming uploads, gzip decoding,
  * redirects, cooperative abort_cb, wtls_net_reset(), and heap stability.
  *

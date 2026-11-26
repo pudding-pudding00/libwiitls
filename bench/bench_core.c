@@ -1,8 +1,8 @@
-/* libwiitls benchmarks (Task 11). Shared by the Wii DOL (bench/main.c) and the
+/* libwiitls benchmarks. Shared by the Wii DOL (bench/main.c) and the
  * host smoke run (bench/host_main.c). Every value is printed as
  *   BENCH <name> <value> <unit>
  * and every measurement is one RUN(), so a failing operation shows as fail=N.
- * The plan's target values are evaluated at the end as GATE lines; they are
+ * The project's performance targets are evaluated at the end as GATE lines; they are
  * informational and never fail the run (the host is not the target).
  *
  * Needs tests/host/tls_test_server.py (--certs) on g_env.server_host. */
@@ -569,7 +569,7 @@ static void gate(const char *what, double value, bool met) {
 }
 
 static void print_gates(void) {
-    /* Targets from the plan (Task 11); Task 12 is due if any is missed on the Wii. */
+    /* Performance targets (docs/benchmarks.md#targets); informational only. */
     gate("handshake_full_cpu <= 30 ms", s_hs_full_cpu_ms, s_hs_full_cpu_ms <= 30.0);
     gate("handshake_resumed_cpu <= 10 ms", s_hs_res_cpu_ms, s_hs_res_cpu_ms <= 10.0);
     gate("chacha20_poly1305 >= 20 MB/s", s_chacha_mbs, s_chacha_mbs >= 20.0);

@@ -1,4 +1,4 @@
-/* Debug single-thread affinity guard tests (WP2).
+/* Debug single-thread affinity guard tests.
  * Only compiled/registered when WTLS_THREAD_CHECK is active. */
 #include <stdbool.h>
 #include <stdint.h>

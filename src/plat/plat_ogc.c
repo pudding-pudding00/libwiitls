@@ -17,7 +17,7 @@
 
 /* IOS socket error numbers (alphabetical SUSv3 order, as emulated by Dolphin's
  * IOS network code). libogc returns them negated, untranslated.
- * See docs/ios-socket-behaviour.md: confirmed by the Task 2 spike once run. */
+ * Confirmed on hardware by the spike suite, see docs/ios-socket-behaviour.md. */
 /* IOS errno values and IPC_ENOMEM handling: plat.h (wtls_plat_ios_*). */
 #define IPC_RETRY_US 2000
 /* Poll slice while a non-blocking connect runs (two IPCs of ~135 us each). */

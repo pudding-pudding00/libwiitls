@@ -27,7 +27,7 @@ for the `MBEDTLS_X509_BADCERT_*` flags below); they must match the
 configuration the archives were built with, which the package ships.
 `example/Makefile` in the package builds the example this way.
 
-**As a subdirectory or installed package (`find_package`, 1.0.0):**
+**As a subdirectory or installed package (`find_package`):**
 
 ```cmake
 # Subdirectory (fetches Mbed TLS + zlib on the first configure):
@@ -208,7 +208,7 @@ with `req.headers = h; req.n_headers = 1;`. `Host`, `Content-Length`,
 `Transfer-Encoding` and `Connection` are set by the library and refused in
 `req.headers`.
 
-Streaming uploads (0.3.0), when the body is generated on the fly or read
+Streaming uploads, when the body is generated on the fly or read
 from SD without buffering it whole:
 
 ```c
@@ -234,7 +234,7 @@ streaming body is refused with `WTLS_ERR_HTTP_REDIRECT`, because a stream
 cannot be rewound - set `req.max_redirects = -1` if you can rewind it
 yourself and follow the `Location` by hand.
 
-Two small helpers (0.3.0) in `<wiitls/http.h>`: `wtls_http_url_encode`
+Two small helpers in `<wiitls/http.h>`: `wtls_http_url_encode`
 percent-encodes query values (RFC 3986, upper case hex), and
 `wtls_http_parse_content_range` parses the `Content-Range` of a `206`
 response for resumable downloads:
@@ -290,7 +290,7 @@ Points that trip people up:
 - **Timeouts:** `req.tls` (a `wtls_options`) sets connect and I/O timeouts,
   `req.header_timeout_ms` (default 15 s) the time from sending the request to
   the complete response head.
-- **Cooperative cancellation & progress (1.0.0):** set
+- **Cancellation and progress:** set
   `opt.abort_cb` / `opt.abort_ctx` in `wtls_options` (shared via `req.tls` for
   both `https://` and `http://`). Polling sleeps in <= 100 ms slices, so
   pressing **B/HOME** cancels blocked connects, handshakes, header waits, or
@@ -357,7 +357,7 @@ It is trusted in addition to the built-in Mozilla roots until
 `wtls_shutdown`. Do **not** use `insecure_skip_verify` for this. That option
 turns off all certificate checks and exists for tests only.
 
-### Client certificates (mutual TLS, 0.3.0)
+### Client certificates (mutual TLS)
 
 Servers that require the *client* to authenticate (your own API, a NAS, a
 home server) get a client certificate from the TLS layer:
@@ -393,7 +393,7 @@ the certificate's fingerprint: a connection with one identity never resumes
 or reuses a connection of another. And like `Authorization` and `Cookie`,
 the client certificate is stripped when a redirect leaves the origin.
 
-### Public-key (SPKI) pinning (1.0.0)
+### Public-key (SPKI) pinning
 
 In addition to normal chain + date + hostname verification, you can pin up to
 `WTLS_SPKI_MAX_PINS` (2: primary + backup) SHA-256 digests of ASN.1 DER
@@ -418,9 +418,10 @@ isolated in both TLS session tickets and the HTTP keep-alive pool.
 
 | Return | Typical cause | What your app should do |
 |--------|---------------|-------------------------|
-| `WTLS_ERR_ARG` | -10 | check arguments / counts |
-| `WTLS_ERR_CANCELLED` | -13 | `abort_cb` returned `true`: clean up without retry |
-| `WTLS_ERR_NET` | -30 | `net_init` not done or failed | bring the network up first |
+| `WTLS_ERR_ARG` | invalid argument, `NULL` pointer, inconsistent counts | fix the call |
+| `WTLS_ERR_STATE` | `wtls_init` not called (or failed) | call `wtls_init` first |
+| `WTLS_ERR_CANCELLED` | your `abort_cb` returned `true` | clean up; do not retry |
+| `WTLS_ERR_NET` | `net_init` not done or failed | bring the network up first |
 | `WTLS_ERR_ENTROPY` | random generator health test failed | no TLS; show an error |
 | `WTLS_ERR_CLOCK` | Wii clock far off | `wtls_time_sync_sntp`, retry once |
 | `WTLS_ERR_DNS` | no such host, no DNS | show "host not found" |
@@ -431,6 +432,7 @@ isolated in both TLS session tickets and the HTTP keep-alive pool.
 | `WTLS_ERR_IO` | connection reset or truncated | discard partial data; retry |
 | `WTLS_ERR_CLOSED` | clean end of stream | done |
 | `WTLS_ERR_NOMEM` | heap exhausted | close connections, free memory |
+| `WTLS_ERR_INTERNAL` | unexpected library error | report it as a bug |
 | `WTLS_ERR_HTTP` | malformed or unsupported HTTP response, corrupt gzip body | report; the server is broken or not HTTP/1.1 |
 | `WTLS_ERR_HTTP_LIMIT` | response head over 16 KiB / 100 fields, or `wtls_http_fetch` body over its limit | stream with `wtls_http_read`, or raise `max_body` |
 | `WTLS_ERR_HTTP_REDIRECT` | more than `max_redirects`, bad `Location`, or `https` → `http` | report; do not follow the downgrade yourself |
@@ -444,7 +446,7 @@ called again afterwards.
 ## 11. Limits and security notes
 
 - **Client only.** No server mode. Client certificates for mutual TLS are
-  supported since 0.3.0 (see 8), password-protected keys are not.
+  supported (see 8), password-protected keys are not.
 - **HTTP:** HTTP/1.1 only, limits and non-goals in 5. `http://` has no
   encryption and no authentication of the server.
 - **TLS 1.3 preferred, TLS 1.2 minimum.** Ciphers: ChaCha20-Poly1305 first
@@ -461,10 +463,18 @@ called again afterwards.
 - **Memory:** each connection holds Mbed TLS's record buffers (two 16 KiB
   buffers plus overhead), allocated from the normal heap.
 
-## 12. Version check & struct compatibility (SemVer contract)
+## 12. Versioning and compatibility
 
-Check the compiled library version against header macros via `wtls_version()`
-(`WTLS_VERSION_MAJOR`, `WTLS_VERSION_MINOR`, `WTLS_VERSION_PATCH`). Always
-zero-initialize option and request structs (`wtls_options opt = {0};`,
-`wtls_http_request req = {0};`) — future minor releases may only append new
-fields whose zero value preserves prior default behavior.
+libwiitls follows [Semantic Versioning](https://semver.org/) from 1.0.0 on:
+within 1.x, existing functions, error codes and struct fields keep their
+meaning, and new struct fields are only appended.
+
+- `WTLS_VERSION_MAJOR`, `WTLS_VERSION_MINOR`, `WTLS_VERSION_PATCH` and
+  `WTLS_VERSION` describe the headers you compiled against; `wtls_version()`
+  returns the version of the library you linked.
+- **Always zero-initialise option and request structs** (`wtls_options opt =
+  {0};`, `wtls_http_request req = {0};`). A new field's zero value always
+  keeps the previous behaviour, so zero-initialised code keeps working when
+  you upgrade.
+- Static archives are not ABI-stable across versions: rebuild your app
+  against the headers of the archives you link.

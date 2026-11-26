@@ -461,7 +461,7 @@ static void test_set_nonblocking_null_is_arg_error(void) {
     CHECK_EQ_INT(wtls_pending(NULL), 0);
 }
 
-/* ---- mutual TLS (client certificates, WP3) --------------------------------- */
+/* ---- mutual TLS (client certificates) -------------------------------------- */
 
 /* Fetches an artifact (CA/CLIENTCERT/CLIENTKEY) from the server's plain port:
  * "<len>\n" followed by that many bytes. NULL on failure. */
@@ -735,7 +735,7 @@ static void test_abort_during_read_poll(void) {
     wtls_close(c);
 }
 
-/* ---- multi-IPv4 fallback & wtls_net_reset (WP2) ------------------------- */
+/* ---- multi-IPv4 fallback & wtls_net_reset ------------------------------- */
 
 static int s_multi_dns_calls;
 static uint32_t s_good_ip_be;
@@ -795,7 +795,7 @@ static void test_multi_ip_fallback_and_net_reset(void) {
     wtls_dns_clear();
 }
 
-/* ---- SPKI SHA-256 pinning (WP3) ---------------------------------------- */
+/* ---- SPKI SHA-256 pinning ---------------------------------------------- */
 
 static bool fetch_spki(const char *name, uint8_t out[WTLS_SPKI_SHA256_LEN]) {
     char cmd[40];

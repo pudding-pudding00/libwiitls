@@ -24,7 +24,7 @@ option(WTLS_BUILD_TESTS "Build libwiitls tests" ${WTLS_BUILD_TESTS_DEFAULT})
 
 # ---------------------------------------------------------------------------
 # Mbed TLS 4.1.1 LTS (release tarball contains all generated files: no Python needed)
-# Crypto tuning knobs (Task 11, measured with bench/). They reach the Mbed TLS /
+# Crypto tuning knobs (measured with bench/, see docs/benchmarks.md). They reach the Mbed TLS /
 # TF-PSA-Crypto configs as WTLS_CFG_* defines, so they apply to every target
 # below, including the fetched Mbed TLS.
 option(WTLS_BN_ASM "PPC32 bignum assembly (MBEDTLS_HAVE_ASM)" ON)

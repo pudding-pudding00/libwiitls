@@ -227,7 +227,7 @@ static void rw_http_keepalive_example_com(void) {
     wtls_http_pool_flush();
 }
 
-/* Additional server-stack and CDN probes (WP5): skip on offline/unreachable. */
+/* Additional server-stack and CDN probes: skip on offline/unreachable. */
 static void rw_probe_tls(const char *host) {
     wtls_conn *c = NULL;
     int r = rw_connect(&c, host, 443);

@@ -1049,7 +1049,7 @@ static void http_gzip_fetch_limit(void) {
     wtls_http_result_free(&res);
 }
 
-/* ---- streaming uploads (body_cb, WP2) ------------------------------------- */
+/* ---- streaming uploads (body_cb) ------------------------------------------ */
 
 /* Streams byte (off + i) % 251 in pieces of at most s->piece bytes.
  * premature_eof ends a fixed-length body early (returns 0), abort_after
@@ -1342,7 +1342,7 @@ static void http_upload_args(void) {
     CHECK(r == NULL);
 }
 
-/* ---- mutual TLS over HTTP (WP3) -------------------------------------------- */
+/* ---- mutual TLS over HTTP -------------------------------------------------- */
 
 #define P_MTLS_HTTP 4442
 #define P_MTLS_REQ 4441
@@ -1548,7 +1548,7 @@ static void http_mtls_cross_origin_stripped(void) {
     wtls_client_cred_free(cred);
 }
 
-/* A streaming upload while presenting a client certificate (WP2 + WP3). */
+/* A streaming upload while presenting a client certificate. */
 static void http_mtls_upload(void) {
     wtls_http_pool_flush();
     wtls_client_cred *cred = http_client_cred("client-ec");
@@ -1600,7 +1600,7 @@ static void http_mtls_free_while_pooled(void) {
     CHECK_EQ_INT(get_full("/hello", NULL, hello, sizeof hello, NULL), 200);
 }
 
-/* ---- cooperative abort_cb & download progress_cb (WP1) ------------------- */
+/* ---- cooperative abort_cb & download progress_cb ------------------------- */
 
 typedef struct {
     int calls;
@@ -1774,7 +1774,7 @@ static void http_fetch_progress(void) {
     wtls_http_result_free(&res);
 }
 
-/* ---- SPKI SHA-256 pinning over HTTP (WP3) ------------------------------ */
+/* ---- SPKI SHA-256 pinning over HTTP ------------------------------------ */
 
 static bool http_fetch_spki(const char *name, uint8_t out[WTLS_SPKI_SHA256_LEN]) {
     char cmd[40];

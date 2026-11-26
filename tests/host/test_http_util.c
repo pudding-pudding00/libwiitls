@@ -1,4 +1,4 @@
-/* Host unit tests for the stateless HTTP helpers (WP4):
+/* Host unit tests for the stateless HTTP helpers:
  * wtls_http_url_encode and wtls_http_parse_content_range. */
 #include <stdint.h>
 #include <stdio.h>

@@ -1,4 +1,4 @@
-/* Suite "time": SNTP sync on real hardware (Task 5). Needs Internet access. */
+/* Suite "time": SNTP sync on real hardware. Needs Internet access. */
 #include <stdlib.h>
 #include <time.h>
 
