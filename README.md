@@ -4,44 +4,70 @@
 [![Release](https://img.shields.io/github/v/release/pudding-pudding00/wii_tls)](https://github.com/pudding-pudding00/wii_tls/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Modern TLS and HTTPS for Wii homebrew.** A small C library for devkitPPC /
-libogc that lets homebrew apps talk to today's Internet: TLS 1.3 with
-certificate verification, session resumption, and an HTTP/1.1 client with
-keep-alive, redirects and gzip — measured and tested on real hardware.
+**Modern TLS 1.3 and HTTPS for Nintendo Wii homebrew.** A small C library for
+devkitPPC / libogc that lets Wii applications talk securely to today's
+Internet — APIs, CDNs, updaters, leaderboards, cloud saves, or your own
+home server — without fighting outdated crypto or IOS socket quirks.
 
 Built on [Mbed TLS 4.1 LTS](https://github.com/Mbed-TLS/mbedtls) (with
-TF-PSA-Crypto) and libogc.
+TF-PSA-Crypto), [zlib](https://zlib.net/), and libogc.
 
-## Features
+## What it offers
 
-- **TLS 1.3** (TLS 1.2 fallback). ChaCha20-Poly1305 first (fast without AES
-  hardware), AES-GCM as fallback; X25519, P-256 and P-384 key exchange.
-- **Always-on verification** of the certificate chain and host name (IP
-  literals via iPAddress SAN) against the embedded Mozilla CA bundle. Add your
-  own roots at runtime, pin public keys (SHA-256 SPKI), or present a client
-  certificate (mutual TLS, ECDSA or RSA).
-- **Fast reconnects:** TLS 1.3 session tickets and a DNS cache — a second
-  connection to the same host skips DNS and the certificate-chain work.
-- **HTTP/1.1 client** (`<wiitls/http.h>`): `https://` and `http://`,
-  streaming or whole-body downloads, streaming uploads (fixed length or
-  chunked), gzip decoding, a keep-alive pool, redirects that strip
-  credentials across origins, progress callbacks and cancellation.
-- **Built for the Wii:** blocking API with timeouts or non-blocking mode for
-  your own poll loop; cooperative cancellation (e.g. on a button press);
-  entropy from IOS IPC timing jitter (health-tested, fails closed); SNTP
-  clock sync for the often-wrong Wii clock; workarounds for IOS socket quirks
-  ([docs/ios-socket-behaviour.md](docs/ios-socket-behaviour.md)).
-- **Fast:** hand-tuned X25519 and P-256 for the Broadway CPU. A full TLS 1.3
-  handshake takes about 27 ms of CPU (37 ms wall on Wi-Fi), a request on a
-  kept-alive connection about 3 ms. Decryption runs at 24 MB/s, far above
-  what the Wii's Wi-Fi delivers. Details in
-  [docs/performance.md](docs/performance.md).
+- **Modern TLS:** TLS 1.3 preferred, TLS 1.2 minimum. ChaCha20-Poly1305 first
+  (fast on PowerPC without AES hardware), AES-GCM as fallback; X25519,
+  P-256 and P-384 key exchange; ALPN support.
+- **Always-on certificate verification:** verifies the certificate chain,
+  expiry, and host name (including IPv4 literals via `iPAddress` SAN)
+  against the embedded Mozilla CA bundle (118 roots in `.rodata`, parsed
+  lazily).
+- **Custom trust, pinning & mutual TLS:**
+  - Add extra trusted CA roots at runtime (`wtls_add_trusted_ca()`).
+  - Pin server public keys (up to 2 SHA-256 SPKI pins: primary + backup).
+  - Present client certificates (`wtls_client_cred_load()`, ECDSA or RSA in
+    PEM/DER) with reference-counted lifetime and identity isolation.
+- **Fast reconnects:** TLS 1.3 session ticket cache (8 entries) and
+  multi-IPv4 DNS cache (16 entries, connect fallback across up to 4
+  A-records) — a second connection skips DNS and certificate-chain work.
+- **Full HTTP/1.1 client (`<wiitls/http.h>`):**
+  - `https://` and `http://`, whole-body `wtls_http_fetch()` or streaming
+    `wtls_http_open()` / `wtls_http_read()` for large files.
+  - Streaming uploads (`wtls_http_body_cb`) with `Content-Length` or
+    `Transfer-Encoding: chunked`.
+  - Built-in gzip decompression (zlib inflate), keep-alive connection pool
+    (4 idle connections, automatic retry of idempotent requests on stale
+    sockets), and redirect handling (strips `Authorization`,
+    `Proxy-Authorization`, `Cookie` and client certs across origins; refuses
+    `https` → `http` downgrades).
+  - URL percent-encoding (`wtls_http_url_encode()`) and `Content-Range`
+    parsing (`wtls_http_parse_content_range()`) for resumable `206`
+    downloads.
+  - Download progress callback (`wtls_http_progress_cb`).
+- **Built for the Wii:**
+  - Blocking API with per-stage timeouts, plus non-blocking mode
+    (`wtls_set_nonblocking()`) for your own `net_poll()` loop.
+  - Cooperative cancellation (`abort_cb`): cancel connects, handshakes,
+    downloads, or uploads within ≤ 100 ms (e.g. when the user presses
+    **B** or **HOME**).
+  - Entropy collected from IOS IPC timing jitter, health-tested
+    (SP 800-90B RCT/APT) and SHA-256 conditioned — fails closed if health
+    tests fail.
+  - Built-in SNTP clock sync (`wtls_time_sync_sntp()`) for consoles with an
+    unset or drifted RTC.
+  - Automatic detection of Wii IP changes (`net_gethostip()`), plus
+    `wtls_net_reset()` and workarounds for IOS socket bugs
+    ([docs/ios-socket-behaviour.md](docs/ios-socket-behaviour.md)).
+- **Tuned for the Broadway CPU:** 32-bit-limb X25519 (constant-time) and
+  P-256 ECDSA verification. On a real Wii over Wi-Fi: ~27 ms CPU for a full
+  TLS 1.3 handshake, ~16 ms CPU for a resumed one, ~3 ms CPU for a pooled
+  HTTP request, and 24 MB/s ChaCha20-Poly1305 decryption (far above Wii
+  Wi-Fi throughput). Details in [docs/performance.md](docs/performance.md).
 
 ## Quick start
 
 Download `libwiitls-<version>-wii.zip` from the
 [releases page](https://github.com/pudding-pudding00/wii_tls/releases/latest),
-unpack it, and add to your devkitPro Makefile:
+unpack it, and add it to your devkitPro Makefile:
 
 ```make
 WIITLS   := path/to/libwiitls-<version>-wii
@@ -50,8 +76,9 @@ LIBPATHS += -L$(WIITLS)/lib
 LIBS     := -lwiitls -lmbedtls -lmbedx509 -ltfpsacrypto -lwiitls -lwiiuse -lbte -logc -lm
 ```
 
-(`-lwiitls` appears twice on purpose: TF-PSA-Crypto calls back into it.)
-Then:
+(`-lwiitls` appears twice because TF-PSA-Crypto calls back into it.)
+
+### HTTPS request
 
 ```c
 #include <wiitls/http.h>
@@ -75,7 +102,9 @@ if (r == WTLS_OK) {
 }
 ```
 
-For other protocols, use the TLS connection directly:
+### Raw TLS
+
+For protocols other than HTTP, use the TLS connection directly:
 
 ```c
 #include <wiitls/wiitls.h>
@@ -99,8 +128,8 @@ if (wtls_connect(&c, "example.com", 443, &opt) == WTLS_OK) {
 Complete Wii programs are in [examples/](examples/):
 [https_get](examples/https_get/main.c) (UI thread + network thread,
 connection reuse) and [upload_mtls_abort](examples/upload_mtls_abort/main.c)
-(streaming upload, mutual TLS, SPKI pinning, cancel with the Wiimote).
-The release package contains both as ready-to-run `.dol` files:
+(streaming upload, mutual TLS, SPKI pinning, progress, cancel with the
+Wiimote). The release package includes both as ready-to-run `.dol` files:
 
 ```bash
 wiiload https_get.dol url=https://example.com/
@@ -109,15 +138,16 @@ wiiload https_get.dol url=https://example.com/
 ## Documentation
 
 - **[Usage guide](docs/usage.md)** — setup, the threading rule, the clock,
-  HTTP, resumption, non-blocking I/O, client certificates, pinning, what to do
-  with each error, limits.
+  HTTP, resumption, non-blocking I/O, client certificates, pinning, error
+  handling, limits, and versioning.
 - **API reference** — the headers
   [include/wiitls/wiitls.h](include/wiitls/wiitls.h) and
   [include/wiitls/http.h](include/wiitls/http.h).
-- [Performance](docs/performance.md) and the full
-  [benchmark write-up](docs/benchmarks.md).
+- [Performance](docs/performance.md) and
+  [benchmark methodology](docs/benchmarks.md).
 - [IOS socket and entropy measurements](docs/ios-socket-behaviour.md).
-- [Security review](docs/security-review.md) and [security policy](SECURITY.md).
+- [Security review](docs/security-review.md) and
+  [security policy](SECURITY.md).
 - [Changelog](CHANGELOG.md).
 
 ## Things to know
@@ -191,10 +221,9 @@ diagnostic `selftest`, `spike`, `entropy` and `jitterdump`.
 ## Tested
 
 Every release passes the host suites (Linux, Windows, with ASan/UBSan and
-libFuzzer) in CI, and the full hardware matrix on a retail Wii over Wi-Fi.
-For 1.0.0: `plat` 13/13, `crypto` 14/14, `tls` 40/40, `http` 86/86, `time`
-1/1, `realworld` 15/15, `soak` 128 iterations with no heap growth, bench
-10/10.
+libFuzzer) in CI, and the full hardware matrix on a retail Wii over Wi-Fi:
+`plat` 13/13, `crypto` 14/14, `tls` 40/40, `http` 86/86, `time` 1/1,
+`realworld` 15/15, `soak` 128 iterations with no heap growth, bench 10/10.
 
 The entropy source has so far been characterised on one console. Reports
 from other Wii revisions, the vWii and USB Ethernet adapters are very welcome

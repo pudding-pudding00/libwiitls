@@ -8,169 +8,72 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Changed
 
-- Documentation reworked for the public release: rewritten README, usage
-  guide fixes (error table, versioning section), condensed benchmark and
-  security-review write-ups, `CONTRIBUTING.md`, issue and pull request
-  templates. Internal planning notes were removed from the repository.
-- Release packages are now built by a GitHub Actions workflow on every
-  `v*` tag, with a `SHA256SUMS` file next to the zip.
+- Documentation reworked for the public 1.0.0 release, with `CONTRIBUTING.md`,
+  issue and pull request templates, and an automated tag-based release
+  workflow.
 
 ## [1.0.0] - 2026-11-25
 
-First stable release. From here on the public API follows SemVer: within 1.x,
-functions, error codes and struct fields keep their meaning, and new struct
-fields are only appended (their zero value keeps the old behaviour).
-
-**Upgrading from 0.3.0:** source compatible, no code changes needed.
-`wtls_options` and `wtls_http_request` gained fields, so rebuild everything
-against the new headers; keep zero-initialising both structs.
+Initial public release of **libwiitls** for Nintendo Wii homebrew
+(devkitPPC / libogc), built on Mbed TLS 4.1.1 LTS (TF-PSA-Crypto) and
+zlib 1.3.1.
 
 ### Added
 
-- **Cancellation.** `abort_cb` / `abort_ctx` in `wtls_options` let your app
-  cancel a connect, handshake, header wait, read or upload — for example when
-  the user presses B. Blocking waits are sliced into ≤ 100 ms steps, so
-  cancellation is prompt; the call returns the new `WTLS_ERR_CANCELLED`
-  (-13). HTTP requests take the callback from `req.tls`; cancelled
-  connections are closed, never pooled.
-- **Download progress.** `progress_cb` / `progress_ctx` in
-  `wtls_http_request` report `(received, total or -1)` during
-  `wtls_http_fetch`.
-- **Public-key pinning.** Up to two SHA-256 SPKI pins (`spki_pins`,
-  `n_spki_pins` in `wtls_options`; primary + backup), matched against any
-  certificate of the verified chain. Session tickets and pooled connections
-  are never shared between different pin sets.
-- **More robust networking.** DNS returns up to four IPv4 addresses and
-  `wtls_connect` falls back to the next one if a connect fails; only the
-  working address is cached. `wtls_net_reset()` flushes the DNS cache and
-  pooled HTTP connections after a network change, and on the Wii a change of
-  the console's IP address is detected automatically.
-- **Thread-misuse check.** Debug builds (or `-DWTLS_THREAD_CHECK=ON`) abort
-  when a `wtls_*` function is called from a thread other than the one that
-  called `wtls_init()`.
-- **Version API.** `WTLS_VERSION_MAJOR`, `WTLS_VERSION_MINOR`,
-  `WTLS_VERSION_PATCH` and `wtls_version()`.
-- **CMake package.** `cmake --install` produces a prefix usable with
-  `find_package(wiitls 1.0 REQUIRED)` and the `wiitls::wiitls` target; the
-  release package includes it. A toolchain file for native Windows Wii builds
-  without MSYS2 (`cmake/wii-win-toolchain.cmake`).
-- **Example** `examples/upload_mtls_abort`: streaming upload, mutual TLS,
-  SPKI pinning, progress and cancellation with the Wiimote.
-- **Testing and maintenance.** Six libFuzzer harnesses for the HTTP, URL,
-  gzip and credential parsers (corpora replayed on every host test run), a
-  soak suite (`suite=soak`), more real-world servers and CDNs in the
-  `realworld` suite, a [security review](docs/security-review.md), a
-  [security policy](SECURITY.md), and a monthly CI check for CA bundle and
-  Mbed TLS 4.1 LTS updates.
-
-### Changed
-
-- Uploads on the Wii are sent in pieces of at most 2 KiB. Larger writes could
-  stall for seconds against a slow peer, because IOS reports free send-buffer
-  space it cannot actually accept
-  ([details](docs/ios-socket-behaviour.md#stalled-peers-and-the-send-cap)).
-- Less memory per request: the request head buffer starts at 512 bytes and
-  grows on demand (was 16 KiB), and the 16 KiB streaming-upload buffer moved
-  from the caller's thread stack to the heap.
-- A response may contain at most 16 interim `1xx` heads
-  (`WTLS_ERR_HTTP_LIMIT` above that).
-- `cmake --install` installs only libwiitls, its bundled static archives,
-  headers and the CMake package — not Mbed TLS's own install rules.
-
-### Fixed
-
-- HTTP requests cancelled through `abort_cb` no longer try to send a TLS
-  `close_notify` on the way out.
-- A zero-length streaming upload with a fixed `Content-Length` (`body_cb` set,
-  `body_len == 0`) is sent correctly.
-- `wtls_http_open()` rejects `headers == NULL` with `n_headers > 0` instead of
-  dereferencing it.
-- Plain `http://` connections are no longer split into separate keep-alive
-  pools by TLS-only settings (pins, client certificate).
-- `Content-Length` values close to `UINT64_MAX` are parsed exactly;
-  `wtls_http_url_encode()` guards against `size_t` overflow.
-- `wtls_write()` returns a stored transport error immediately.
-- An empty or comment-only PEM client certificate is rejected with
-  `WTLS_ERR_ARG`.
-
-### Security
-
-- Entropy buffers, session tickets and X25519 intermediates are wiped with
-  `mbedtls_platform_zeroize()` / volatile stores, so the compiler cannot
-  remove the wipe.
-- Undefined behaviour (`NULL + 0` pointer arithmetic) removed from the gzip
-  decoder and the HTTP parsers.
-- The P-256 verify skips three redundant field operations per point addition
-  (no change in results; slightly faster).
-
-## [0.3.0] - 2026-11-25
-
-### Added
-
-- **Fast P-256 signature verification** (`WTLS_ACCEL_P256`, default ON):
-  32-bit-limb ECDSA verify for the Broadway, plugged into Mbed TLS's PSA
-  driver. On a Wii, a P-256 verify drops from 25.7 ms to 5.3 ms and a full
-  TLS 1.3 handshake from 66 ms to 28 ms CPU. Verified against RFC 6979
-  vectors, edge cases and differential tests against Mbed TLS on host and
-  Wii.
-- **Streaming uploads** (`wtls_http_body_cb`): a request body produced by a
-  callback, sent with `Content-Length` (`body_len`) or as
-  `Transfer-Encoding: chunked` (`body_chunked`). Redirects and retries that
-  would need to rewind the stream are handled safely (303, and 301/302 after
-  POST, drop the body; other redirects fail with `WTLS_ERR_HTTP_REDIRECT`).
-- **Client certificates / mutual TLS** (`wtls_client_cred_load`,
-  `wtls_client_cred_free`, `wtls_options.client_cred`): ECDSA and RSA keys in
-  PEM or DER, reference-counted per connection, private key zeroised on the
-  last release. Session tickets and pooled connections are keyed by the
-  certificate, and the certificate is not sent after a redirect leaves the
-  origin. Apps that don't use mTLS don't link the parsing code.
-- **HTTP helpers:** `wtls_http_url_encode` (RFC 3986 percent-encoding) and
-  `wtls_http_parse_content_range` (RFC 9110 `Content-Range`, for resumable
-  `206` downloads).
-
-### Fixed
-
-- **Corrupted uploads on the Wii.** IOS queues part of a non-blocking
-  `net_send` that exceeds the free socket buffer while still returning
-  `-EAGAIN`, so the retry duplicated bytes and broke the TLS stream during
-  larger uploads. `wtls_plat_send` now checks for space first and sends in
-  blocking mode.
-
-## [0.2.0] - 2026-11-25
-
-### Added
-
-- **HTTP/1.1 client**, `<wiitls/http.h>`, with its own parser:
-  - `wtls_http_open` / `wtls_http_read` / `wtls_http_close` to stream a
-    response, `wtls_http_fetch` to read a whole body (1 MiB limit by default);
-  - `https://` and plain `http://`;
-  - Content-Length, chunked and close-delimited bodies; 1xx responses and
-    trailers skipped;
-  - gzip decoding (zlib 1.3.1 inflate, built in; `WTLS_GZIP`, default ON);
-  - keep-alive pool (4 idle connections, 60 s) with a liveness check and one
-    retry of idempotent requests on a stale connection;
-  - redirects (301, 302, 303, 307, 308; 5 by default) that drop
-    `Authorization`, `Proxy-Authorization` and `Cookie` when leaving the
-    origin and refuse `https` → `http`;
-  - `wtls_http_get_header`, `wtls_http_header_at`, `wtls_http_get_info`,
-    `wtls_http_pool_flush`.
-- `WTLS_VERSION` macro.
-- Error codes `WTLS_ERR_HTTP`, `WTLS_ERR_HTTP_LIMIT`, `WTLS_ERR_HTTP_REDIRECT`.
-
-### Changed
-
-- The `https_get` example uses the HTTP client and shows connection reuse.
-- `wtls_shutdown` also closes the HTTP keep-alive pool.
-
-## [0.1.0] - 2026-11-24
-
-First release: TLS 1.3 / 1.2 client for Wii homebrew on Mbed TLS 4.1.1 and
-libogc, with certificate verification against the embedded Mozilla CA
-bundle, session tickets, a DNS cache, blocking and non-blocking I/O, SNTP
-clock sync and an IOS-jitter entropy source.
+- **TLS 1.3 & 1.2 client (`<wiitls/wiitls.h>`):**
+  - ChaCha20-Poly1305 preferred (fast without AES hardware), AES-GCM
+    fallback; X25519, P-256 and P-384 key exchange; ALPN support.
+  - Always-on certificate chain and hostname verification (including IPv4
+    literals via `iPAddress` SAN) against the embedded Mozilla CA bundle
+    (118 roots in `.rodata`, parsed lazily), plus `wtls_add_trusted_ca()` for
+    custom roots.
+  - Optional SHA-256 SPKI public-key pinning (`spki_pins`, `n_spki_pins`,
+    up to 2 pins) against any certificate in the verified chain.
+  - Mutual TLS (`wtls_client_cred_load()`, `wtls_client_cred_free()`,
+    `client_cred`) for ECDSA and RSA keys in PEM or DER, reference-counted
+    and zeroised on release; isolated per identity in the session cache and
+    HTTP pool.
+  - TLS 1.3 session ticket cache (8 entries) and multi-IPv4 DNS cache
+    (16 entries, connect fallback across up to 4 A-records).
+  - Blocking I/O with per-stage timeouts and non-blocking mode
+    (`wtls_set_nonblocking()`, `wtls_pending()`, `wtls_get_fd()`).
+  - Cooperative cancellation (`abort_cb` / `abort_ctx`, `WTLS_ERR_CANCELLED`)
+    checked before connect, across handshake steps, and in ≤ 100 ms poll
+    slices.
+- **HTTP/1.1 client (`<wiitls/http.h>`):**
+  - `https://` and `http://` requests with `wtls_http_fetch()` (whole body,
+    1 MiB default limit) or streaming `wtls_http_open()` /
+    `wtls_http_read()` / `wtls_http_close()`.
+  - Streaming uploads (`wtls_http_body_cb`) with `Content-Length` or
+    `Transfer-Encoding: chunked`.
+  - Built-in gzip decompression (`WTLS_GZIP`, default ON).
+  - Keep-alive connection pool (4 idle connections, 60 s) with liveness
+    checks and single retry of idempotent methods on stale connections.
+  - Redirects (301, 302, 303, 307, 308) with cross-origin stripping of
+    `Authorization`, `Proxy-Authorization`, `Cookie` and client
+    certificates, and `https` → `http` downgrade refusal.
+  - Progress callback (`progress_cb`) for `wtls_http_fetch()`.
+  - `wtls_http_url_encode()` and `wtls_http_parse_content_range()` helpers.
+- **Wii platform & performance:**
+  - 32-bit-limb X25519 (`WTLS_ACCEL`, constant-time) and P-256 ECDSA
+    verify (`WTLS_ACCEL_P256`) tuned for the Broadway CPU.
+  - IOS IPC timing-jitter entropy source with SP 800-90B RCT/APT health
+    tests and SHA-256 conditioning (fails closed with `WTLS_ERR_ENTROPY`).
+  - SNTP clock sync (`wtls_time_sync_sntp()`), automatic Wii IP-change
+    detection (`net_gethostip()`), `wtls_net_reset()`, and IOS socket
+    workarounds (`wtls_plat_connect` polling, 2 KiB send cap).
+- **Packaging, safety & tooling:**
+  - `WTLS_VERSION_*` macros, `wtls_version()`, and zero-initialised
+    append-only options/request structs under SemVer 1.x.
+  - Debug single-thread affinity guard (`WTLS_THREAD_CHECK`).
+  - CMake `cmake --install` + `find_package(wiitls 1.0 REQUIRED)` exporting
+    `wiitls::wiitls`, native Windows Wii toolchain
+    (`cmake/wii-win-toolchain.cmake`), and `tools/make_release.sh`.
+  - Examples `examples/https_get` and `examples/upload_mtls_abort`.
+  - Six Clang libFuzzer harnesses (`tests/fuzz/`), hardware test runner
+    (`tests/hw/`), benchmark runner (`bench/`), [security
+    review](docs/security-review.md), [security policy](SECURITY.md), and
+    monthly CA bundle / Mbed TLS LTS check workflow.
 
 [Unreleased]: https://github.com/pudding-pudding00/wii_tls/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/pudding-pudding00/wii_tls/compare/v0.3.0...v1.0.0
-[0.3.0]: https://github.com/pudding-pudding00/wii_tls/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/pudding-pudding00/wii_tls/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/pudding-pudding00/wii_tls/releases/tag/v0.1.0
+[1.0.0]: https://github.com/pudding-pudding00/wii_tls/releases/tag/v1.0.0

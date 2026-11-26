@@ -3,12 +3,12 @@
 What to expect on a real Wii (Broadway, 729 MHz) with the default build
 (`WTLS_EVEREST=ON`, `WTLS_OPT=O3`, `WTLS_ACCEL=ON`, `WTLS_ACCEL_P256=ON`,
 `WTLS_BN_ASM=ON`). Measured with libwiitls 1.0.0 over Wi-Fi with the
-benchmark runner in `bench/`; [benchmarks.md](benchmarks.md) has the method,
-every build variant and how each number came about.
+benchmark runner in `bench/`; [benchmarks.md](benchmarks.md) has the
+measurement details and build options.
 
 ## In short
 
-- **A new HTTPS connection costs about 27 ms CPU / 37 ms wall**, a repeated
+- **A new HTTPS connection costs about 27 ms CPU / 37 ms wall**, a resumed
   one to the same server about 16 ms CPU / 25 ms wall (Wi-Fi to a server on
   the same network; add your Internet round trips).
 - **A further request on a kept-alive connection costs about 3 ms CPU /
@@ -16,7 +16,7 @@ every build variant and how each number came about.
 - **Downloads are limited by the Wii's Wi-Fi, not by TLS.** Decryption runs at
   24 MB/s; the Wi-Fi delivered 0.9–1.0 MB/s in our measurements, and
   `wtls_read` reached 96.7 % of plain TCP throughput.
-- **`wtls_init` takes about 400 ms** once at start-up (entropy collection).
+- **`wtls_init()` takes about 400 ms** once at start-up (entropy collection).
 
 ## Connections
 
@@ -29,12 +29,12 @@ every build variant and how each number came about.
 
 Where the full handshake's CPU time goes: about 10.7 ms verifying two P-256
 ECDSA signatures (server certificate chain and handshake signature), 4.7 ms
-for the X25519 key exchange, the rest for hashing, key schedule, record
+for the X25519 key exchange, and the rest for hashing, key schedule, record
 processing and IOS socket calls. The resumed handshake skips the certificate
-chain; what remains is X25519 plus about 7 ms of socket calls to IOS.
+chain; what remains is X25519 plus IOS socket/connect IPC (~9 ms).
 
 Servers with RSA certificates take a little longer to verify (RSA-2048
-verify: 8.6 ms vs 5.3 ms for ECDSA P-256).
+verify: 8.6 ms vs 5.3–5.4 ms for ECDSA P-256).
 
 ## Primitives
 
@@ -58,11 +58,3 @@ speed, which is still well above Wi-Fi throughput.
 | `https_get.dol` (complete example program, HTTP client and gzip included) | 814 KiB |
 | Built-in Mozilla CA bundle (118 roots, parsed lazily) | in `.rodata` of `libwiitls.a` |
 | Per connection | about 2 × 16 KiB record buffers plus Mbed TLS state, on the heap |
-
-## Targets
-
-The project set itself targets of ≤ 30 ms CPU for a full handshake and ≤ 10 ms
-for a resumed one. The full-handshake target is met (27.3 ms). The resumed
-one is not (15.7 ms): over half of it is IOS socket and connect overhead that
-no crypto change can remove. In practice the network round trips cost more
-than either, and keep-alive avoids the handshake entirely.

@@ -45,5 +45,5 @@ body:
     id: bench
     attributes:
       label: Benchmark (optional)
-      description: '`BENCH` and `GATE` lines of `wtls_bench.dol`.'
+      description: '`BENCH` lines of `wtls_bench.dol`.'
       render: text
