@@ -37,9 +37,12 @@ static void hw_jitter_64k_passes_health_tests(void) {
     uint8_t *buf = malloc(len);
     CHECK(buf != NULL);
     if (!buf) return;
+    wtls_jitter_stats st = {0};
     u64 t0 = gettime();
-    CHECK_EQ_INT(wtls_jitter_collect(sample_cb, NULL, buf, len), WTLS_OK);
-    TLOG("    64 KiB raw samples in %u ms\n", (unsigned)ticks_to_millisecs(gettime() - t0));
+    CHECK_EQ_INT(wtls_jitter_collect_ex(sample_cb, NULL, buf, len, &st), WTLS_OK);
+    TLOG("    64 KiB raw samples in %u ms (IOS %d, RCT max %u/%u, APT max %u/%u)\n",
+         (unsigned)ticks_to_millisecs(gettime() - t0), (int)IOS_GetVersion(),
+         st.max_rct, WTLS_RCT_CUTOFF, st.max_apt, WTLS_APT_CUTOFF);
     free(buf);
 }
 

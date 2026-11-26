@@ -134,11 +134,86 @@ static void test_content_range_bad(void) {
     cr_bad("");
 }
 
+typedef struct {
+    const char *src;
+    size_t len;
+    size_t off;
+    size_t step;
+} mp_stream;
+
+static int mp_read_cb(void *ctx, void *buf, size_t cap) {
+    mp_stream *s = ctx;
+    if (s->off >= s->len) return 0;
+    size_t n = s->len - s->off;
+    if (n > s->step) n = s->step;
+    if (n > cap) n = cap;
+    memcpy(buf, s->src + s->off, n);
+    s->off += n;
+    return (int)n;
+}
+
+static void test_form_encode(void) {
+    static const wtls_http_form_field fields[] = {
+        {"user", "a b"},
+        {"tag", "c&d=1"},
+        {"empty", ""},
+    };
+    size_t need = 0;
+    CHECK_EQ_INT(wtls_http_form_encode(fields, 3, NULL, 0, &need), WTLS_OK);
+    char buf[128];
+    CHECK_EQ_INT(wtls_http_form_encode(fields, 3, buf, need, &need), WTLS_ERR_HTTP_LIMIT);
+    CHECK_EQ_INT(wtls_http_form_encode(fields, 3, buf, sizeof buf, &need), WTLS_OK);
+    CHECK(strcmp(buf, "user=a%20b&tag=c%26d%3D1&empty=") == 0);
+    CHECK_EQ_INT((int)need, (int)strlen(buf));
+    CHECK_EQ_INT(wtls_http_form_encode(NULL, 0, buf, sizeof buf, &need), WTLS_OK);
+    CHECK_EQ_INT((int)need, 0);
+    CHECK_EQ_INT(buf[0], '\0');
+}
+
+static void test_multipart_streaming(void) {
+    mp_stream s = {.src = "FILEBYTES", .len = 9, .step = 4};
+    wtls_http_multipart_part parts[] = {
+        {.name = "field", .data = "val", .data_len = 3},
+        {.name = "upload", .filename = "save.bin", .data_cb = mp_read_cb, .data_ctx = &s},
+    };
+    wtls_http_multipart mp;
+    CHECK_EQ_INT(wtls_http_multipart_init(&mp, parts, 2), WTLS_OK);
+    CHECK(strstr(wtls_http_multipart_content_type(&mp), "multipart/form-data; boundary=") != NULL);
+
+    /* Read in tiny 7-byte chunks to exercise boundary splits across all phases. */
+    char body[1024];
+    size_t off = 0;
+    int k;
+    while ((k = wtls_http_multipart_read(&mp, body + off, 7)) > 0) off += (size_t)k;
+    CHECK_EQ_INT(k, 0);
+    body[off] = '\0';
+    CHECK(strstr(body, "name=\"field\"\r\n\r\nval\r\n--") != NULL);
+    CHECK(strstr(body, "name=\"upload\"; filename=\"save.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nFILEBYTES\r\n--") != NULL);
+    CHECK(strstr(body, "--\r\n") != NULL);
+
+    /* Reject unsafe quotes/newlines in field names. */
+    wtls_http_multipart_part bad = {.name = "bad\"name", .data = "x", .data_len = 1};
+    CHECK_EQ_INT(wtls_http_multipart_init(&mp, &bad, 1), WTLS_ERR_ARG);
+}
+
+static void test_format_range(void) {
+    char buf[64];
+    CHECK_EQ_INT(wtls_http_format_range(1024, 0, false, buf, sizeof buf), WTLS_OK);
+    CHECK(strcmp(buf, "bytes=1024-") == 0);
+    CHECK_EQ_INT(wtls_http_format_range(0, 99, true, buf, sizeof buf), WTLS_OK);
+    CHECK(strcmp(buf, "bytes=0-99") == 0);
+    CHECK_EQ_INT(wtls_http_format_range(10, 5, true, buf, sizeof buf), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_format_range(0, 0, false, buf, 4), WTLS_ERR_HTTP_LIMIT);
+}
+
 int main(void) {
     RUN(test_url_encode_vectors);
     RUN(test_url_encode_args);
     RUN(test_url_encode_all_bytes);
     RUN(test_content_range_ok);
     RUN(test_content_range_bad);
+    RUN(test_form_encode);
+    RUN(test_multipart_streaming);
+    RUN(test_format_range);
     return CHECK_DONE();
 }

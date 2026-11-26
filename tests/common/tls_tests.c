@@ -626,6 +626,49 @@ static void test_mtls_cert_key_mismatch(void) {
 
 /* The application may free the credential while a connection still uses it:
  * the connection holds its own reference. */
+static void test_mtls_encrypted_key(void) {
+    size_t clen = 0, klen = 0;
+    uint8_t *cert = plain_fetch("CLIENTCERT client-ec", &clen);
+    uint8_t *key0 = plain_fetch("CLIENTKEY client-ec-enc", &klen);
+    uint8_t *key = NULL;
+    if (key0) {
+        key = malloc(klen + 1);
+        if (key) {
+            memcpy(key, key0, klen);
+            key[klen] = 0;
+            klen += 1;
+        }
+        free(key0);
+    }
+    CHECK(cert && key);
+    if (cert && key) {
+        wtls_client_cred *cred = (wtls_client_cred *)1;
+        /* Wrong or missing password fails cleanly with WTLS_ERR_ARG. */
+        CHECK_EQ_INT(wtls_client_cred_load(&cred, cert, clen, key, klen), WTLS_ERR_ARG);
+        CHECK(cred == NULL);
+        CHECK_EQ_INT(wtls_client_cred_load_ex(&cred, cert, clen, key, klen,
+                                              (const uint8_t *)"wrong", 5),
+                     WTLS_ERR_ARG);
+        CHECK(cred == NULL);
+        CHECK_EQ_INT(wtls_client_cred_load_ex(&cred, cert, clen, key, klen,
+                                              (const uint8_t *)"wiitls-pw", 9),
+                     WTLS_OK);
+        CHECK(cred != NULL);
+        if (cred) {
+            wtls_options opt = {0};
+            opt.client_cred = cred;
+            wtls_conn *c = open_tls(g_env.server_host, P_MTLS, &opt);
+            if (c) {
+                expect_line(c, "PING\n", "PING");
+                wtls_close(c);
+            }
+            wtls_client_cred_free(cred);
+        }
+    }
+    free(cert);
+    free(key);
+}
+
 static void test_mtls_free_while_connected(void) {
     wtls_client_cred *cred = client_cred("client-ec");
     CHECK(cred);
@@ -889,6 +932,70 @@ static void test_spki_pin_resumption_isolated(void) {
     }
 }
 
+static void test_reset_trusted_cas(void) {
+    /* First confirm test_ca is currently trusted (even with cached tickets cleared). */
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    if (c) {
+        expect_line(c, "PING\n", "PING"); /* receives session ticket */
+        wtls_close(c);
+    }
+    /* Reset drops runtime-added CAs and clears session tickets. */
+    wtls_reset_trusted_cas(false);
+    expect_cert_error(P_TLS13_ECDSA, MBEDTLS_X509_BADCERT_NOT_TRUSTED);
+    /* Re-trusting test_ca restores verification. */
+    CHECK(trust_test_ca());
+    c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    /* Reset keeping builtin still drops runtime-added CAs until re-added. */
+    wtls_reset_trusted_cas(true);
+    expect_cert_error(P_TLS13_ECDSA, MBEDTLS_X509_BADCERT_NOT_TRUSTED);
+    CHECK(trust_test_ca());
+}
+
+static void test_nonblocking_connect_start_step(void) {
+    wtls_scache_clear();
+    wtls_options o = {0};
+    o.alpn = k_alpn;
+    wtls_conn *c = NULL;
+    wtls_status st = wtls_connect_start(&c, g_env.server_host, P_TLS13_ECDSA, &o);
+    int steps = 0;
+    while (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) {
+        CHECK(c != NULL);
+        int fd = wtls_get_fd(c);
+        CHECK(fd >= 0);
+        if (fd >= 0) {
+            int pr = wtls_plat_poll(fd, st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 5);
+            CHECK(pr >= 0);
+        }
+        st = wtls_connect_step(c);
+        if (++steps > 10000) break;
+    }
+    CHECK_EQ_INT(st, WTLS_OK);
+    CHECK(c != NULL);
+    if (c) {
+        wtls_conn_info info;
+        CHECK_EQ_INT(wtls_get_info(c, &info), WTLS_OK);
+        CHECK(strcmp(info.tls_version, "TLSv1.3") == 0);
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+
+    /* Non-blocking connect to refused port fails cleanly. */
+    wtls_conn *bad = (wtls_conn *)1;
+    st = wtls_connect_start(&bad, g_env.server_host, P_CLOSED, NULL);
+    uint64_t deadline = wtls_plat_now_ms() + 6000;
+    while ((st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) && wtls_plat_now_ms() < deadline) {
+        int fd = wtls_get_fd(bad);
+        if (fd >= 0) wtls_plat_poll(fd, st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 20);
+        st = wtls_connect_step(bad);
+    }
+    CHECK(st == WTLS_ERR_CONNECT || st == WTLS_ERR_TIMEOUT);
+    if (bad && bad != (wtls_conn *)1) wtls_close(bad);
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -932,6 +1039,7 @@ void wtls_suite_tls(void) {
     RUN(test_mtls_missing_cert_rejected);
     RUN(test_mtls_untrusted_client_rejected);
     RUN(test_mtls_cert_key_mismatch);
+    RUN(test_mtls_encrypted_key);
     RUN(test_mtls_free_while_connected);
     RUN(test_mtls_resumption_isolated);
     RUN(test_abort_before_connect);
@@ -940,6 +1048,8 @@ void wtls_suite_tls(void) {
     RUN(test_multi_ip_fallback_and_net_reset);
     RUN(test_spki_pin_leaf_and_ca);
     RUN(test_spki_pin_resumption_isolated);
+    RUN(test_reset_trusted_cas);
+    RUN(test_nonblocking_connect_start_step);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
     else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();

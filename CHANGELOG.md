@@ -4,15 +4,7 @@ All notable changes to libwiitls are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
-## [Unreleased]
-
-### Changed
-
-- Documentation reworked for the public 1.0.0 release, with `CONTRIBUTING.md`,
-  issue and pull request templates, and an automated tag-based release
-  workflow.
-
-## [1.0.0] - 2026-11-25
+## [1.0.0] - 2026-11-27
 
 Initial public release of **libwiitls** for Nintendo Wii homebrew
 (devkitPPC / libogc), built on Mbed TLS 4.1.2 LTS (TF-PSA-Crypto) and
@@ -20,6 +12,37 @@ zlib 1.3.1.
 
 ### Added
 
+- **HTTP/2 (`h2` ALPN) client support:** `WTLS_HTTP2` CMake option (default
+  `ON`), RFC 9113 framing + flow control (`WINDOW_UPDATE`, `SETTINGS`, `PING`,
+  `GOAWAY`, `RST_STREAM`), RFC 7541 HPACK (static/dynamic table + Huffman),
+  pooled stream reuse, `wtls_http_request::no_h2`, and `wtls_http_info::http2`.
+- **Optional/replaceable CA store:** `WTLS_EMBED_CA=OFF` CMake option to omit
+  the ~200 KiB embedded Mozilla CA bundle, plus `wtls_reset_trusted_cas()` to
+  clear runtime CAs and suppress/restore the built-in roots at runtime.
+- **HTTP `101 Switching Protocols` handoff:** `wtls_http_request::allow_upgrade`
+  and `wtls_http_detach()` to transfer ownership of the underlying `wtls_conn *`
+  (`wss://`) or socket fd (`ws://`) with any early post-head bytes preserved.
+- **devkitPro `dkp-pacman` packaging:** `packaging/dkp-wii/PKGBUILD`,
+  `tools/make_pkg.sh`, `cmake/wiitls.pc.in`, and `WTLS_INSTALL_ISOLATED_DEPS`
+  for conflict-free installation under `$DEVKITPRO/portlibs/wii`.
+- **Entropy resilience & diagnostics:** `wtls_jitter_collect_ex()` RCT/APT
+  headroom reporting in the `entropy` hardware suite and non-credited
+  hardware/network state mixing in `wtls_entropy.c`.
+- **Non-blocking connect/handshake:** `wtls_connect_start()` and
+  `wtls_connect_step()` for async TCP connect + TLS handshakes.
+- **HTTP `deflate`, `Expect: 100-continue`, proxy & ergonomics:**
+  - `Content-Encoding: deflate` decompression (`wtls_http_info::deflate`).
+  - `wtls_http_request::expect_100_continue` for streaming uploads.
+  - Streaming download `progress_cb` support in `wtls_http_open()` /
+    `wtls_http_read()`.
+  - `wtls_http_form_encode()`, streaming `wtls_http_multipart_*`,
+    `wtls_http_format_range()`, and `wtls_http_check_resume()`.
+  - `wtls_http_request::proxy_url` (`http://` forward proxy and `https://`
+    `CONNECT` tunneling).
+- **Password-protected client keys:** `wtls_client_cred_load_ex()` supporting
+  encrypted PKCS#8 (PBES2) and encrypted PEM private keys.
+- **Optional `libcurl`-lite compatibility shim:** standalone adapter target
+  `wiitls::curl` (`adapters/curl_lite/`, enabled via `WTLS_BUILD_CURL_SHIM=ON`).
 - **TLS 1.3 & 1.2 client (`<wiitls/wiitls.h>`):**
   - ChaCha20-Poly1305 preferred (fast without AES hardware), AES-GCM
     fallback; X25519, P-256 and P-384 key exchange; ALPN support.
@@ -75,5 +98,4 @@ zlib 1.3.1.
     review](docs/security-review.md), [security policy](SECURITY.md), and
     monthly CA bundle / Mbed TLS LTS check workflow.
 
-[Unreleased]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0

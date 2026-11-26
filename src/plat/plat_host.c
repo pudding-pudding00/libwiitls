@@ -303,6 +303,57 @@ int wtls_plat_connect(uint32_t ipv4_be, uint16_t port, uint32_t timeout_ms, int 
     return wtls_plat_connect_abortable(ipv4_be, port, timeout_ms, NULL, NULL, fd_out);
 }
 
+int wtls_plat_connect_begin(uint32_t ipv4_be, uint16_t port, int *fd_out) {
+    if (!fd_out) return WTLS_ERR_ARG;
+    *fd_out = -1;
+    sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == SOCK_INVALID) return WTLS_ERR_CONNECT;
+#if defined(SO_NOSIGPIPE)
+    {
+        int on = 1;
+        (void)setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+    }
+#endif
+    if (set_nonblocking(s) != 0) {
+        sock_close(s);
+        return WTLS_ERR_CONNECT;
+    }
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    memcpy(&sa.sin_addr, &ipv4_be, 4);
+    if (connect(s, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        int e = sock_err();
+        if (e == ERR_INPROGRESS || is_wouldblock(e)) {
+            *fd_out = (int)s;
+            return WTLS_WANT_WRITE;
+        }
+        sock_close(s);
+        return WTLS_ERR_CONNECT;
+    }
+    int one = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    *fd_out = (int)s;
+    return WTLS_OK;
+}
+
+int wtls_plat_connect_check(int fd, uint32_t ipv4_be, uint16_t port) {
+    (void)ipv4_be;
+    (void)port;
+    short rev = 0;
+    int r = poll_one((sock_t)fd, POLLOUT, 0, &rev);
+    if (r == 0) return WTLS_WANT_WRITE;
+    if (r < 0) return WTLS_ERR_CONNECT;
+    int soerr = 0;
+    socklen_t sl = sizeof soerr;
+    if (getsockopt((sock_t)fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl) != 0 || soerr != 0)
+        return WTLS_ERR_CONNECT;
+    int one = 1;
+    (void)setsockopt((sock_t)fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    return WTLS_OK;
+}
+
 int wtls_plat_send(int fd, const uint8_t *buf, size_t len) {
     if (len == 0) return WTLS_ERR_ARG;
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
