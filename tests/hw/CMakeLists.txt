@@ -17,6 +17,7 @@ target_compile_definitions(wtls_hwtest PRIVATE WTLS_PLATFORM_OGC)
 if(WTLS_GZIP)
     target_compile_definitions(wtls_hwtest PRIVATE WTLS_GZIP=1) # gzip cases in http_tests.c
 endif()
+target_compile_definitions(wtls_hwtest PRIVATE WTLS_HTTP2=$<BOOL:${WTLS_HTTP2}>)
 target_link_libraries(wtls_hwtest PRIVATE wiitls m)
 target_compile_options(wtls_hwtest PRIVATE -Wall -Wextra)
 ogc_create_dol(wtls_hwtest)

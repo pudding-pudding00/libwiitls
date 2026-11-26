@@ -103,6 +103,50 @@ static void gzip_trailing_garbage(void) {
     CHECK_EQ_INT(decode(in, sizeof in, 100000, 100000, out, sizeof out, &n), WTLS_ERR_HTTP);
 }
 
+/* zlib.compress(b"hello, wii") */
+static const uint8_t k_deflate_one[] = {0x78, 0x9c, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0xd7, 0x51,
+                                        0x28, 0xcf, 0xcc, 0x04, 0x00, 0x14, 0x91, 0x03, 0xaa};
+
+static int decode_deflate(const uint8_t *in, size_t len, size_t in_step, size_t out_step, char *out,
+                          size_t cap, size_t *out_len) {
+    wtls_gzip *g = wtls_deflate_new();
+    CHECK(g != NULL);
+    if (!g) return WTLS_ERR_NOMEM;
+    size_t off = 0, fill = 0;
+    int st = WTLS_OK;
+    for (int guard = 0; guard < 100000 && st == WTLS_OK; guard++) {
+        size_t n = len - off < in_step ? len - off : in_step;
+        size_t room = cap - fill < out_step ? cap - fill : out_step;
+        size_t used = 0, produced = 0;
+        st = wtls_gzip_inflate(g, in + off, n, &used, (uint8_t *)out + fill, room, &produced);
+        off += used;
+        fill += produced;
+        if (st == WTLS_OK && off == len && produced == 0) break;
+    }
+    if (st == WTLS_OK) st = wtls_gzip_finish(g);
+    wtls_gzip_free(g);
+    *out_len = fill;
+    return st;
+}
+
+static void deflate_vectors(void) {
+    char out[64];
+    size_t n = 0;
+    CHECK_EQ_INT(decode_deflate(k_deflate_one, sizeof k_deflate_one, 3, 2, out, sizeof out, &n), WTLS_OK);
+    CHECK_EQ_INT((int)n, 10);
+    CHECK_MEM(out, "hello, wii", 10);
+
+    /* truncated deflate stream fails with WTLS_ERR_IO */
+    CHECK_EQ_INT(decode_deflate(k_deflate_one, sizeof k_deflate_one - 2, 100, 100, out, sizeof out, &n),
+                 WTLS_ERR_IO);
+
+    /* trailing garbage after deflate stream fails with WTLS_ERR_HTTP */
+    uint8_t bad[sizeof k_deflate_one + 2];
+    memcpy(bad, k_deflate_one, sizeof k_deflate_one);
+    memcpy(bad + sizeof k_deflate_one, "xy", 2);
+    CHECK_EQ_INT(decode_deflate(bad, sizeof bad, 5, 64, out, sizeof out, &n), WTLS_ERR_HTTP);
+}
+
 int main(void) {
     RUN(gzip_one_member);
     RUN(gzip_two_members);
@@ -112,6 +156,7 @@ int main(void) {
     RUN(gzip_truncated);
     RUN(gzip_not_gzip);
     RUN(gzip_trailing_garbage);
+    RUN(deflate_vectors);
     wtls_gzip_free(NULL);
     return CHECK_DONE();
 }

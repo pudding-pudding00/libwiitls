@@ -64,6 +64,7 @@ static int list_len(const mbedtls_x509_crt *c) {
     return n;
 }
 
+#if WTLS_EMBED_CA
 static void test_bundle_sorted_and_parseable(void) {
     CHECK(wtls_ca_bundle_count >= 100);
     int unparsable = 0;
@@ -99,8 +100,19 @@ static void test_lookup_finds_isrg_root_x1(void) {
         CHECK(strstr(dn, "ISRG Root X1") != NULL);
         free_list(cands);
     }
+    /* Suppressing the built-in bundle drops ISRG Root X1 until restored. */
+    wtls_castore_reset(false);
+    cands = (mbedtls_x509_crt *)1;
+    CHECK_EQ_INT(wtls_castore_ca_cb(NULL, &child, &cands), 0);
+    CHECK(cands == NULL);
+    wtls_castore_reset(true);
+    cands = (mbedtls_x509_crt *)1;
+    CHECK_EQ_INT(wtls_castore_ca_cb(NULL, &child, &cands), 0);
+    CHECK_EQ_INT(list_len(cands), 1);
+    if (cands) free_list(cands);
     mbedtls_x509_crt_free(&child);
 }
+#endif
 
 static void test_lookup_unknown_issuer_returns_null(void) {
     mbedtls_x509_crt child;
@@ -165,8 +177,10 @@ static void test_lookup_counter_increments(void) {
 
 int main(void) {
     if (psa_crypto_init() != PSA_SUCCESS) return 1; /* PK parsing uses PSA */
+#if WTLS_EMBED_CA
     RUN(test_bundle_sorted_and_parseable);
     RUN(test_lookup_finds_isrg_root_x1);
+#endif
     RUN(test_lookup_unknown_issuer_returns_null);
     RUN(test_extra_ca_pem_and_der);
     RUN(test_lookup_counter_increments);

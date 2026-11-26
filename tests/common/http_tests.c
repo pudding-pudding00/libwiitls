@@ -20,6 +20,7 @@
 #define P_HTTP 4438
 #define P_HTTP2 4439
 #define P_HTTP_PLAIN 4440
+#define P_H2 4445
 #define P_CLOSED 4499
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -964,7 +965,7 @@ static void http_gzip_offered(void) {
     wtls_http_response *r = get("/headers");
     if (!r) return;
     int last = 1;
-    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip\r\n") != NULL);
+    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip, deflate\r\n") != NULL);
     wtls_http_close(r);
     r = gz_open("/headers", true, NULL, 0);
     if (!r) return;
@@ -1903,6 +1904,424 @@ static void http_spki_pin_pool_and_redirect(void) {
     }
 }
 
+static void http_upgrade_rejected_without_flag(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url("/upgrade");
+    wtls_http_response *r = (wtls_http_response *)1;
+    CHECK_EQ_INT(wtls_http_open(&r, &req), WTLS_ERR_HTTP);
+    CHECK(r == NULL);
+}
+
+static void http_upgrade_detach_tls_and_early(void) {
+    wtls_http_pool_flush();
+    static const wtls_http_header hd[] = {{"Upgrade", "echo"}};
+    wtls_http_request req = {0};
+    req.url = url("/upgrade?early=1");
+    req.headers = hd;
+    req.n_headers = 1;
+    req.allow_upgrade = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 101);
+    const char *up = wtls_http_get_header(r, "Upgrade");
+    CHECK(up && strcmp(up, "echo") == 0);
+
+    wtls_conn *c = NULL;
+    int fd = -1;
+    CHECK_EQ_INT(wtls_http_detach(r, &c, &fd, NULL, 0, NULL), WTLS_OK);
+    CHECK(c != NULL && fd >= 0 && fd == wtls_get_fd(c));
+    /* Second detach fails cleanly; response accessors remain valid until close. */
+    CHECK_EQ_INT(wtls_http_detach(r, &c, NULL, NULL, 0, NULL), WTLS_ERR_STATE);
+    CHECK_EQ_INT(wtls_http_status(r), 101);
+    wtls_http_close(r);
+
+    /* Early bytes sent with the 101 response head are delivered first by wtls_read(). */
+    CHECK(wtls_pending(c) == 6);
+    char buf[16] = {0};
+    CHECK_EQ_INT(wtls_read(c, buf, 6), 6);
+    CHECK_MEM(buf, "EARLY!", 6);
+    CHECK_EQ_INT(wtls_pending(c), 0);
+
+    /* Upgraded full-duplex TLS traffic continues seamlessly. */
+    CHECK_EQ_INT(wtls_write(c, "PING", 4), 4);
+    size_t got = 0;
+    while (got < 4) {
+        int k = wtls_read(c, buf + got, 4 - got);
+        CHECK(k > 0);
+        if (k <= 0) break;
+        got += (size_t)k;
+    }
+    CHECK_MEM(buf, "PING", 4);
+    wtls_close(c);
+}
+
+static void http_upgrade_detach_plain_and_errors(void) {
+    wtls_http_pool_flush();
+    /* 200 response cannot be detached. */
+    wtls_http_response *ok = get("/hello");
+    if (ok) {
+        wtls_conn *c = NULL;
+        CHECK_EQ_INT(wtls_http_detach(ok, &c, NULL, NULL, 0, NULL), WTLS_ERR_STATE);
+        wtls_http_close(ok);
+    }
+
+    /* Plain HTTP 101 with early bytes: size query, small buffer error, then detach. */
+    static const wtls_http_header hd[] = {{"Upgrade", "echo"}};
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/upgrade?early=1");
+    req.headers = hd;
+    req.n_headers = 1;
+    req.allow_upgrade = true;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    CHECK_EQ_INT(wtls_http_status(r), 101);
+
+    size_t need = 0;
+    CHECK_EQ_INT(wtls_http_detach(r, NULL, NULL, NULL, 0, &need), WTLS_ERR_ARG);
+    int fd = -1;
+    CHECK_EQ_INT(wtls_http_detach(r, NULL, &fd, NULL, 0, &need), WTLS_OK);
+    CHECK_EQ_INT((int)need, 6);
+    CHECK_EQ_INT(fd, -1); /* size query did not detach yet */
+
+    char small[4];
+    CHECK_EQ_INT(wtls_http_detach(r, NULL, &fd, small, sizeof small, &need), WTLS_ERR_HTTP_LIMIT);
+    CHECK_EQ_INT((int)need, 6);
+    /* Plain http:// without extra_buf refuses to drop unread early bytes. */
+    CHECK_EQ_INT(wtls_http_detach(r, NULL, &fd, NULL, 0, NULL), WTLS_ERR_HTTP_LIMIT);
+
+    wtls_conn *tls_out = (wtls_conn *)1;
+    char extra[16];
+    CHECK_EQ_INT(wtls_http_detach(r, &tls_out, &fd, extra, sizeof extra, &need), WTLS_OK);
+    CHECK(tls_out == NULL && fd >= 0 && need == 6);
+    CHECK_MEM(extra, "EARLY!", 6);
+    wtls_http_close(r);
+
+    CHECK_EQ_INT(wtls_plat_send(fd, (const uint8_t *)"WS", 2), 2);
+    char echo[4] = {0};
+    size_t got = 0;
+    uint64_t deadline = wtls_plat_now_ms() + 3000;
+    while (got < 2 && wtls_plat_now_ms() < deadline) {
+        int k = wtls_plat_recv(fd, (uint8_t *)echo + got, 2 - got);
+        if (k > 0) got += (size_t)k;
+        else if (k == WTLS_WANT_READ) wtls_plat_poll(fd, true, false, 100);
+        else break;
+    }
+    CHECK_EQ_INT((int)got, 2);
+    CHECK_MEM(echo, "WS", 2);
+    wtls_plat_close(fd);
+}
+
+static void http_deflate_length_and_chunked(void) {
+    wtls_http_pool_flush();
+    static const char *const paths[] = {"/gzip?n=30000&enc=deflate", "/gzip?n=30000&enc=deflate&chunked=1"};
+    for (size_t i = 0; i < 2; i++) {
+        wtls_http_response *r = get(paths[i]);
+        if (!r) return;
+        wtls_http_info info;
+        wtls_http_get_info(r, &info);
+        CHECK(!info.gzip && info.deflate);
+        CHECK_EQ_INT((long long)wtls_http_content_length(r), -1);
+        uint8_t *buf = malloc(30001);
+        int last = 1;
+        size_t n = read_all(r, buf, 30001, 4096, &last);
+        CHECK_EQ_INT(last, 0);
+        CHECK_EQ_INT((int)n, 30000);
+        CHECK(is_pattern(buf, n, 0));
+        free(buf);
+        wtls_http_close(r);
+    }
+}
+
+static void http_expect_100_continue(void) {
+    wtls_http_pool_flush();
+    /* 1. Server sends 100 Continue -> body_cb streams and gets 200 echo. */
+    up_state us = {.len = 16384u, .piece = 4096u, .abort_after = -1};
+    wtls_http_request req = {0};
+    req.method = "PUT";
+    req.url = url("/expect-accept");
+    req.body_cb = up_cb;
+    req.body_ctx = &us;
+    req.body_len = us.len;
+    req.expect_100_continue = true;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 32768u, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK_EQ_INT((int)us.off, (int)us.len);
+    CHECK(res.body && res.body_len == us.len && is_pattern((const uint8_t *)res.body, res.body_len, 0));
+    wtls_http_result_free(&res);
+
+    /* 2. Server rejects immediately with 413 -> body_cb is never invoked. */
+    us = (up_state){.len = 65536u, .piece = 4096u, .abort_after = -1};
+    req.url = url("/expect-reject");
+    req.body_ctx = &us;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024u, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 413);
+    CHECK_EQ_INT(us.calls, 0);
+    CHECK(res.body && strcmp(res.body, "toobig") == 0);
+    wtls_http_result_free(&res);
+
+    /* 3. Server never sends 100 -> client waits ~1 s then sends body anyway. */
+    us = (up_state){.len = 1024u, .piece = 512u, .abort_after = -1};
+    req.url = url("/expect-silent");
+    req.body_len = us.len;
+    req.body_ctx = &us;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 4096u, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK_EQ_INT((int)res.body_len, 1024);
+    CHECK(res.body && is_pattern((const uint8_t *)res.body, res.body_len, 0));
+    wtls_http_result_free(&res);
+}
+
+static void http_open_streaming_progress(void) {
+    wtls_http_pool_flush();
+    prog_state ps = {.monotonic = true, .same_total = true};
+    wtls_http_request req = {0};
+    req.url = url("/len?n=30000");
+    req.progress_cb = test_prog_cb;
+    req.progress_ctx = &ps;
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    uint8_t buf[4096];
+    while (wtls_http_read(r, buf, sizeof buf) > 0) {}
+    wtls_http_close(r);
+    CHECK(ps.calls >= 2 && ps.monotonic && ps.same_total);
+    CHECK_EQ_INT((long long)ps.last_done, 30000);
+    CHECK_EQ_INT((long long)ps.last_total, 30000);
+}
+
+static void http_proxy_plain_and_connect(void) {
+    wtls_http_pool_flush();
+    char proxy[128];
+    snprintf(proxy, sizeof proxy, "http://%s:4444", g_env.server_host);
+
+    /* 1. Plain http:// through forward proxy (absolute-form request target). */
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/hello");
+    req.proxy_url = proxy;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK(res.body && strcmp(res.body, "hello") == 0);
+    wtls_http_result_free(&res);
+
+    /* 2. https:// through CONNECT tunnel (verified against target hostname). */
+    req.url = url("/hello");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK(res.body && strcmp(res.body, "hello") == 0);
+    wtls_http_result_free(&res);
+
+    /* 3. Rejected CONNECT (403 from proxy) fails with WTLS_ERR_CONNECT. */
+    req.url = url_of("https", 4440, "/hello");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_CONNECT);
+
+    /* 4. Invalid proxy URL is rejected with WTLS_ERR_ARG. */
+    req.url = url("/hello");
+    req.proxy_url = "https://proxy:4444";
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_ARG);
+}
+
+#if WTLS_HTTP2
+static void http2_get_and_info(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_H2, "/hello");
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    wtls_http_info info;
+    CHECK_EQ_INT(wtls_http_get_info(r, &info), WTLS_OK);
+    CHECK(info.http2);
+    CHECK(info.secure);
+    CHECK(!info.reused_connection);
+    CHECK(info.tls.alpn && strcmp(info.tls.alpn, "h2") == 0);
+    CHECK_EQ_INT(wtls_http_status(r), 200);
+    CHECK_EQ_INT((long long)wtls_http_content_length(r), 5);
+    int last = -1;
+    CHECK(strcmp(body_str(r, &last), "hello") == 0);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+
+    /* Without Content-Length (END_STREAM terminates body) + HEAD + 204 */
+    req.url = url_of("https", P_H2, "/hello?no_cl=1");
+    r = open_req(&req);
+    if (r) {
+        CHECK_EQ_INT((long long)wtls_http_content_length(r), -1);
+        CHECK(strcmp(body_str(r, &last), "hello") == 0);
+        wtls_http_close(r);
+    }
+
+    req.method = "HEAD";
+    req.url = url_of("https", P_H2, "/len?n=42");
+    r = open_req(&req);
+    if (r) {
+        CHECK_EQ_INT(wtls_http_status(r), 200);
+        CHECK_EQ_INT((long long)wtls_http_content_length(r), 42);
+        uint8_t b[8];
+        CHECK_EQ_INT(wtls_http_read(r, b, sizeof b), 0);
+        wtls_http_close(r);
+    }
+
+    req.method = NULL;
+    req.url = url_of("https", P_H2, "/status?code=204");
+    r = open_req(&req);
+    if (r) {
+        CHECK_EQ_INT(wtls_http_status(r), 204);
+        CHECK_EQ_INT((long long)wtls_http_content_length(r), 0);
+        wtls_http_close(r);
+    }
+}
+
+static void http2_reuse_and_goaway(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_H2, "/conn");
+    wtls_http_response *r1 = open_req(&req);
+    if (!r1) return;
+    int last = -1;
+    unsigned c1 = 0, s1 = 0;
+    CHECK_EQ_INT(sscanf(body_str(r1, &last), "%u %u", &c1, &s1), 2);
+    CHECK_EQ_INT((int)s1, 1);
+    wtls_http_close(r1);
+
+    wtls_http_response *r2 = open_req(&req);
+    if (!r2) return;
+    wtls_http_info info;
+    CHECK_EQ_INT(wtls_http_get_info(r2, &info), WTLS_OK);
+    CHECK(info.reused_connection);
+    CHECK(info.http2);
+    unsigned c2 = 0, s2 = 0;
+    CHECK_EQ_INT(sscanf(body_str(r2, &last), "%u %u", &c2, &s2), 2);
+    CHECK_EQ_INT((int)c2, (int)c1);
+    CHECK_EQ_INT((int)s2, 3);
+    wtls_http_close(r2);
+
+    /* no_h2=true must NOT reuse the pooled h2 connection and must negotiate http/1.1 */
+    req.no_h2 = true;
+    wtls_http_response *r3 = open_req(&req);
+    if (r3) {
+        CHECK_EQ_INT(wtls_http_get_info(r3, &info), WTLS_OK);
+        CHECK(!info.reused_connection);
+        CHECK(!info.http2);
+        CHECK(info.tls.alpn && strcmp(info.tls.alpn, "http/1.1") == 0);
+        wtls_http_close(r3);
+    }
+
+    /* /goaway prevents further reuse */
+    wtls_http_pool_flush();
+    req.no_h2 = false;
+    req.url = url_of("https", P_H2, "/goaway");
+    wtls_http_response *rg = open_req(&req);
+    if (rg) {
+        CHECK(strcmp(body_str(rg, &last), "bye") == 0);
+        wtls_http_close(rg);
+    }
+    req.url = url_of("https", P_H2, "/conn");
+    wtls_http_response *rf = open_req(&req);
+    if (rf) {
+        CHECK_EQ_INT(wtls_http_get_info(rf, &info), WTLS_OK);
+        CHECK(!info.reused_connection);
+        wtls_http_close(rf);
+    }
+}
+
+typedef struct {
+    size_t sent;
+    size_t total;
+    bool chunked;
+} h2_up_ctx;
+
+static int h2_up_cb(void *ctx, void *buf, size_t max_len) {
+    h2_up_ctx *u = ctx;
+    if (u->sent >= u->total) return 0;
+    size_t left = u->total - u->sent;
+    size_t n = left < max_len ? left : max_len;
+    if (n > 10000u) n = 10000u;
+    uint8_t *p = buf;
+    for (size_t i = 0; i < n; i++) p[i] = (uint8_t)('A' + ((u->sent + i) % 26));
+    u->sent += n;
+    return (int)n;
+}
+
+static void http2_flow_upload_expect_gzip_cont(void) {
+    wtls_http_pool_flush();
+    /* Big download exercising stream & connection WINDOW_UPDATE */
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_H2, "/len?n=400000");
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 512u * 1024u, &res), WTLS_OK);
+    CHECK_EQ_INT((int)res.body_len, 400000);
+    wtls_http_result_free(&res);
+
+    /* Big streaming upload (200 KiB) forcing server->client WINDOW_UPDATE */
+    h2_up_ctx up = {0, 200u * 1024u, false};
+    memset(&req, 0, sizeof req);
+    req.method = "POST";
+    req.url = url_of("https", P_H2, "/echo");
+    req.body_cb = h2_up_cb;
+    req.body_ctx = &up;
+    req.body_len = up.total;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 256u * 1024u, &res), WTLS_OK);
+    CHECK_EQ_INT((int)res.body_len, (int)up.total);
+    CHECK(res.body[0] == 'A' && res.body[up.total - 1] == (char)('A' + ((up.total - 1) % 26)));
+    wtls_http_result_free(&res);
+
+    /* Streaming unknown-length upload (body_chunked=true without Content-Length) */
+    up = (h2_up_ctx){0, 12345, true};
+    memset(&req, 0, sizeof req);
+    req.method = "PUT";
+    req.url = url_of("https", P_H2, "/echo");
+    req.body_cb = h2_up_cb;
+    req.body_ctx = &up;
+    req.body_chunked = true;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 32768u, &res), WTLS_OK);
+    CHECK_EQ_INT((int)res.body_len, 12345);
+    wtls_http_result_free(&res);
+
+    /* Expect: 100-continue accept and reject */
+    up = (h2_up_ctx){0, 5, false};
+    memset(&req, 0, sizeof req);
+    req.method = "POST";
+    req.url = url_of("https", P_H2, "/echo");
+    req.body = "hello";
+    req.body_len = 5;
+    req.expect_100_continue = true;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024u, &res), WTLS_OK);
+    CHECK(res.body_len == 5 && memcmp(res.body, "hello", 5) == 0);
+    wtls_http_result_free(&res);
+
+    req.url = url_of("https", P_H2, "/expect-reject");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024u, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 417);
+    CHECK(res.body_len == 6 && memcmp(res.body, "reject", 6) == 0);
+    wtls_http_result_free(&res);
+
+    /* CONTINUATION + HPACK dynamic table + Redirect */
+    memset(&req, 0, sizeof req);
+    req.url = url_of("https", P_H2, "/cont");
+    wtls_http_response *rc = open_req(&req);
+    if (rc) {
+        const char *xv = wtls_http_get_header(rc, "x-custom");
+        CHECK(xv && strcmp(xv, "hpack-dyn") == 0);
+        int last = -1;
+        CHECK(strcmp(body_str(rc, &last), "cont") == 0);
+        wtls_http_close(rc);
+    }
+
+    req.url = url_of("https", P_H2, "/redirect?to=/hello");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 1024u, &res), WTLS_OK);
+    CHECK(res.status == 200 && res.body_len == 5 && memcmp(res.body, "hello", 5) == 0);
+    wtls_http_result_free(&res);
+
+#if WTLS_GZIP
+    req.url = url_of("https", P_H2, "/gzip?n=8192&enc=deflate");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 16384u, &res), WTLS_OK);
+    CHECK_EQ_INT((int)res.body_len, 8192);
+    wtls_http_result_free(&res);
+#endif
+}
+#endif
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -1925,6 +2344,9 @@ void wtls_suite_http(void) {
     RUN(http_head_request);
     RUN(http_status_no_body);
     RUN(http_interim_100);
+    RUN(http_upgrade_rejected_without_flag);
+    RUN(http_upgrade_detach_tls_and_early);
+    RUN(http_upgrade_detach_plain_and_errors);
     RUN(http_bighead_ok);
     RUN(http_bighead_limit);
     RUN(http_header_timeout);
@@ -1953,6 +2375,9 @@ void wtls_suite_http(void) {
     RUN(http_abort_read_not_pooled);
     RUN(http_abort_upload);
     RUN(http_fetch_progress);
+    RUN(http_open_streaming_progress);
+    RUN(http_expect_100_continue);
+    RUN(http_proxy_plain_and_connect);
     RUN(http_net_reset_flushes_pool);
     RUN(http_spki_pin_ca_and_mismatch);
     RUN(http_spki_pin_pool_and_redirect);
@@ -1993,6 +2418,7 @@ void wtls_suite_http(void) {
 #if WTLS_GZIP
     RUN(http_gzip_length);
     RUN(http_gzip_chunked);
+    RUN(http_deflate_length_and_chunked);
     RUN(http_gzip_offered);
     RUN(http_gzip_no_gzip_raw);
     RUN(http_gzip_own_accept_encoding_raw);
@@ -2000,6 +2426,11 @@ void wtls_suite_http(void) {
     RUN(http_gzip_bad_crc);
     RUN(http_gzip_truncated);
     RUN(http_gzip_fetch_limit);
+#endif
+#if WTLS_HTTP2
+    RUN(http2_get_and_info);
+    RUN(http2_reuse_and_goaway);
+    RUN(http2_flow_upload_expect_gzip_cont);
 #endif
     wtls_shutdown();
 }

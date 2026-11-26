@@ -17,8 +17,10 @@ static char *build_chunked(const char *method, const char *url, const wtls_http_
         *status = -1000;
         return NULL;
     }
-    *status = wtls_http_build_head(method, &u, h, n, has_body, body_len, chunked, no_keepalive, gzip,
-                                   &out, &len);
+    unsigned flags = (chunked ? WTLS_HTTP_REQ_CHUNKED : 0u) |
+                     (no_keepalive ? WTLS_HTTP_REQ_NO_KEEPALIVE : 0u) |
+                     (gzip ? WTLS_HTTP_REQ_GZIP : 0u);
+    *status = wtls_http_build_head(method, &u, h, n, has_body, body_len, flags, &out, &len);
     if (*status == WTLS_OK) CHECK_EQ_INT(strlen(out), len);
     return out;
 }
@@ -90,7 +92,7 @@ static void test_req_no_keepalive(void) {
 static void test_req_gzip(void) {
     int st;
     char *h = build("GET", "https://h/", NULL, 0, false, 0, false, true, &st);
-    CHECK(h && strstr(h, "Accept-Encoding: gzip\r\n"));
+    CHECK(h && strstr(h, "Accept-Encoding: gzip, deflate\r\n"));
     free(h);
     wtls_http_header hd[] = {{"accept-encoding", "identity"}};
     h = build("GET", "https://h/", hd, 1, false, 0, false, true, &st);
@@ -189,6 +191,30 @@ static void test_req_growth_boundaries(void) {
     free(v);
 }
 
+static void test_req_upgrade(void) {
+    wtls_url u;
+    CHECK_EQ_INT(wtls_url_parse("https://h/ws", &u), WTLS_OK);
+    wtls_http_header hd[] = {{"Upgrade", "websocket"}};
+    char *h = NULL;
+    size_t len = 0;
+    CHECK_EQ_INT(wtls_http_build_head("GET", &u, hd, 1, false, 0,
+                                      WTLS_HTTP_REQ_UPGRADE | WTLS_HTTP_REQ_NO_KEEPALIVE, &h, &len),
+                 WTLS_OK);
+    CHECK(h && strstr(h, "Connection: Upgrade\r\n") && strstr(h, "Upgrade: websocket\r\n") &&
+          !strstr(h, "Connection: close"));
+    free(h);
+
+    wtls_http_header hd2[] = {{"Connection", "keep-alive, Upgrade"}, {"Upgrade", "websocket"}};
+    CHECK_EQ_INT(wtls_http_build_head("GET", &u, hd2, 2, false, 0, WTLS_HTTP_REQ_UPGRADE, &h, &len), WTLS_OK);
+    CHECK(h && strstr(h, "Connection: keep-alive, Upgrade\r\n"));
+    free(h);
+
+    CHECK_EQ_INT(wtls_http_build_head("PUT", &u, NULL, 0, true, 100, WTLS_HTTP_REQ_EXPECT_100, &h, &len),
+                 WTLS_OK);
+    CHECK(h && strstr(h, "Expect: 100-continue\r\n") && strstr(h, "Content-Length: 100\r\n"));
+    free(h);
+}
+
 int main(void) {
     RUN(test_req_get_default);
     RUN(test_req_port_in_host);
@@ -199,5 +225,6 @@ int main(void) {
     RUN(test_req_rejects);
     RUN(test_req_idempotent);
     RUN(test_req_growth_boundaries);
+    RUN(test_req_upgrade);
     return CHECK_DONE();
 }

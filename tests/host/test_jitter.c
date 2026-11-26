@@ -87,6 +87,16 @@ static void test_conditioned_fails_closed(void) {
     CHECK_EQ_INT(wtls_jitter_conditioned(src_constant, NULL, out, sizeof out), WTLS_ERR_ENTROPY);
 }
 
+static void test_collect_ex_stats(void) {
+    uint32_t x = 12345;
+    wtls_jitter_stats st = {0};
+    wtls_jitter_reset_warmup(false);
+    CHECK_EQ_INT(wtls_jitter_collect_ex(src_lcg, &x, buf, 1024, &st), WTLS_OK);
+    CHECK_EQ_INT((int)st.samples, 1024);
+    CHECK(st.max_rct >= 1 && st.max_rct < WTLS_RCT_CUTOFF);
+    CHECK(st.max_apt >= 1 && st.max_apt < WTLS_APT_CUTOFF);
+}
+
 int main(void) {
     wtls_jitter_reset_warmup(false);
     RUN(test_constant_source_fails_rct);
@@ -96,5 +106,6 @@ int main(void) {
     RUN(test_warmup_discards_1024_samples_once);
     RUN(test_conditioned_fills_any_length);
     RUN(test_conditioned_fails_closed);
+    RUN(test_collect_ex_stats);
     return CHECK_DONE();
 }

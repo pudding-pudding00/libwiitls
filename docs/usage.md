@@ -39,6 +39,12 @@ find_package(wiitls 1.0 REQUIRED)
 target_link_libraries(my_app PRIVATE wiitls::wiitls)
 ```
 
+**devkitPro `dkp-pacman` (`PKGBUILD`):** `packaging/dkp-wii/PKGBUILD` (or
+`tools/make_pkg.sh`) builds a `wii-libwiitls` package installing into
+`$DEVKITPRO/portlibs/wii` with `powerpc-eabi-pkg-config wiitls` and
+`find_package(wiitls)` support (with bundled Mbed TLS isolated under
+`include/wiitls-deps` and `lib/wiitls` to avoid conflicts with `wii-mbedtls`).
+
 **On native Windows without MSYS2:** configure Wii builds with Ninja using
 [cmake/wii-win-toolchain.cmake](../cmake/wii-win-toolchain.cmake):
 
@@ -163,10 +169,11 @@ Points that trip people up:
 
 ## 5. HTTP requests
 
-`<wiitls/http.h>` is an HTTP/1.1 client on top of the TLS layer: it builds
-the request, parses the response head, decodes chunked and gzip bodies,
-follows redirects and keeps connections alive for the next request. It needs
-the same start-up (`net_init`, `wtls_init`) and the same single thread.
+`<wiitls/http.h>` is an HTTP/2 (`h2` ALPN) and HTTP/1.1 client on top of the
+TLS layer: it builds requests (HPACK or HTTP/1.1), parses headers, decodes
+chunked, gzip and deflate bodies, follows redirects and pools connections for
+the next request. It needs the same start-up (`net_init`, `wtls_init`) and
+the same single thread.
 
 Streaming, for large bodies or when you want the headers first:
 
@@ -279,11 +286,28 @@ Points that trip people up:
   `Proxy-Authorization` and `Cookie` are dropped for the rest of the chain.
   `https` → `http` is refused (`WTLS_ERR_HTTP_REDIRECT`); `http` → `https` is
   followed. `wtls_http_get_info` has the final URL and the redirect count.
-- **gzip.** Requests offer `Accept-Encoding: gzip` and gzip bodies are
-  decompressed while you read; `wtls_http_content_length` is then -1 (the
-  compressed length says nothing about the decoded size). `req.no_gzip`, or
-  your own `Accept-Encoding` header, turns this off and hands you the bytes as
-  sent. A corrupt gzip body is `WTLS_ERR_HTTP`, a cut one `WTLS_ERR_IO`.
+- **gzip and deflate.** Requests offer `Accept-Encoding: gzip, deflate` and
+  compressed bodies are decompressed while you read (`info.gzip` /
+  `info.deflate`); `wtls_http_content_length` is then -1 (the compressed
+  length says nothing about the decoded size). `req.no_gzip`, or your own
+  `Accept-Encoding` header, turns this off and hands you the bytes as sent. A
+  corrupt compressed body is `WTLS_ERR_HTTP`, a cut one `WTLS_ERR_IO`.
+- **`Expect: 100-continue`.** Set `req.expect_100_continue = true` on uploads
+  (`body_cb` or `body`) to wait up to 1000 ms for `100 Continue` before
+  transmitting the body; if the server immediately rejects with `401`/`413`,
+  the upload is skipped without wasting bandwidth.
+- **HTTP/2 (`h2` ALPN).** Enabled by default (`WTLS_HTTP2=ON`). Over `https://`,
+  the client offers `h2` and `http/1.1` ALPN, handles HPACK (RFC 7541),
+  flow-control `WINDOW_UPDATE`, `SETTINGS`, `PING`, `GOAWAY`, `RST_STREAM`, and
+  reuses pooled HTTP/2 connections sequentially across streams (`info.http2`).
+  Set `req.no_h2 = true` (or `req.allow_upgrade = true`) to force `http/1.1`.
+- **HTTP `101 Switching Protocols` handoff.** Set `req.allow_upgrade = true`
+  (with your `Upgrade` header) and call `wtls_http_detach()` on a `101`
+  response to take over the underlying `wtls_conn *` (`wss://`) or socket fd
+  (`ws://`), preserving any early bytes received with the `101` head.
+- **HTTP proxy.** Set `req.proxy_url = "http://host[:port]"` for `http://`
+  forwarding and `https://` `CONNECT` tunneling (bypasses the keep-alive
+  pool).
 - **`http://`** works too, without TLS: only for servers you trust on a
   network you trust. `wtls_http_get_info` → `secure` tells you which one a
   response came over.
@@ -294,18 +318,22 @@ Points that trip people up:
   `opt.abort_cb` / `opt.abort_ctx` in `wtls_options` (shared via `req.tls` for
   both `https://` and `http://`). Polling sleeps in <= 100 ms slices, so
   pressing **B/HOME** cancels blocked connects, handshakes, header waits, or
-  reads promptly with `WTLS_ERR_CANCELLED`. In `wtls_http_fetch`, set
-  `req.progress_cb` to track `(done, total_or_minus_one)` bytes received.
+  reads promptly with `WTLS_ERR_CANCELLED`. Set `req.progress_cb` to track
+  `(done, total_or_minus_one)` bytes received in both `wtls_http_fetch()` and
+  streaming `wtls_http_open()` / `wtls_http_read()`.
+
+Additional helpers in `<wiitls/http.h>`: `wtls_http_form_encode()`
+(`application/x-www-form-urlencoded`), `wtls_http_multipart_init()` /
+`wtls_http_multipart_read()` (zero-buffer streaming `multipart/form-data`),
+`wtls_http_format_range()` and `wtls_http_check_resume()`.
 
 Limits: URL 8 KiB; request and response head 16 KiB each; 100 response
 header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
 (`WTLS_ERR_HTTP_LIMIT` above that, checked against the decoded size).
 
-Not supported: HTTP/2 and HTTP/3, proxies, cookies (send your own `Cookie`
-header), authentication schemes (send your own `Authorization`), the
-`Expect` header, caching, and `deflate`/`br` encodings. Ranges are not
-negotiated for you: send your own `Range` header and check the `206` answer
-with `wtls_http_parse_content_range`.
+Not supported: HTTP/2 and HTTP/3, cookies (send your own `Cookie` header),
+authentication schemes (send your own `Authorization`), caching, and `br`
+encoding.
 
 ## 6. Faster second connections
 
@@ -319,12 +347,24 @@ you `wtls_read`/`wtls_write` on the connection. Reading the response as above
 is enough. A connection closed right after `wtls_connect` stores nothing. To
 opt out (e.g. for privacy between user accounts), set `opt.no_resumption`.
 
-## 7. Non-blocking I/O for an event loop
+## 7. Non-blocking connect & I/O for an event loop
 
-`wtls_connect` always blocks. After it, `wtls_set_nonblocking(c, true)` makes
-`wtls_read`/`wtls_write` return at once:
+For an event loop or multiple concurrent connections, use
+`wtls_connect_start()` + `wtls_connect_step()` (non-blocking TCP connect + TLS
+handshake), then `wtls_set_nonblocking(c, true)` so `wtls_read`/`wtls_write`
+return at once:
 
 ```c
+wtls_conn *c = NULL;
+wtls_status st = wtls_connect_start(&c, "example.com", 443, &opt);
+while (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) {
+    /* Wait on wtls_get_fd(c) with net_poll() (<= 5 ms slices during TCP
+     * connect on the Wii: IOS net_poll does not wake on connect completion),
+     * or do other work, then advance: */
+    st = wtls_connect_step(c);
+}
+if (st != WTLS_OK) { wtls_close(c); return; }
+
 wtls_set_nonblocking(c, true);
 for (;;) {
     int n = wtls_read(c, buf, sizeof buf);
@@ -354,8 +394,12 @@ wtls_add_trusted_ca(my_ca_pem, my_ca_pem_len);
 ```
 
 It is trusted in addition to the built-in Mozilla roots until
-`wtls_shutdown`. Do **not** use `insecure_skip_verify` for this. That option
-turns off all certificate checks and exists for tests only.
+`wtls_reset_trusted_cas()` or `wtls_shutdown()`. To replace the built-in
+snapshot at runtime (e.g. from a fresh `cacert.pem` on SD card), call
+`wtls_reset_trusted_cas(false)` first and then `wtls_add_trusted_ca()`. To
+omit the ~200 KiB embedded bundle from the binary altogether, build with
+`-DWTLS_EMBED_CA=OFF`. Do **not** use `insecure_skip_verify` for this. That
+option turns off all certificate checks and exists for tests only.
 
 ### Client certificates (mutual TLS)
 
@@ -381,8 +425,9 @@ wtls_client_cred_free(cred);                   /* NULL is safe */
 ```
 
 Both accept DER, or PEM with the terminating NUL byte included in `len`;
-the certificate chain goes leaf-first. Keys: ECDSA (P-256, P-384) and RSA,
-unencrypted (no passwords). The match of key and leaf is checked at load.
+the certificate chain goes leaf-first. Keys: ECDSA (P-256, P-384) and RSA;
+for password-protected PKCS#8 / PEM keys, use `wtls_client_cred_load_ex()`.
+The match of key and leaf is checked at load.
 
 The credential is reference-counted behind the scenes: every connection
 (including idle keep-alive connections of the HTTP client, and pooled ones)
@@ -433,7 +478,7 @@ isolated in both TLS session tickets and the HTTP keep-alive pool.
 | `WTLS_ERR_CLOSED` | clean end of stream | done |
 | `WTLS_ERR_NOMEM` | heap exhausted | close connections, free memory |
 | `WTLS_ERR_INTERNAL` | unexpected library error | report it as a bug |
-| `WTLS_ERR_HTTP` | malformed or unsupported HTTP response, corrupt gzip body | report; the server is broken or not HTTP/1.1 |
+| `WTLS_ERR_HTTP` | malformed or unsupported HTTP response, corrupt gzip/deflate body, or HTTP/2 protocol error | report; the server is broken or sent invalid framing |
 | `WTLS_ERR_HTTP_LIMIT` | response head over 16 KiB / 100 fields, or `wtls_http_fetch` body over its limit | stream with `wtls_http_read`, or raise `max_body` |
 | `WTLS_ERR_HTTP_REDIRECT` | more than `max_redirects`, bad `Location`, or `https` → `http` | report; do not follow the downgrade yourself |
 
@@ -445,9 +490,11 @@ called again afterwards.
 
 ## 11. Limits and security notes
 
-- **Client only.** No server mode. Client certificates for mutual TLS are
-  supported (see 8), password-protected keys are not.
-- **HTTP:** HTTP/1.1 only, limits and non-goals in 5. `http://` has no
+- **Client only.** No server mode. Client certificates for mutual TLS
+  (including password-protected keys via `wtls_client_cred_load_ex()`) are
+  supported (see 8).
+- **HTTP:** HTTP/2 (`h2` ALPN over TLS, sequential single-stream per pooled
+  connection) and HTTP/1.1; limits and non-goals in 5. `http://` has no
   encryption and no authentication of the server.
 - **TLS 1.3 preferred, TLS 1.2 minimum.** Ciphers: ChaCha20-Poly1305 first
   (fast without AES hardware), AES-GCM. Key exchange X25519, P-256, P-384.

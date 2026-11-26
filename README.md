@@ -22,29 +22,40 @@ TF-PSA-Crypto), [zlib](https://zlib.net/), and libogc.
   against the embedded Mozilla CA bundle (118 roots in `.rodata`, parsed
   lazily).
 - **Custom trust, pinning & mutual TLS:**
-  - Add extra trusted CA roots at runtime (`wtls_add_trusted_ca()`).
+  - Add or replace trusted CA roots at runtime (`wtls_add_trusted_ca()`,
+    `wtls_reset_trusted_cas()`), or omit the ~200 KiB embedded bundle with
+    `-DWTLS_EMBED_CA=OFF`.
   - Pin server public keys (up to 2 SHA-256 SPKI pins: primary + backup).
-  - Present client certificates (`wtls_client_cred_load()`, ECDSA or RSA in
+  - Present client certificates (`wtls_client_cred_load()`,
+    `wtls_client_cred_load_ex()` for password-protected keys, ECDSA or RSA in
     PEM/DER) with reference-counted lifetime and identity isolation.
 - **Fast reconnects:** TLS 1.3 session ticket cache (8 entries) and
   multi-IPv4 DNS cache (16 entries, connect fallback across up to 4
   A-records) — a second connection skips DNS and certificate-chain work.
-- **Full HTTP/1.1 client (`<wiitls/http.h>`):**
+- **Full HTTP/2 and HTTP/1.1 client (`<wiitls/http.h>`):**
+  - Automatic HTTP/2 (`h2` ALPN, RFC 9113 + HPACK RFC 7541, sequential stream
+    reuse, bidirectional flow control; opt out via `req.no_h2` or CMake
+    `-DWTLS_HTTP2=OFF`) with seamless fallback to HTTP/1.1.
   - `https://` and `http://`, whole-body `wtls_http_fetch()` or streaming
-    `wtls_http_open()` / `wtls_http_read()` for large files.
-  - Streaming uploads (`wtls_http_body_cb`) with `Content-Length` or
-    `Transfer-Encoding: chunked`.
-  - Built-in gzip decompression (zlib inflate), keep-alive connection pool
-    (4 idle connections, automatic retry of idempotent requests on stale
-    sockets), and redirect handling (strips `Authorization`,
-    `Proxy-Authorization`, `Cookie` and client certs across origins; refuses
-    `https` → `http` downgrades).
-  - URL percent-encoding (`wtls_http_url_encode()`) and `Content-Range`
-    parsing (`wtls_http_parse_content_range()`) for resumable `206`
-    downloads.
-  - Download progress callback (`wtls_http_progress_cb`).
+    `wtls_http_open()` / `wtls_http_read()` for large files, plus
+    `wtls_http_detach()` for `101 Switching Protocols` upgrades (e.g.
+    WebSockets).
+  - Streaming uploads (`wtls_http_body_cb`) with `Content-Length`,
+    `Transfer-Encoding: chunked`, and `Expect: 100-continue`.
+  - Built-in `gzip` and `deflate` decompression (zlib inflate), keep-alive
+    connection pool (4 idle connections, automatic retry of idempotent
+    requests on stale sockets), `http://` proxy & `CONNECT` tunneling, and
+    redirect handling (strips `Authorization`, `Proxy-Authorization`, `Cookie`
+    and client certs across origins; refuses `https` → `http` downgrades).
+  - URL/form encoding (`wtls_http_url_encode()`, `wtls_http_form_encode()`),
+    streaming `multipart/form-data` (`wtls_http_multipart_*`), and `Range` /
+    `Content-Range` helpers (`wtls_http_format_range()`,
+    `wtls_http_parse_content_range()`, `wtls_http_check_resume()`).
+  - Download progress callback (`wtls_http_progress_cb`) in both
+    `wtls_http_fetch()` and `wtls_http_open()`/`wtls_http_read()`.
 - **Built for the Wii:**
-  - Blocking API with per-stage timeouts, plus non-blocking mode
+  - Blocking API with per-stage timeouts, non-blocking connect/handshake
+    (`wtls_connect_start()`, `wtls_connect_step()`), and non-blocking I/O
     (`wtls_set_nonblocking()`) for your own `net_poll()` loop.
   - Cooperative cancellation (`abort_cb`): cancel connects, handshakes,
     downloads, or uploads within ≤ 100 ms (e.g. when the user presses

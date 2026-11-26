@@ -128,6 +128,10 @@ def main():
         make_leaf(o, out, "untrusted", "untrusted-ca", "ec", san)
         make_leaf(o, out, "clientonly", "test-ca", "ec", san, eku="clientAuth")
         make_leaf(o, out, "client-ec", "test-ca", "ec", san, eku="clientAuth")
+        run(o, "pkcs8", "-topk8", "-v2", "aes-256-cbc", "-v2prf", "hmacWithSHA256",
+            "-in", os.path.join(out, "client-ec.key"),
+            "-out", os.path.join(out, "client-ec-enc.key"),
+            "-passout", "pass:wiitls-pw")
         make_leaf(o, out, "client-rsa", "test-ca", "rsa", san, eku="clientAuth")
         make_leaf(o, out, "client-untrusted", "untrusted-ca", "ec", san, eku="clientAuth")
     except subprocess.CalledProcessError as e:
