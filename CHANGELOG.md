@@ -98,4 +98,9 @@ zlib 1.3.1.
     review](docs/security-review.md), [security policy](SECURITY.md), and
     monthly CA bundle / Mbed TLS LTS check workflow.
 
+### Fixed
+
+- HTTP/2: following a redirect no longer leaks the previous response's header
+  buffer.
+
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0

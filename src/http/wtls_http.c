@@ -628,6 +628,11 @@ static int send_body_cb_h2(wtls_http_response *r, request_ctx *x, uint32_t hdr_t
 
 static int exchange_h2(wtls_http_response *r, request_ctx *x, bool *got) {
     wtls_h2_conn *h2 = r->conn->h2;
+    /* An earlier hop (redirect) leaves its head in r->buf; the HPACK decoder
+     * hands out a new arena and would overwrite the pointer. */
+    free(r->buf);
+    r->buf = NULL;
+    memset(&r->head, 0, sizeof r->head); /* its fields pointed into r->buf */
     uint32_t io_timeout = tr_timeout(r->conn);
     uint32_t t = x->req->header_timeout_ms ? x->req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
     int st = wtls_h2_begin_stream(h2);
