@@ -15,7 +15,7 @@ jobs:
   ca-bundle-and-deps:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check Mozilla CA bundle and open PR if updated
         env:
