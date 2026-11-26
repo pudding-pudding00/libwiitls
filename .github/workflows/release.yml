@@ -39,7 +39,7 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
       - name: Build package
         shell: bash
-        run: tools/make_release.sh
+        run: bash tools/make_release.sh
       - name: Checksums
         shell: bash
         run: |
