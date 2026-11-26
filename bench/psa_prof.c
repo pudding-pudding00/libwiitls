@@ -33,7 +33,9 @@ static inline void pp_end(int idx, uint64_t t0) {
     wtls_psa_prof_acc.n[idx]++;
 }
 
-/* WRAP(ret, name, (params), (args)): defines __wrap_name around __real_name. */
+/* WRAP(ret, name, (params), (args)): defines __wrap_name around __real_name.
+ * Apple's ld64 does not support GNU ld's --wrap, so profiling wraps are skipped there. */
+#if !defined(__APPLE__)
 #define WRAP(ret, name, params, args)                                                              \
     ret __real_##name params;                                                                      \
     ret __wrap_##name params;                                                                      \
@@ -105,3 +107,4 @@ WRAP(int, mbedtls_pk_verify_ext,
      (type, ctx, md, h, hl, s, sl))
 WRAP(int, mbedtls_pk_parse_subpubkey, (unsigned char **p, const unsigned char *end, mbedtls_pk_context *pk),
      (p, end, pk))
+#endif

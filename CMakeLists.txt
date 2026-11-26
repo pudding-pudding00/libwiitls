@@ -411,9 +411,11 @@ set(WTLS_BENCH_WRAP
     mbedtls_x509_crt_parse_der mbedtls_x509_crt_verify_with_ca_cb mbedtls_pk_verify_ext
     mbedtls_pk_parse_subpubkey)
 function(wtls_bench_wrap target)
-    foreach(fn ${WTLS_BENCH_WRAP})
-        target_link_options(${target} PRIVATE "LINKER:--wrap=${fn}")
-    endforeach()
+    if(NOT APPLE)
+        foreach(fn ${WTLS_BENCH_WRAP})
+            target_link_options(${target} PRIVATE "LINKER:--wrap=${fn}")
+        endforeach()
+    endif()
     # bench/p256m_probe.c compiles p256-m itself, for a speed comparison.
     target_sources(${target} PRIVATE ${PROJECT_SOURCE_DIR}/bench/p256m_probe.c)
     target_include_directories(${target} PRIVATE
