@@ -15,7 +15,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 ## [1.0.0] - 2026-11-25
 
 Initial public release of **libwiitls** for Nintendo Wii homebrew
-(devkitPPC / libogc), built on Mbed TLS 4.1.1 LTS (TF-PSA-Crypto) and
+(devkitPPC / libogc), built on Mbed TLS 4.1.2 LTS (TF-PSA-Crypto) and
 zlib 1.3.1.
 
 ### Added

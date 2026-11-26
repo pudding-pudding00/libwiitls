@@ -23,7 +23,7 @@ set_property(CACHE WTLS_PLATFORM PROPERTY STRINGS ogc host)
 option(WTLS_BUILD_TESTS "Build libwiitls tests" ${WTLS_BUILD_TESTS_DEFAULT})
 
 # ---------------------------------------------------------------------------
-# Mbed TLS 4.1.1 LTS (release tarball contains all generated files: no Python needed)
+# Mbed TLS 4.1.2 LTS (release tarball contains all generated files: no Python needed)
 # Crypto tuning knobs (measured with bench/, see docs/benchmarks.md). They reach the Mbed TLS /
 # TF-PSA-Crypto configs as WTLS_CFG_* defines, so they apply to every target
 # below, including the fetched Mbed TLS.
@@ -83,8 +83,8 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
     list(APPEND _wtls_mbedtls_extra_args EXCLUDE_FROM_ALL)
 endif()
 FetchContent_Declare(mbedtls
-    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.1/mbedtls-4.1.1.tar.bz2
-    URL_HASH SHA256=3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c
+    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.2/mbedtls-4.1.2.tar.bz2
+    URL_HASH SHA256=392215e5e4846df04e2f4c4516079303bd73edde837d8f3e68fb4d4d7ddf0126
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     ${_wtls_mbedtls_extra_args}
 )
