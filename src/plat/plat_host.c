@@ -76,7 +76,11 @@ uint64_t wtls_plat_now_us(void) {
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#if defined(__APPLE__)
+#include <stdlib.h>
+#else
 #include <sys/random.h>
+#endif
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
@@ -97,6 +101,10 @@ static int sock_err(void) { return errno; }
 #endif
 
 int wtls_plat_os_entropy(uint8_t *out, size_t len) {
+#if defined(__APPLE__)
+    arc4random_buf(out, len);
+    return WTLS_OK;
+#else
     while (len > 0) {
         ssize_t n = getrandom(out, len, 0);
         if (n < 0) {
@@ -107,6 +115,7 @@ int wtls_plat_os_entropy(uint8_t *out, size_t len) {
         len -= (size_t)n;
     }
     return WTLS_OK;
+#endif
 }
 
 int wtls_plat_init(void) { return WTLS_OK; }
@@ -231,6 +240,12 @@ int wtls_plat_connect_abortable(uint32_t ipv4_be, uint16_t port, uint32_t timeou
     if (abort_cb && abort_cb(abort_ctx)) return WTLS_ERR_CANCELLED;
     sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == SOCK_INVALID) return WTLS_ERR_CONNECT;
+#if defined(SO_NOSIGPIPE)
+    {
+        int on = 1;
+        (void)setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+    }
+#endif
     if (set_nonblocking(s) != 0) {
         sock_close(s);
         return WTLS_ERR_CONNECT;

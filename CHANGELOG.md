@@ -75,5 +75,5 @@ zlib 1.3.1.
     review](docs/security-review.md), [security policy](SECURITY.md), and
     monthly CA bundle / Mbed TLS LTS check workflow.
 
-[Unreleased]: https://github.com/pudding-pudding00/wii_tls/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/pudding-pudding00/wii_tls/releases/tag/v1.0.0
+[Unreleased]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0

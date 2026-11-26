@@ -11,7 +11,7 @@
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 Report them privately via
-[GitHub Security Advisories](https://github.com/pudding-pudding00/wii_tls/security/advisories/new)
+[GitHub Security Advisories](https://github.com/pudding-pudding00/libwiitls/security/advisories/new)
 ("Report a vulnerability" in the repository's **Security** tab).
 
 Please include:

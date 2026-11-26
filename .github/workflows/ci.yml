@@ -134,3 +134,15 @@ jobs:
           cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build-win
           ctest --test-dir build-win --output-on-failure
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install ninja
+      - name: Build and test (macOS)
+        run: |
+          cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-macos
+          ctest --test-dir build-macos --output-on-failure

@@ -1,7 +1,7 @@
 # libwiitls
 
-[![CI](https://github.com/pudding-pudding00/wii_tls/actions/workflows/ci.yml/badge.svg)](https://github.com/pudding-pudding00/wii_tls/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/pudding-pudding00/wii_tls)](https://github.com/pudding-pudding00/wii_tls/releases/latest)
+[![CI](https://github.com/pudding-pudding00/libwiitls/actions/workflows/ci.yml/badge.svg)](https://github.com/pudding-pudding00/libwiitls/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/pudding-pudding00/libwiitls)](https://github.com/pudding-pudding00/libwiitls/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Modern TLS 1.3 and HTTPS for Nintendo Wii homebrew.** A small C library for
@@ -66,7 +66,7 @@ TF-PSA-Crypto), [zlib](https://zlib.net/), and libogc.
 ## Quick start
 
 Download `libwiitls-<version>-wii.zip` from the
-[releases page](https://github.com/pudding-pudding00/wii_tls/releases/latest),
+[releases page](https://github.com/pudding-pudding00/libwiitls/releases/latest),
 unpack it, and add it to your devkitPro Makefile:
 
 ```make
@@ -176,17 +176,22 @@ target_link_libraries(my_app PRIVATE wiitls::wiitls)
 
 ## Building from source
 
-Requirements: CMake ≥ 3.20 and a network connection on the first configure
-(Mbed TLS and zlib are fetched with `FetchContent`, hash-checked).
+Requirements: CMake ≥ 3.20, Ninja (recommended), and a network connection on
+the first configure (Mbed TLS and zlib are fetched with `FetchContent`,
+hash-checked).
 
-**Wii** (devkitPro with devkitPPC and libogc):
+### Wii (Linux, macOS, Windows)
+
+Requires [devkitPro](https://devkitpro.org/) with `devkitPPC` and `libogc`.
+
+**Linux / macOS / Windows (MSYS2 devkitPro shell):**
 
 ```bash
-cmake -S . -B build-wii -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Wii.cmake
-cmake --build build-wii -j
+cmake -S . -B build-wii -G Ninja -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Wii.cmake"
+cmake --build build-wii
 ```
 
-On Windows without an MSYS2 shell, use Ninja and the bundled toolchain file:
+**Windows (PowerShell / cmd, without MSYS2 shell):**
 
 ```powershell
 cmake -S . -B build-wii-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/wii-win-toolchain.cmake
@@ -199,8 +204,10 @@ This builds `libwiitls.a`, the examples, the hardware test runner
 `-DWTLS_BUILD_BENCH=OFF` to skip them). `tools/make_release.sh` builds the
 release package into `dist/` and checks that it links.
 
-**Host** (Linux, macOS or Windows with gcc/clang; for development and the
-test suite; needs Python 3 and `openssl`):
+### Host (Linux, macOS, Windows)
+
+For development and running the test suite on your PC (needs Python 3,
+`openssl`, and GCC or Clang; on Windows use MSYS2 UCRT64 or MinGW-w64):
 
 ```bash
 cmake -S . -B build-host -G Ninja
