@@ -218,7 +218,7 @@ ctest --test-dir build-host --output-on-failure
 **On a Wii** (PC and Wii on the same network, Homebrew Channel open):
 
 ```bash
-python tools/hwtest.py --wii 192.168.1.50 --dol build-wii/tests/hw/wtls_hwtest.dol --suite all
+python tools/hwtest.py --wii <wii-ip> --dol build-wii/tests/hw/wtls_hwtest.dol --suite all
 ```
 
 Suites: `plat`, `crypto`, `time`, `tls`, `http`, `soak` (against a test
