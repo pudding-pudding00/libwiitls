@@ -46,7 +46,7 @@ jobs:
           cd dist
           sha256sum "libwiitls-${{ steps.ver.outputs.version }}-wii.zip" > SHA256SUMS
           cat SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libwiitls-${{ steps.ver.outputs.version }}-wii
           path: |
