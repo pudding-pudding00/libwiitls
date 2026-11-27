@@ -103,8 +103,8 @@ endif()
 option(WTLS_GZIP "gzip Content-Encoding in the HTTP client (zlib inflate, built in)" ON)
 if(WTLS_GZIP)
     FetchContent_Declare(zlib
-        URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
-        URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+        URL https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz
+        URL_HASH SHA256=02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         SOURCE_SUBDIR _wtls_no_cmake # sources only: zlib's own CMakeLists is not used
     )

@@ -4,6 +4,14 @@ All notable changes to libwiitls are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
+## [Unreleased]
+
+### Changed
+
+- Bundled zlib updated from 1.3.1 to 1.4, which includes upstream security and
+  bug fixes (see the
+  [zlib 1.4 release notes](https://github.com/madler/zlib/releases/tag/v1.4)).
+
 ## [1.0.0] - 2026-11-27
 
 Initial public release of **libwiitls** for Nintendo Wii homebrew
