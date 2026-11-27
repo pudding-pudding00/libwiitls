@@ -38,6 +38,7 @@ else()
     set(_wtls_keylog_default OFF)
 endif()
 option(WTLS_KEYLOG "TLS key log export (wtls_set_keylog_cb); debugging only, OFF in release builds" ${_wtls_keylog_default})
+option(WTLS_DOLPHIN_DEV_ENTROPY "Debugging only, never in release packages: let wtls_init() run in Dolphin, whose jitter has no entropy (predictable keys; docs/dolphin.md)" OFF)
 option(WTLS_WEBSOCKET "WebSocket client (<wiitls/websocket.h>); OFF keeps the symbols but they return WTLS_ERR_UNSUPPORTED" ON)
 option(WTLS_THREAD_CHECK "Debug single-thread affinity checks (always ON in Debug builds)" OFF)
 option(WTLS_BUILD_FUZZ "Build Clang libFuzzer harnesses in tests/fuzz" OFF)
@@ -431,7 +432,8 @@ add_library(wiitls STATIC
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
-target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}> WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}> WTLS_WEBSOCKET=$<BOOL:${WTLS_WEBSOCKET}>)
+target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}> WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}> WTLS_WEBSOCKET=$<BOOL:${WTLS_WEBSOCKET}>
+                                          WTLS_DOLPHIN_DEV_ENTROPY=$<BOOL:${WTLS_DOLPHIN_DEV_ENTROPY}>)
 if(WTLS_ACCEL)
     # Called from Everest's mbedtls_x25519_scalarmult (patched above); the
     # tfpsacrypto -> wiitls link edge below resolves it.
@@ -611,6 +613,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_sig tests/common/sig_tests.c)
     wtls_host_test(test_jitter)
     wtls_host_test(test_init_step)
+    target_compile_definitions(test_init_step PRIVATE WTLS_DOLPHIN_DEV_ENTROPY=$<BOOL:${WTLS_DOLPHIN_DEV_ENTROPY}>)
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
     wtls_host_test(test_castore)
@@ -744,6 +747,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         if(NOT WTLS_KEYLOG)
             add_test(NAME keylog_not_in_release
                      COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_log> -DPATTERN=keylog_export
+                             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
+        endif()
+        # Release builds must refuse Dolphin's entropy-free jitter.
+        if(NOT WTLS_DOLPHIN_DEV_ENTROPY)
+            add_test(NAME dolphin_dev_entropy_not_in_release
+                     COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:wiitls> -DPATTERN=dolphin_dev_entropy
                              -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
         endif()
         # An application without client certificates must not link the

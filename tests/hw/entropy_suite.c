@@ -19,14 +19,30 @@ static uint32_t sample_cb(void *ctx) {
     return wtls_plat_jitter_sample();
 }
 
+/* Dolphin's jitter has no entropy: the library refuses it unless built with
+ * the debugging option WTLS_DOLPHIN_DEV_ENTROPY (docs/dolphin.md). */
+static bool refused(void) { return wtls_plat_is_dolphin() && !WTLS_DOLPHIN_DEV_ENTROPY; }
+
 static void hw_psa_init_with_jitter(void) {
     TLOG("    emulator: %s\n", wtls_plat_is_dolphin() ? "yes (Dolphin)" : "no");
+    if (refused()) {
+        CHECK_EQ_INT(psa_crypto_init(), PSA_ERROR_INSUFFICIENT_ENTROPY);
+        CHECK_EQ_INT(wtls_init(), WTLS_ERR_ENTROPY);
+        CHECK_EQ_INT(wtls_init_start(), WTLS_WANT_READ);
+        CHECK_EQ_INT(wtls_init_step(5), WTLS_ERR_ENTROPY);
+        TLOG("    jitter source refused in the emulator (fail closed)\n");
+        return;
+    }
     u64 t0 = gettime();
     CHECK_EQ_INT(psa_crypto_init(), PSA_SUCCESS);
     TLOG("    psa_crypto_init took %u ms\n", (unsigned)ticks_to_millisecs(gettime() - t0));
 }
 
 static void hw_random_differs(void) {
+    if (refused()) {
+        SKIP("no RNG in the emulator");
+        return;
+    }
     uint8_t a[32], b[32];
     CHECK_EQ_INT(psa_generate_random(a, sizeof a), PSA_SUCCESS);
     CHECK_EQ_INT(psa_generate_random(b, sizeof b), PSA_SUCCESS);
@@ -50,6 +66,10 @@ static void hw_jitter_64k_passes_health_tests(void) {
 /* WP17: wtls_init_start()/wtls_init_step() against wtls_init(). Warm-up is
  * already done (first test), so both measure the same work. */
 static void hw_init_step_timing(void) {
+    if (refused()) {
+        SKIP("no RNG in the emulator");
+        return;
+    }
     mbedtls_psa_crypto_free(); /* PSA state of hw_psa_init_with_jitter */
     u64 t0 = gettime();
     CHECK_EQ_INT(wtls_init(), WTLS_OK);

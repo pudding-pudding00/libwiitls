@@ -34,6 +34,11 @@ int      wtls_plat_init(void);                                         /* OK | E
 /* Host-only test hook (defined in plat_host.c): true makes wtls_plat_init()
  * report WTLS_ERR_NET, as on a Wii before net_init(). */
 extern bool wtls_plat_test_net_down;
+/* True when the timing jitter comes from an emulator, where it carries no
+ * entropy (Wii: Dolphin detected; host: the test hook below). */
+bool     wtls_plat_entropy_emulated(void);
+/* Host-only test hook (plat_host.c): makes wtls_plat_entropy_emulated() true. */
+extern bool wtls_plat_test_emulated;
 int      wtls_plat_resolve(const char *host, uint32_t *ipv4_be);       /* OK | ERR_DNS */
 int      wtls_plat_resolve_all(const char *host, uint32_t *addrs,
                                size_t cap, size_t *count);             /* OK | ERR_DNS */

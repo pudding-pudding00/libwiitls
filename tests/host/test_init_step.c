@@ -132,6 +132,25 @@ static void init_step_fails_closed(void) {
     wtls_shutdown();
 }
 
+/* WP6: Dolphin's timing is deterministic (the IPC round trip alternates
+ * between two timebase deltas: ~0 bits/sample, docs/dolphin.md) yet passes
+ * RCT/APT. In an emulator both init paths therefore fail closed. */
+static void entropy_refused_in_emulator(void) {
+#if WTLS_DOLPHIN_DEV_ENTROPY
+    SKIP("WTLS_DOLPHIN_DEV_ENTROPY lets it run");
+    return;
+#endif
+    arm(src_lcg);
+    wtls_plat_test_emulated = true;
+    CHECK_EQ_INT(wtls_init(), WTLS_ERR_ENTROPY);
+    CHECK_EQ_INT(wtls_init_start(), WTLS_WANT_READ);
+    CHECK_EQ_INT(wtls_init_step(1000), WTLS_ERR_ENTROPY);
+    CHECK_EQ_INT(wtls_entropy_test_delivered, 0);
+    wtls_plat_test_emulated = false;
+    CHECK_EQ_INT(wtls_init(), WTLS_OK);
+    wtls_shutdown();
+}
+
 int main(void) {
     RUN(init_classic_unchanged);
     RUN(init_step_same_entropy_credit);
@@ -139,6 +158,7 @@ int main(void) {
     RUN(init_step_before_net_init);
     RUN(init_step_needs_start);
     RUN(init_step_fails_closed);
+    RUN(entropy_refused_in_emulator);
     wtls_entropy_set_test_sampler(NULL, NULL);
     return CHECK_DONE();
 }

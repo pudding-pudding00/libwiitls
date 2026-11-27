@@ -36,6 +36,9 @@ int wtls_plat_os_entropy(uint8_t *out, size_t len) {
 }
 
 bool wtls_plat_test_net_down;
+bool wtls_plat_test_emulated;
+
+bool wtls_plat_entropy_emulated(void) { return wtls_plat_test_emulated; }
 
 int wtls_plat_init(void) {
     static bool done;
@@ -156,6 +159,9 @@ int wtls_plat_os_entropy(uint8_t *out, size_t len) {
 }
 
 bool wtls_plat_test_net_down;
+bool wtls_plat_test_emulated;
+
+bool wtls_plat_entropy_emulated(void) { return wtls_plat_test_emulated; }
 
 int wtls_plat_init(void) { return wtls_plat_test_net_down ? WTLS_ERR_NET : WTLS_OK; }
 

@@ -11,8 +11,36 @@
 
 #include "plat/plat.h"
 #include "wtls_internal.h"
+#include "wtls_log.h"
 
 size_t wtls_entropy_test_delivered;
+
+/* In Dolphin an IPC round trip alternates between two timebase deltas: the
+ * samples pass RCT/APT but carry ~0 bits (docs/dolphin.md), so the jitter
+ * source is refused there. WTLS_DOLPHIN_DEV_ENTROPY (debugging only, never in
+ * release packages) lets it run anyway, with a warning: keys are predictable. */
+#if WTLS_DOLPHIN_DEV_ENTROPY
+/* Extern on purpose: the dolphin_dev_entropy_not_in_release link test looks
+ * for this symbol. */
+void wtls_dolphin_dev_entropy_warn(void);
+void wtls_dolphin_dev_entropy_warn(void) {
+    static bool warned;
+    if (warned) return;
+    warned = true;
+    wtls_log(WTLS_LOG_WARN, WTLS_LOG_CAT_PLATFORM,
+             "WTLS_DOLPHIN_DEV_ENTROPY: emulator detected, its jitter carries NO entropy - keys are predictable");
+}
+#endif
+
+static bool jitter_refused(void) {
+    if (!wtls_plat_entropy_emulated()) return false;
+#if WTLS_DOLPHIN_DEV_ENTROPY
+    wtls_dolphin_dev_entropy_warn();
+    return false;
+#else
+    return true;
+#endif
+}
 
 #if defined(WTLS_PLATFORM_HOST)
 static wtls_sample_fn s_sampler;
@@ -80,6 +108,10 @@ void wtls_entropy_pool_clear(void) {
 
 int wtls_entropy_pool_fill(uint32_t budget_ms) {
     if (!s_sampler) return WTLS_OK; /* host OS entropy: nothing to collect ahead */
+    if (jitter_refused()) {
+        wtls_entropy_pool_clear();
+        return WTLS_ERR_ENTROPY;
+    }
     uint64_t deadline = wtls_plat_now_ms() + budget_ms;
     while (s_pool_len < sizeof s_pool) {
         int r = wtls_jitter_block_step(&s_blk, s_sampler, s_sampler_ctx, WTLS_ENTROPY_SLICE_SAMPLES,
@@ -103,6 +135,9 @@ int mbedtls_platform_get_entropy(psa_driver_get_entropy_flags_t flags,
     if (!s_sampler) {
         if (wtls_plat_os_entropy(output, output_size) != WTLS_OK)
             return PSA_ERROR_INSUFFICIENT_ENTROPY;
+    } else if (jitter_refused()) {
+        wtls_entropy_pool_clear();
+        return PSA_ERROR_INSUFFICIENT_ENTROPY;
     } else {
         size_t take = output_size < s_pool_len ? output_size : s_pool_len;
         memcpy(output, s_pool + s_pool_len - take, take);

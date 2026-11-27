@@ -375,6 +375,8 @@ bool wtls_plat_is_dolphin(void) {
     return s_state == 1;
 }
 
+bool wtls_plat_entropy_emulated(void) { return wtls_plat_is_dolphin(); }
+
 void wtls_plat_entropy_aux(uint32_t aux[4]) {
     u64 tb = gettime();
     aux[0] = (uint32_t)(tb >> 32);

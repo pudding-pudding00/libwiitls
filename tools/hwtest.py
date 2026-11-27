@@ -49,8 +49,9 @@ def find_wiiload():
 
 
 def start_dolphin(dolphin, dol, runner_args, config, work):
-    """Boots dol in Dolphin with runner_args as homebrew arguments: Dolphin
-    reads them from a meta.xml next to the DOL, as the Homebrew Channel does."""
+    """Boots dol in Dolphin. The meta.xml carries runner_args as the Homebrew
+    Channel would; Dolphin builds that ignore it boot without arguments, and
+    the runner then fetches them over the log connection (see main())."""
     app = os.path.join(work, "wtls_hwtest")
     os.makedirs(app)
     shutil.copy(dol, os.path.join(app, "boot.dol"))
@@ -112,6 +113,10 @@ def main():
 
         conn, _ = ls.accept()
         conn.settimeout(args.timeout)
+        if emu:
+            # Dolphin boots the DOL without arguments: the runner then connects to
+            # 127.0.0.1:4405 and reads them from this first line (tests/hw/main.c).
+            conn.sendall(("ARGS " + " ".join(runner_args) + "\n").encode())
         deadline = time.time() + args.timeout
         log = b""
         result = None
