@@ -482,6 +482,30 @@ isolated in both TLS session tickets and the HTTP keep-alive pool.
 | `WTLS_ERR_HTTP_LIMIT` | response head over 16 KiB / 100 fields, or `wtls_http_fetch` body over its limit | stream with `wtls_http_read`, or raise `max_body` |
 | `WTLS_ERR_HTTP_REDIRECT` | more than `max_redirects`, bad `Location`, or `https` → `http` | report; do not follow the downgrade yourself |
 
+## 9a. Logging and key log
+
+Install a callback to see what the library does (handshakes, certificate
+failures, redirects, connection reuse, network resets):
+
+```c
+static void on_log(void *ctx, wtls_log_level level, uint32_t category, const char *msg) {
+    printf("[%d/%02x] %s\n", level, (unsigned)category, msg);
+}
+wtls_set_log_cb(on_log, NULL, WTLS_LOG_INFO, WTLS_LOG_CAT_ALL);
+```
+
+The callback runs on the thread that called the library function, and may be
+installed before `wtls_init()`. Messages above the level or outside the
+category mask are dropped before formatting. Request and response bodies,
+header values, query strings and key material are never logged; request log
+lines show only the method, host and port.
+
+`wtls_set_keylog_cb()` delivers TLS secrets in the NSS `SSLKEYLOGFILE` format
+(for Wireshark). It exists only when the library is built with
+`-DWTLS_KEYLOG=ON`, the default for `Debug` builds; in release builds it
+returns `WTLS_ERR_UNSUPPORTED` and the export code is not linked in. Never
+ship an application that writes these lines anywhere.
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets

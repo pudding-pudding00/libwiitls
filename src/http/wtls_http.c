@@ -27,6 +27,7 @@
 #include "plat/plat.h"
 #include "wtls_cred.h"
 #include "wtls_dns.h"
+#include "wtls_log.h"
 #include "wtls_internal.h"
 
 #define HEAD_BUF_START 2048u
@@ -827,8 +828,14 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     r->extra_off = r->extra_end = 0;
 
     bool got = false;
+    WTLS_LOG(WTLS_LOG_DEBUG, WTLS_LOG_CAT_HTTP, "%s %s://%s:%u", x->method, u->secure ? "https" : "http",
+             u->host, (unsigned)u->port);
     st = acquire(r, x);
-    if (st == WTLS_OK) st = exchange(r, x, &got);
+    if (st == WTLS_OK) {
+        WTLS_LOG(WTLS_LOG_DEBUG, WTLS_LOG_CAT_HTTP, "%s:%u: %s connection", u->host, (unsigned)u->port,
+                 r->reused ? "pooled" : "new");
+        st = exchange(r, x, &got);
+    }
     /* The server closed a reused connection as the request went out: one
      * second attempt on a new connection, for idempotent methods only, and
      * with a streaming body only if the callback was never called (the
@@ -889,6 +896,8 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
         return WTLS_ERR_HTTP_REDIRECT; /* bad Location, or https -> http */
     }
 
+    WTLS_LOG(WTLS_LOG_INFO, WTLS_LOG_CAT_HTTP, "redirect %d to %s://%s:%u", r->redirects + 1,
+             nu.secure ? "https" : "http", nu.host, (unsigned)nu.port);
     if (!*filtered && !wtls_url_same_origin(u, &nu)) {
         /* The next hop leaves the origin: strip credentials, both the
          * header credentials and the client certificate, which must never

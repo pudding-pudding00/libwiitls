@@ -11,6 +11,11 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 - Status codes `WTLS_ERR_UNSUPPORTED` (-14), `WTLS_ERR_WS` (-53),
   `WTLS_ERR_FILE` (-60) and `WTLS_ERR_INTEGRITY` (-61), used by the 1.1
   features; `wtls_strerror()` describes them.
+- Logging: `wtls_set_log_cb()` with levels and categories (platform, handshake,
+  certificate, HTTP).
+- `wtls_set_keylog_cb()`: TLS key log in the NSS `SSLKEYLOGFILE` format, built
+  only with the new `WTLS_KEYLOG` CMake option (default `ON` for Debug builds,
+  `OFF` otherwise; release builds return `WTLS_ERR_UNSUPPORTED`).
 - `test_abi`: compile-time guard that the 1.0 layout of `wtls_options`,
   `wtls_http_request` and `wtls_http_info` stays unchanged.
 

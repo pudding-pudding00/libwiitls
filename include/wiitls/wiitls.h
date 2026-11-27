@@ -329,6 +329,50 @@ uint32_t    wtls_last_verify_flags(void);
 /** Sends close_notify (best effort) and frees the connection; NULL is allowed. */
 void        wtls_close(wtls_conn *c);
 
+/** Log levels, most important first. */
+typedef enum {
+    WTLS_LOG_ERROR = 1,
+    WTLS_LOG_WARN  = 2,
+    WTLS_LOG_INFO  = 3,
+    WTLS_LOG_DEBUG = 4,
+} wtls_log_level;
+
+/** Log categories (bit mask). */
+#define WTLS_LOG_CAT_PLATFORM  (1u << 0) /**< network reset, DNS, TCP connect, IOS sockets */
+#define WTLS_LOG_CAT_HANDSHAKE (1u << 1) /**< TLS handshake progress and failures */
+#define WTLS_LOG_CAT_CERT      (1u << 2) /**< certificate verification and pinning */
+#define WTLS_LOG_CAT_HTTP      (1u << 3) /**< requests, redirects, connection reuse */
+#define WTLS_LOG_CAT_ALL       0xFFFFFFFFu
+
+/**
+ * Log callback. @p msg is one line without a trailing newline, valid only
+ * during the call. It is invoked from the thread that called the library
+ * function (see "Threading"), so it needs no locking of its own.
+ */
+typedef void (*wtls_log_cb)(void *ctx, wtls_log_level level, uint32_t category, const char *msg);
+
+/**
+ * Installs (or, with @p cb = NULL, removes) the log callback. May be called
+ * before wtls_init(). Messages above @p max_level or outside @p categories are
+ * dropped before they are formatted. The library never logs request or
+ * response bodies, header values, or key material.
+ */
+void wtls_set_log_cb(wtls_log_cb cb, void *ctx, wtls_log_level max_level, uint32_t categories);
+
+/** One line of an NSS key log ("LABEL client_random secret", no newline). */
+typedef void (*wtls_keylog_cb)(void *ctx, const char *line);
+
+/**
+ * Installs (or, with @p cb = NULL, removes) a TLS key log callback in the NSS
+ * SSLKEYLOGFILE format, for decrypting captures in Wireshark. Affects
+ * connections opened afterwards. DEBUGGING ONLY: the lines contain traffic
+ * secrets.
+ *
+ * @return WTLS_OK, or WTLS_ERR_UNSUPPORTED when the library was built without
+ *         WTLS_KEYLOG (the default for release builds).
+ */
+wtls_status wtls_set_keylog_cb(wtls_keylog_cb cb, void *ctx);
+
 /** Human-readable text for a ::wtls_status value (never NULL). */
 const char *wtls_strerror(int status);
 

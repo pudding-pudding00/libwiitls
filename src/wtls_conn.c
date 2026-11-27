@@ -7,6 +7,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/platform.h>
 #include <mbedtls/x509.h>
+#include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
 
 #include "plat/plat.h"
@@ -15,6 +16,7 @@
 #include "wtls_dns.h"
 #include "wtls_scache.h"
 #include "wtls_internal.h"
+#include "wtls_log.h"
 #include "wtls_prof.h"
 #include "wtls_time.h"
 
@@ -312,6 +314,9 @@ static int step_tls_handshake(wtls_conn *c) {
     if (r == 0) {
         c->handshake_ms = (uint32_t)(wtls_plat_now_ms() - c->handshake_t0_ms);
         c->stage = WTLS_CONN_READY;
+        WTLS_LOG(WTLS_LOG_INFO, WTLS_LOG_CAT_HANDSHAKE, "%s: %s %s, %u ms", c->host,
+                 mbedtls_ssl_get_version(&c->ssl), mbedtls_ssl_get_ciphersuite(&c->ssl),
+                 (unsigned)c->handshake_ms);
         return WTLS_OK;
     }
     if (r == MBEDTLS_ERR_SSL_WANT_READ) return WTLS_WANT_READ;
@@ -319,8 +324,19 @@ static int step_tls_handshake(wtls_conn *c) {
     c->stage = WTLS_CONN_FAILED;
     if (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED || cert_rejected(c)) {
         s_last_verify_flags = mbedtls_ssl_get_verify_result(&c->ssl);
+        if (wtls_log_enabled(WTLS_LOG_ERROR, WTLS_LOG_CAT_CERT)) {
+            char info[192];
+            int n = mbedtls_x509_crt_verify_info(info, sizeof info, "", s_last_verify_flags);
+            if (n > 0 && info[n - 1] == '\n') info[n - 1] = '\0';
+            for (char *q = info; *q; q++)
+                if (*q == '\n') *q = ';';
+            wtls_log(WTLS_LOG_ERROR, WTLS_LOG_CAT_CERT, "%s: certificate rejected (flags 0x%x): %s",
+                     c->host, (unsigned)s_last_verify_flags, n > 0 ? info : "no details");
+        }
         return WTLS_ERR_CERT;
     }
+    WTLS_LOG(WTLS_LOG_ERROR, WTLS_LOG_CAT_HANDSHAKE, "%s: handshake failed (mbedtls -0x%04x)", c->host,
+             (unsigned)-r);
     return map_mbedtls(c, r);
 }
 
@@ -401,6 +417,9 @@ static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t por
     if ((c->ip_literal || c->n_spki_pins > 0) && !opt->insecure_skip_verify)
         mbedtls_ssl_set_verify(&c->ssl, verify_cert_cb, c);
     mbedtls_ssl_set_bio(&c->ssl, c, bio_send, bio_recv, NULL);
+    wtls_keylog_attach(&c->ssl);
+    WTLS_LOG(WTLS_LOG_DEBUG, WTLS_LOG_CAT_PLATFORM, "connect %s:%u%s", c->host, (unsigned)c->port,
+             c->dns_from_cache ? " (DNS cached)" : "");
     wtls_prof_last.setup_us = wtls_plat_now_us() - setup0;
     *out = c;
     return WTLS_OK;

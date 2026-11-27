@@ -32,6 +32,12 @@ option(WTLS_P256M "p256-m driver for P-256 (fails to build with 4.1.1 + PK)" OFF
 option(WTLS_EVEREST "X25519 via Everest/HACL* (MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED)" ON)
 option(WTLS_ACCEL "X25519 with 32-bit limbs (src/accel), hooked into Everest" ON)
 option(WTLS_ACCEL_P256 "P-256 verify with 32-bit limbs (src/accel), hooked into the builtin driver" ON)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_wtls_keylog_default ON)
+else()
+    set(_wtls_keylog_default OFF)
+endif()
+option(WTLS_KEYLOG "TLS key log export (wtls_set_keylog_cb); debugging only, OFF in release builds" ${_wtls_keylog_default})
 option(WTLS_THREAD_CHECK "Debug single-thread affinity checks (always ON in Debug builds)" OFF)
 option(WTLS_BUILD_FUZZ "Build Clang libFuzzer harnesses in tests/fuzz" OFF)
 option(WTLS_BUILD_CURL_SHIM "Build optional libcurl-lite compatibility shim (wiitls_curl)" OFF)
@@ -331,6 +337,8 @@ add_library(wiitls STATIC
     src/wtls_conn.c
     src/wtls_scache.c
     src/wtls_dns.c
+    src/wtls_log.c
+    src/wtls_keylog.c
     src/http/wtls_url.c
     src/http/wtls_http_req.c
     src/http/wtls_http_parse.c
@@ -342,7 +350,7 @@ add_library(wiitls STATIC
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
-target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}>)
+target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}> WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}>)
 if(WTLS_ACCEL)
     # Called from Everest's mbedtls_x25519_scalarmult (patched above); the
     # tfpsacrypto -> wiitls link edge below resolves it.
@@ -543,6 +551,10 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_server_test(test_tls tests/common/tls_tests.c)
     add_dependencies(test_tls wtls_test_certs)
     set_tests_properties(test_tls PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    wtls_host_server_test(test_log tests/common/log_tests.c)
+    add_dependencies(test_log wtls_test_certs)
+    target_compile_definitions(test_log PRIVATE WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}>)
+    set_tests_properties(test_log PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
     wtls_host_server_test(test_http tests/common/http_tests.c)
     add_dependencies(test_http wtls_test_certs)
     if(WTLS_GZIP)
@@ -562,6 +574,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         add_test(NAME http_not_linked_into_tls_only
                  COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_tls> -DPATTERN=wtls_http_
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
+        # Release builds must contain no key log export code.
+        if(NOT WTLS_KEYLOG)
+            add_test(NAME keylog_not_in_release
+                     COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DFILE=$<TARGET_FILE:test_log> -DPATTERN=keylog_export
+                             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_symbol.cmake)
+        endif()
         # An application without client certificates must not link the
         # credential parsing (mbedtls_pk_parse_key and friends).
         add_test(NAME cred_parse_not_linked_without_mtls

@@ -46,6 +46,7 @@ const char *wtls_strerror(int status) {
 #include "wtls_castore.h"
 #include "wtls_cred.h"
 #include "wtls_dns.h"
+#include "wtls_log.h"
 #include "wtls_scache.h"
 #include "wtls_time.h"
 
@@ -113,6 +114,7 @@ void wtls_net_reset(void) {
         hook();
     }
     wtls_dns_clear();
+    WTLS_LOG(WTLS_LOG_INFO, WTLS_LOG_CAT_PLATFORM, "network reset: DNS cache and idle connections dropped");
 }
 
 void wtls_shutdown(void) {
