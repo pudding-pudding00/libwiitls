@@ -591,8 +591,12 @@ typedef struct {
     size_t val_off;
 } field_off;
 
-int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t block_len,
-                           wtls_http_head *head, char **arena_out) {
+enum { HPACK_MODE_HEAD, HPACK_MODE_TRAILERS, HPACK_MODE_DISCARD };
+
+static int decode_block(wtls_hpack_ctx *ctx, const uint8_t *block, size_t block_len, wtls_http_head *head,
+                       char **arena_out, int mode) {
+    const bool trailers = mode == HPACK_MODE_TRAILERS;
+    const bool lenient = mode == HPACK_MODE_DISCARD; /* the block belongs to a stream nobody waits for */
     if (!ctx || !head || !arena_out || (!block && block_len)) return WTLS_ERR_ARG;
     memset(head, 0, sizeof *head);
     *arena_out = NULL;
@@ -667,8 +671,10 @@ int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t blo
 
         if (st == WTLS_OK && !valid_resp_value(val, val_len)) st = WTLS_ERR_HTTP;
         if (st == WTLS_OK) {
-            if (name_len > 0 && name[0] == ':') {
-                if (saw_regular || strcmp(name, ":status") != 0 || status != -1) {
+            if (lenient) {
+                if (!(name_len > 0 && name[0] == ':') && n_fields < WTLS_HTTP_MAX_FIELDS) n_fields++; /* decoded, not kept */
+            } else if (name_len > 0 && name[0] == ':') {
+                if (trailers || saw_regular || strcmp(name, ":status") != 0 || status != -1) {
                     st = WTLS_ERR_HTTP;
                 } else {
                     status = parse_status(val, val_len);
@@ -694,7 +700,7 @@ int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t blo
         if (st != WTLS_OK) break;
     }
 
-    if (st == WTLS_OK && status < 0) st = WTLS_ERR_HTTP;
+    if (st == WTLS_OK && status < 0 && !trailers && !lenient) st = WTLS_ERR_HTTP;
     if (st != WTLS_OK) {
         wtls_free(arena.p);
         return st;
@@ -708,4 +714,25 @@ int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t blo
     }
     *arena_out = arena.p;
     return WTLS_OK;
+}
+
+int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t block_len, wtls_http_head *head,
+                           char **arena_out) {
+    return decode_block(ctx, block, block_len, head, arena_out, HPACK_MODE_HEAD);
+}
+
+int wtls_hpack_decode_trailers(wtls_hpack_ctx *ctx, const uint8_t *block, size_t block_len) {
+    wtls_http_head head;
+    char *arena = NULL;
+    int st = decode_block(ctx, block, block_len, &head, &arena, HPACK_MODE_TRAILERS);
+    if (st == WTLS_OK) wtls_free(arena); /* trailers are validated and dropped; decoding keeps the table in step */
+    return st;
+}
+
+int wtls_hpack_decode_discard(wtls_hpack_ctx *ctx, const uint8_t *block, size_t block_len) {
+    wtls_http_head head;
+    char *arena = NULL;
+    int st = decode_block(ctx, block, block_len, &head, &arena, HPACK_MODE_DISCARD);
+    if (st == WTLS_OK) wtls_free(arena);
+    return st;
 }
