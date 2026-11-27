@@ -122,6 +122,8 @@ jobs:
           ./build-fuzz/fuzz_content_range tests/fuzz/corpus/content_range -max_total_time=10
           ./build-fuzz/fuzz_http_gzip     tests/fuzz/corpus/http_gzip     -max_total_time=10
           ./build-fuzz/fuzz_client_cred   tests/fuzz/corpus/client_cred   -max_total_time=10
+          ./build-fuzz/fuzz_x25519_diff     tests/fuzz/corpus/x25519_diff     -max_total_time=30
+          ./build-fuzz/fuzz_p256_verify_diff tests/fuzz/corpus/p256_verify_diff -max_total_time=30
 
   windows:
     runs-on: windows-latest

@@ -19,6 +19,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 - `wtls_set_allocator()`: route all library memory (including Mbed TLS and zlib)
   through application-supplied allocator functions, e.g. to use MEM2. The
   Mbed TLS platform memory layer (`MBEDTLS_PLATFORM_MEMORY`) is now enabled.
+- Differential libFuzzer harnesses `fuzz_x25519_diff` and `fuzz_p256_verify_diff`
+  (accelerators against Everest and the builtin ECDSA), run in CI.
+- Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
+  (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
 - `test_abi`: compile-time guard that the 1.0 layout of `wtls_options`,
   `wtls_http_request` and `wtls_http_info` stays unchanged.
 
