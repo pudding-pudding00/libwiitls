@@ -20,6 +20,7 @@ static uint32_t sample_cb(void *ctx) {
 }
 
 static void hw_psa_init_with_jitter(void) {
+    TLOG("    emulator: %s\n", wtls_plat_is_dolphin() ? "yes (Dolphin)" : "no");
     u64 t0 = gettime();
     CHECK_EQ_INT(psa_crypto_init(), PSA_SUCCESS);
     TLOG("    psa_crypto_init took %u ms\n", (unsigned)ticks_to_millisecs(gettime() - t0));
@@ -44,6 +45,36 @@ static void hw_jitter_64k_passes_health_tests(void) {
          (unsigned)ticks_to_millisecs(gettime() - t0), (int)IOS_GetVersion(),
          st.max_rct, WTLS_RCT_CUTOFF, st.max_apt, WTLS_APT_CUTOFF);
     free(buf);
+}
+
+/* WP17: wtls_init_start()/wtls_init_step() against wtls_init(). Warm-up is
+ * already done (first test), so both measure the same work. */
+static void hw_init_step_timing(void) {
+    mbedtls_psa_crypto_free(); /* PSA state of hw_psa_init_with_jitter */
+    u64 t0 = gettime();
+    CHECK_EQ_INT(wtls_init(), WTLS_OK);
+    unsigned classic_us = (unsigned)ticks_to_microsecs(gettime() - t0);
+    wtls_shutdown();
+
+    t0 = gettime();
+    CHECK_EQ_INT(wtls_init_start(), WTLS_WANT_READ);
+    unsigned steps = 0, longest_us = 0, last_us = 0;
+    wtls_status st;
+    do {
+        u64 s0 = gettime();
+        st = wtls_init_step(5);
+        last_us = (unsigned)ticks_to_microsecs(gettime() - s0);
+        if (st == WTLS_WANT_READ && last_us > longest_us) longest_us = last_us;
+        steps++;
+    } while (st == WTLS_WANT_READ && steps < 10000);
+    unsigned total_us = (unsigned)ticks_to_microsecs(gettime() - t0);
+    CHECK_EQ_INT(st, WTLS_OK);
+    TLOG("    wtls_init %u us; init_step(5): %u steps, %u us total, longest collecting step %u us, "
+         "final step (psa_crypto_init from the pool) %u us\n",
+         classic_us, steps, total_us, longest_us, last_us);
+    uint8_t r[16];
+    CHECK_EQ_INT(psa_generate_random(r, sizeof r), PSA_SUCCESS);
+    wtls_shutdown();
 }
 
 /* Suite "jitterdump": raw low bytes of the library's jitter sampler (b) and,
@@ -110,4 +141,5 @@ void wtls_suite_entropy(void) {
     RUN(hw_psa_init_with_jitter);
     RUN(hw_random_differs);
     RUN(hw_jitter_64k_passes_health_tests);
+    RUN(hw_init_step_timing);
 }

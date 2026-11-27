@@ -46,6 +46,7 @@ const char *wtls_strerror(int status) {
 #include "wtls_castore.h"
 #include "wtls_cred.h"
 #include "wtls_dns.h"
+#include "wtls_entropy.h"
 #include "wtls_log.h"
 #include "wtls_scache.h"
 #include "wtls_time.h"
@@ -89,18 +90,55 @@ static const uint16_t k_groups[] = {
 
 bool wtls_core_initialized(void) { return s_initialized; }
 
+static bool s_init_started; /* wtls_init_start() called, not finished yet */
+
+/* Shared by wtls_init() and wtls_init_step(): psa_crypto_init() takes the
+ * entropy from the pool first, the rest inline (same conditioning). */
+static wtls_status init_finish(void) {
+    int r = wtls_plat_init();
+    if (r != WTLS_OK) return (wtls_status)r;
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        s_init_started = false;
+        wtls_entropy_pool_clear();
+        return WTLS_ERR_ENTROPY;
+    }
+    mbedtls_platform_set_time(wtls_mbedtls_time);
+    s_initialized = true;
+    s_init_started = false;
+    wtls_plat_thread_bind();
+    return WTLS_OK;
+}
+
 wtls_status wtls_init(void) {
     if (s_initialized) {
         if (!WTLS_THREAD_GUARD("wtls_init")) return WTLS_ERR_STATE;
         return WTLS_OK;
     }
-    int r = wtls_plat_init();
-    if (r != WTLS_OK) return (wtls_status)r;
-    if (psa_crypto_init() != PSA_SUCCESS) return WTLS_ERR_ENTROPY;
-    mbedtls_platform_set_time(wtls_mbedtls_time);
-    s_initialized = true;
-    wtls_plat_thread_bind();
-    return WTLS_OK;
+    return init_finish();
+}
+
+wtls_status wtls_init_start(void) {
+    if (s_initialized) {
+        if (!WTLS_THREAD_GUARD("wtls_init_start")) return WTLS_ERR_STATE;
+        return WTLS_OK;
+    }
+    s_init_started = true;
+    return WTLS_WANT_READ;
+}
+
+wtls_status wtls_init_step(uint32_t budget_ms) {
+    if (s_initialized) {
+        if (!WTLS_THREAD_GUARD("wtls_init_step")) return WTLS_ERR_STATE;
+        return WTLS_OK;
+    }
+    if (!s_init_started) return WTLS_ERR_STATE;
+    int r = wtls_entropy_pool_fill(budget_ms);
+    if (r == WTLS_WANT_READ) return WTLS_WANT_READ;
+    if (r != WTLS_OK) {
+        s_init_started = false;
+        return WTLS_ERR_ENTROPY;
+    }
+    return init_finish();
 }
 
 void (*wtls_shutdown_hook)(void);
@@ -125,8 +163,10 @@ void wtls_shutdown(void) {
     wtls_castore_free();
     wtls_scache_clear(); /* holds resumption secrets */
     mbedtls_psa_crypto_free();
+    wtls_entropy_pool_clear();
     wtls_plat_thread_unbind();
     s_initialized = false;
+    s_init_started = false;
 }
 
 wtls_status wtls_add_trusted_ca(const uint8_t *buf, size_t len) {

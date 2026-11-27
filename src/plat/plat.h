@@ -31,6 +31,9 @@ typedef bool (*wtls_plat_abort_fn)(void *ctx);
 int wtls_plat_os_entropy(uint8_t *out, size_t len);
 
 int      wtls_plat_init(void);                                         /* OK | ERR_NET */
+/* Host-only test hook (defined in plat_host.c): true makes wtls_plat_init()
+ * report WTLS_ERR_NET, as on a Wii before net_init(). */
+extern bool wtls_plat_test_net_down;
 int      wtls_plat_resolve(const char *host, uint32_t *ipv4_be);       /* OK | ERR_DNS */
 int      wtls_plat_resolve_all(const char *host, uint32_t *addrs,
                                size_t cap, size_t *count);             /* OK | ERR_DNS */
@@ -110,6 +113,8 @@ bool wtls_plat_ios_connect_in_progress(int32_t r);
 uint32_t wtls_plat_jitter_sample(void);
 /* Non-credited auxiliary hardware/network state mixed into conditioned entropy. */
 void wtls_plat_entropy_aux(uint32_t aux[4]);
+/* True when running in Dolphin (IOS_Open("/dev/dolphin") succeeds). */
+bool wtls_plat_is_dolphin(void);
 #endif
 
 #endif

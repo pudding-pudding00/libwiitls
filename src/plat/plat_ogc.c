@@ -363,6 +363,18 @@ uint32_t wtls_plat_jitter_sample(void) {
     return d;
 }
 
+/* Dolphin emulates a /dev/dolphin device that real IOS has not got. Cached:
+ * the answer cannot change while running. */
+bool wtls_plat_is_dolphin(void) {
+    static int s_state = -1;
+    if (s_state < 0) {
+        s32 fd = IOS_Open("/dev/dolphin", 0);
+        if (fd >= 0) IOS_Close(fd);
+        s_state = fd >= 0;
+    }
+    return s_state == 1;
+}
+
 void wtls_plat_entropy_aux(uint32_t aux[4]) {
     u64 tb = gettime();
     aux[0] = (uint32_t)(tb >> 32);

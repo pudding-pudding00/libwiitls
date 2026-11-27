@@ -70,6 +70,31 @@ wtls_time_sync_sntp(NULL, 3000);   /* recommended once; see "The clock" */
 It runs health tests on that data and fails with `WTLS_ERR_ENTROPY` rather
 than run with weak randomness; treat that as fatal for networking.
 
+**Starting without waiting (1.1).** `wtls_init_start()` and
+`wtls_init_step(budget_ms)` split that wait into slices, for example while
+libogc's `net_init_async()` brings the network up and your UI keeps drawing:
+
+```c
+wtls_init_start();                         /* allowed before net_init() */
+net_init_async(net_done_cb, NULL);
+for (;;) {                                 /* your frame loop */
+    int r = wtls_init_step(2);             /* ~2 ms of collecting per frame */
+    if (r == WTLS_OK) break;               /* initialised, as after wtls_init() */
+    if (r == WTLS_ERR_NET) { /* entropy ready, network not yet: try next frame */ }
+    else if (r != WTLS_WANT_READ) { /* WTLS_ERR_ENTROPY: no TLS possible */ }
+    draw_frame();
+}
+```
+
+The samples, health tests and credited entropy are the same as in
+`wtls_init()`; only the collection runs ahead of `psa_crypto_init()` into a
+256-byte pool that the final step uses up. `WTLS_ERR_NET` keeps the pool, so
+call again once `net_init()` has finished. Measured on a Wii (IOS 58, after
+the one-time warm-up): `wtls_init()` 329 ms in one piece; `wtls_init_step(5)`
+64 calls of at most 5.1 ms, the last one (`psa_crypto_init()` from the pool)
+8.2 ms. The first call of a process also runs a 1024-sample warm-up, sliced
+the same way (about 80 ms in total).
+
 **The clock.** Certificates can only be checked with a correct date, and the
 Wii's clock is often wrong (dead clock battery, never set). Two strategies:
 

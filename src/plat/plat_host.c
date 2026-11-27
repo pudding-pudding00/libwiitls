@@ -35,8 +35,11 @@ int wtls_plat_os_entropy(uint8_t *out, size_t len) {
     return BCRYPT_SUCCESS(st) ? WTLS_OK : WTLS_ERR_ENTROPY;
 }
 
+bool wtls_plat_test_net_down;
+
 int wtls_plat_init(void) {
     static bool done;
+    if (wtls_plat_test_net_down) return WTLS_ERR_NET;
     if (done) return WTLS_OK;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return WTLS_ERR_NET;
@@ -152,7 +155,9 @@ int wtls_plat_os_entropy(uint8_t *out, size_t len) {
 #endif
 }
 
-int wtls_plat_init(void) { return WTLS_OK; }
+bool wtls_plat_test_net_down;
+
+int wtls_plat_init(void) { return wtls_plat_test_net_down ? WTLS_ERR_NET : WTLS_OK; }
 
 static int set_nonblocking(sock_t s) {
     int fl = fcntl(s, F_GETFL, 0);

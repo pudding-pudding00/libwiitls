@@ -26,6 +26,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Added
 
+- **Non-blocking start-up:** `wtls_init_start()` and `wtls_init_step(budget_ms)` collect the jitter entropy in time slices of 16 samples, so the budget holds to ~1.3 ms on the Wii (also before `net_init()`, e.g. next to `net_init_async()`) and finish like `wtls_init()`; the credited entropy is unchanged. New host test `test_init_step` (the host runs the jitter path with a test sampler), Wii timing in the `entropy` suite.
+- **Dolphin detection:** internal `wtls_plat_is_dolphin()` (`/dev/dolphin`); the `entropy` suite prints `emulator: yes/no`.
 - **Non-blocking HTTP requests:** `wtls_http_start()`, `wtls_http_step()`, `wtls_http_get_fd()`, `wtls_http_pending()` and `wtls_http_wait()` run a request (redirects, cookies, retries, deadlines, gzip, keep-alive pool) as a state machine that never waits; `wtls_http_read()` on such a response returns `WTLS_WANT_READ` instead of waiting. Not supported (`WTLS_ERR_UNSUPPORTED`): proxies, `expect_100_continue`, `allow_upgrade`.
 - **HTTP/2 multiplexing in the non-blocking API:** requests started with `wtls_http_start()` to one `https://` host share a single HTTP/2 connection with one stream each (`WTLS_H2_MAX_STREAMS`, default 4, `WTLS_H2_STREAM_WINDOW`, default 32 KiB; both CMake options). Per-stream flow control credits only what the application has read, a closed response cancels just its stream, `GOAWAY`/`REFUSED_STREAM` repeat idempotent requests on a new connection. New engine `wtls_h2s`, new `fuzz_h2s_frames` harness, concurrent HTTP/2 test server (ports 4449/4450).
 - HPACK and HTTP/2 frame fuzz harnesses (`fuzz_hpack`, `fuzz_h2_frames`); the

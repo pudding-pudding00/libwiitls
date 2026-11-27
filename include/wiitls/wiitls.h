@@ -157,6 +157,32 @@ typedef struct {
 wtls_status wtls_init(void);
 
 /**
+ * (1.1) Starts a non-blocking initialisation; continue with wtls_init_step().
+ *
+ * May run before net_init() (e.g. next to libogc's net_init_async()): the
+ * entropy collection needs no network. Credited entropy is the same as with
+ * wtls_init(); only the waiting is split into slices.
+ *
+ * @return WTLS_WANT_READ (call wtls_init_step()), or WTLS_OK if already
+ *         initialised.
+ */
+wtls_status wtls_init_start(void);
+
+/**
+ * (1.1) Collects entropy for about @p budget_ms (checked every 16 samples,
+ * ~1.3 ms on the Wii; 0 still makes progress), then finishes the
+ * initialisation once enough is collected. The finishing call runs
+ * psa_crypto_init() from the collected pool and takes a few ms more.
+ *
+ * @return WTLS_WANT_READ (call again), WTLS_OK (initialised, as after
+ *         wtls_init()), WTLS_ERR_NET (entropy is ready but net_init() has not
+ *         succeeded yet: call again later, nothing is lost),
+ *         WTLS_ERR_ENTROPY (health test failed; start over with
+ *         wtls_init_start()), or WTLS_ERR_STATE (no wtls_init_start()).
+ */
+wtls_status wtls_init_step(uint32_t budget_ms);
+
+/**
  * Frees all global state: runtime-added CAs, the session-ticket cache (which
  * holds resumption secrets), the DNS cache and PSA crypto. Close every
  * connection first. Safe to call when not initialised.
