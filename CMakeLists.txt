@@ -87,6 +87,23 @@ if(WTLS_THREAD_CHECK OR CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 add_compile_options(-${WTLS_OPT}) # after CMAKE_C_FLAGS_<CONFIG>: the last -O wins (Mbed TLS: below)
 
+# ---------------------------------------------------------------------------
+# Reproducible builds: the same sources, compiler and options give byte-identical
+# archives in any directory. The build time comes from SOURCE_DATE_EPOCH
+# (string(TIMESTAMP) honours it), paths are mapped out of the objects, and the
+# archives carry no timestamps or owners.
+option(WTLS_REPRODUCIBLE "Byte-identical builds: map source/build paths out of objects, deterministic archives (set SOURCE_DATE_EPOCH too)" OFF)
+
+if(WTLS_REPRODUCIBLE)
+    add_compile_options(-ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=.)
+    set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_AR> qcD <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_C_ARCHIVE_APPEND "<CMAKE_AR> qD <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_C_ARCHIVE_FINISH "<CMAKE_RANLIB> -D <TARGET>")
+    if(NOT DEFINED ENV{SOURCE_DATE_EPOCH})
+        message(WARNING "WTLS_REPRODUCIBLE=ON without SOURCE_DATE_EPOCH: the build time is embedded and will differ")
+    endif()
+endif()
+
 include(FetchContent)
 set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -481,6 +498,10 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         message(FATAL_ERROR "Host tests need Python 3 (test servers, certificate generation)")
     endif()
     # The release check behind .github/workflows/maintenance.yml.
+    add_test(NAME gen_sbom_tool
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_gen_sbom.py)
+    add_test(NAME deterministic_zip_tool
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_deterministic_zip.py)
     add_test(NAME update_dep_tool
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_update_dep.py)
     # Test PKI (tests/host/make_certs.py, OpenSSL CLI) in ${CMAKE_BINARY_DIR}/certs.
