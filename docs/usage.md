@@ -335,6 +335,20 @@ Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
 push, cookies (send your own `Cookie` header), authentication schemes (send
 your own `Authorization`), caching, and `br` encoding.
 
+### Authorization headers
+
+```c
+char auth[160];
+wtls_http_basic_auth("user", "secret", auth, sizeof auth, NULL);   /* or wtls_http_bearer_auth(token, ...) */
+wtls_http_header h[] = {{"Authorization", auth}};
+req.headers = h;
+req.n_headers = 1;
+```
+
+The helpers only build the header value (RFC 7617 / RFC 6750). `Authorization`
+is dropped automatically when a redirect leaves the origin. Digest
+authentication is not supported.
+
 ## 6. Faster second connections
 
 The library keeps the last 8 TLS 1.3 session tickets and 16 DNS answers. A

@@ -297,6 +297,25 @@ wtls_status wtls_http_format_range(uint64_t start, uint64_t end, bool has_end,
 wtls_status wtls_http_check_resume(const wtls_http_response *r, uint64_t resume_from,
                                    uint64_t *append_offset, int64_t *total_len);
 
+/**
+ * Builds the value of an Authorization header, "Basic <base64(user:pass)>"
+ * (RFC 7617), for wtls_http_request::headers. Pass @p out = NULL (with @p out_len)
+ * to learn the length without the NUL; otherwise @p out_size must hold it plus one.
+ * @p user must not contain ':' and neither string any control character. The
+ * client never logs it and strips Authorization when a redirect leaves the origin.
+ *
+ * @return WTLS_OK, WTLS_ERR_ARG, or WTLS_ERR_HTTP_LIMIT (too long or @p out_size too small).
+ */
+wtls_status wtls_http_basic_auth(const char *user, const char *pass, char *out, size_t out_size,
+                                 size_t *out_len);
+
+/**
+ * Builds "Bearer <token>" (RFC 6750); the token must be a b64token (letters,
+ * digits and - . _ ~ + /, optionally ending in '='). Buffer rules as for
+ * wtls_http_basic_auth().
+ */
+wtls_status wtls_http_bearer_auth(const char *token, char *out, size_t out_size, size_t *out_len);
+
 /** Options of wtls_http_download(). Zero-initialise; new fields are appended. */
 typedef struct {
     const uint8_t *sha256;      /**< optional expected SHA-256 of the whole file (32 bytes) */

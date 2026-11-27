@@ -206,6 +206,52 @@ static void test_format_range(void) {
     CHECK_EQ_INT(wtls_http_format_range(0, 0, false, buf, 4), WTLS_ERR_HTTP_LIMIT);
 }
 
+/* ---- Authorization values ------------------------------------------------- */
+
+static void test_basic_auth(void) {
+    char buf[128];
+    size_t n = 0;
+    /* RFC 7617 section 2: Aladdin / open sesame */
+    CHECK_EQ_INT(wtls_http_basic_auth("Aladdin", "open sesame", buf, sizeof buf, &n), WTLS_OK);
+    CHECK(strcmp(buf, "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==") == 0);
+    CHECK_EQ_INT((long)n, (long)strlen(buf));
+    size_t q = 0;
+    CHECK_EQ_INT(wtls_http_basic_auth("Aladdin", "open sesame", NULL, 0, &q), WTLS_OK);
+    CHECK_EQ_INT((long)q, (long)n);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", "", buf, sizeof buf, NULL), WTLS_OK); /* empty password */
+    CHECK(strcmp(buf, "Basic YTo=") == 0);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", "b:c", buf, sizeof buf, NULL), WTLS_OK); /* ':' is fine in the password */
+    CHECK(strcmp(buf, "Basic YTpiOmM=") == 0);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", "b", buf, 8, NULL), WTLS_ERR_HTTP_LIMIT); /* needs 11 bytes */
+    CHECK_EQ_INT(wtls_http_basic_auth("a:b", "c", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", "line\nbreak", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_basic_auth(NULL, "x", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", NULL, buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_basic_auth("a", "b", NULL, 0, NULL), WTLS_ERR_ARG); /* no buffer and no length */
+    static char big[2000];
+    memset(big, 'x', sizeof big - 1);
+    char huge[4096];
+    CHECK_EQ_INT(wtls_http_basic_auth("a", big, huge, sizeof huge, NULL), WTLS_ERR_HTTP_LIMIT);
+}
+
+static void test_bearer_auth(void) {
+    char buf[64];
+    size_t n = 0;
+    CHECK_EQ_INT(wtls_http_bearer_auth("mF_9.B5f-4.1JqM", buf, sizeof buf, &n), WTLS_OK); /* RFC 6750 example */
+    CHECK(strcmp(buf, "Bearer mF_9.B5f-4.1JqM") == 0);
+    CHECK_EQ_INT((long)n, 22);
+    CHECK_EQ_INT(wtls_http_bearer_auth("abc==", buf, sizeof buf, NULL), WTLS_OK);
+    CHECK_EQ_INT(wtls_http_bearer_auth("", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_bearer_auth("=abc", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_bearer_auth("ab=c", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_bearer_auth("a b", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_bearer_auth("a\r\nX: y", buf, sizeof buf, NULL), WTLS_ERR_ARG);
+    CHECK_EQ_INT(wtls_http_bearer_auth("abcdef", buf, 8, NULL), WTLS_ERR_HTTP_LIMIT);
+    size_t q = 0;
+    CHECK_EQ_INT(wtls_http_bearer_auth("abcdef", NULL, 0, &q), WTLS_OK);
+    CHECK_EQ_INT((long)q, 13);
+}
+
 int main(void) {
     RUN(test_url_encode_vectors);
     RUN(test_url_encode_args);
@@ -215,5 +261,7 @@ int main(void) {
     RUN(test_form_encode);
     RUN(test_multipart_streaming);
     RUN(test_format_range);
+    RUN(test_basic_auth);
+    RUN(test_bearer_auth);
     return CHECK_DONE();
 }
