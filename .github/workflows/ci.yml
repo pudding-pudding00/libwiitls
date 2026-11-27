@@ -5,10 +5,6 @@ on:
     branches: ['**'] # tags are tested by the release workflow, which calls this one
   pull_request:
   workflow_call:
-    inputs:
-      ref:
-        description: 'Ref to test (default: the ref of the calling run)'
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,8 +16,6 @@ jobs:
     container: devkitpro/devkitppc:latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - name: Ensure cmake
         run: command -v cmake || (apt-get update && apt-get install -y cmake)
       - name: Build
@@ -53,8 +47,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build openssl
       - name: Build and test (Release)
@@ -96,8 +88,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build openssl
       - name: Build and test with ASan/UBSan
@@ -114,8 +104,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - name: Install Clang and tools
         run: sudo apt-get update && sudo apt-get install -y clang ninja-build openssl
       - name: Build libFuzzer harnesses and run time-boxed regression
@@ -136,8 +124,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -159,8 +145,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref }}
       - name: Install tools
         run: brew install ninja
       - name: Build and test (macOS)
