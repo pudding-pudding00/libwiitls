@@ -1118,7 +1118,9 @@ static int exchange(wtls_http_response *r, request_ctx *x, bool *got) {
 
 /* Pools the connection if its response was read to its end, may carry another
  * request and holds no unread bytes; closes it otherwise. */
+#if WTLS_HTTP2
 static void h2_detach(wtls_http_response *r);
+#endif
 
 static void release_conn(wtls_http_response *r) {
 #if WTLS_HTTP2
@@ -1263,6 +1265,7 @@ static int hop_frame(wtls_http_response *r, request_ctx *x) {
         if (st != WTLS_OK) return st;
         r->remaining = r->fr.length;
         r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
+        if (r->h2st && r->eof && h2s_stream_ended(r->h2st)) h2_detach(r); /* nothing more to read: free the slot */
         return WTLS_OK;
     }
 #endif

@@ -752,6 +752,10 @@ static int as_step_once(wtls_http_response *r, struct async_state *as) {
         int st = as_h2_send(r, as);
         return st == WTLS_OK ? WTLS_WANT_READ : st;
     }
+#else
+    case AS_H2WAIT:
+    case AS_H2SEND:
+        break; /* not reachable without HTTP/2 */
 #endif
     }
     return WTLS_ERR_INTERNAL;
