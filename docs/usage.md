@@ -614,6 +614,32 @@ roots. To make sure nobody swapped the file, sign it and use
 9c). The file is streamed and kept as DER (about 150 KiB), parsed lazily.
 Needs `wtls_init()`. Cached session tickets and idle connections are dropped.
 
+## 9f. WebSockets
+
+```c
+#include <wiitls/websocket.h>
+
+wtls_ws_options o = {0};
+o.url = "wss://example.com/live";
+wtls_ws *ws;
+if (wtls_ws_connect(&ws, &o) == WTLS_OK) {
+    wtls_ws_send(ws, WTLS_WS_TEXT, "hello", 5);
+    char buf[1024];
+    int type, n = wtls_ws_recv(ws, &type, buf, sizeof buf);   /* one complete message */
+    wtls_ws_close(ws, 1000, "bye");
+}
+```
+
+Messages arrive whole (fragments are reassembled), Ping is answered, and a
+peer's Close ends `wtls_ws_recv()` with `WTLS_ERR_CLOSED` (code in
+`wtls_ws_close_code()`). Protocol violations (masked server frames, bad UTF-8
+in text, oversize messages) are answered with the proper Close code and
+reported as `WTLS_ERR_WS`. For a game loop use `wtls_ws_set_nonblocking(ws, true)`
+and poll `wtls_ws_get_fd()` (check `wtls_ws_pending()` first). `max_message`
+(default 1 MiB) bounds memory; `ping_interval_ms` keeps idle links alive.
+No extensions (no `permessage-deflate`). Build with `-DWTLS_WEBSOCKET=OFF` to
+leave it out (the functions then return `WTLS_ERR_UNSUPPORTED`).
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets

@@ -68,6 +68,14 @@ ignored, so a test can tag its requests and count them with /count.
                                   half of the gzip stream (framing complete);
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+  GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
+                                  subprotocol P when offered), then echoes text/binary messages; text
+                                  commands: "close" (server Close 1000), "ping" (Ping, then "pong-ok"
+                                  when the Pong came back), "frag" (the text "frag-mented-text" in
+                                  three frames with a Ping between), "big:N" (N pattern bytes, binary),
+                                  "badutf8", "masked" (a masked server frame); early=1: a greeting
+                                  frame in the same write as the 101
+  GET /ws-badaccept               101 with a wrong Sec-WebSocket-Accept
   GET /file?n=N[&etag=E][&etag2=E2][&cut=K][&once=ID][&ranges=0]
                                   N pattern bytes (pattern(N)) with ETag "E" (default v1) and
                                   Accept-Ranges. "Range: bytes=S-" is honoured (206, or 416 with
@@ -461,6 +469,120 @@ def clean_close(sock, secure):
         pass
 
 
+# ---- WebSocket (RFC 6455) test endpoint -------------------------------------------------
+
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_recv_exact(sock, n):
+    out = b""
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            raise EOFError
+        out += chunk
+    return out
+
+
+def ws_read_frame(sock):
+    b0, b1 = _ws_recv_exact(sock, 2)
+    ln = b1 & 0x7F
+    if ln == 126:
+        ln = int.from_bytes(_ws_recv_exact(sock, 2), "big")
+    elif ln == 127:
+        ln = int.from_bytes(_ws_recv_exact(sock, 8), "big")
+    mask = _ws_recv_exact(sock, 4) if b1 & 0x80 else None
+    payload = _ws_recv_exact(sock, ln) if ln else b""
+    if mask:
+        payload = bytes(c ^ mask[i & 3] for i, c in enumerate(payload))
+    return bool(b0 & 0x80), b0 & 0x0F, payload
+
+
+def ws_frame(op, payload=b"", fin=True, mask=None):
+    out = bytes([(0x80 if fin else 0) | op])
+    mb = 0x80 if mask else 0
+    n = len(payload)
+    if n < 126:
+        out += bytes([mb | n])
+    elif n < 65536:
+        out += bytes([mb | 126]) + n.to_bytes(2, "big")
+    else:
+        out += bytes([mb | 127]) + n.to_bytes(8, "big")
+    if mask:
+        out += mask
+        payload = bytes(c ^ mask[i & 3] for i, c in enumerate(payload))
+    return out + payload
+
+
+def ws_serve(sock, path, query, head):
+    import base64
+    import hashlib
+    fields = {}
+    for line in head.replace(b"\r\n", b"\n").split(b"\n")[1:]:
+        if b":" in line:
+            k, v = line.split(b":", 1)
+            fields[k.strip().lower().decode()] = v.strip().decode()
+    key = fields.get("sec-websocket-key", "").encode()
+    accept = base64.b64encode(hashlib.sha1(key + WS_GUID).digest())
+    if path == "/ws-badaccept":
+        accept = base64.b64encode(hashlib.sha1(key + b"x").digest())
+    hdrs = [("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Accept", accept)]
+    want = query.get("proto")
+    offered = [p.strip() for p in fields.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    if want and want in offered:
+        hdrs.append(("Sec-WebSocket-Protocol", want))
+    resp = http_response(101, hdrs, b"", b"Switching Protocols")
+    if query.get("early") == "1":
+        resp += ws_frame(1, b"hi")
+    sock.sendall(resp)
+    try:
+        msg_op, msg = None, b""
+        while True:
+            fin, op, payload = ws_read_frame(sock)
+            if op == 8:
+                sock.sendall(ws_frame(8, payload[:2]))
+                return
+            if op == 9:
+                sock.sendall(ws_frame(10, payload))
+                continue
+            if op == 10:
+                continue
+            if op in (1, 2):
+                msg_op, msg = op, payload
+            else:
+                msg += payload
+            if not fin:
+                continue
+            if msg_op == 1 and msg == b"close":
+                sock.sendall(ws_frame(8, (1000).to_bytes(2, "big") + b"bye"))
+                try:
+                    ws_read_frame(sock)  # the client's Close
+                except (EOFError, OSError):
+                    pass
+                return
+            if msg_op == 1 and msg == b"ping":
+                sock.sendall(ws_frame(9, b"p1"))
+                while True:
+                    _, pop, ppl = ws_read_frame(sock)
+                    if pop == 10:
+                        break
+                sock.sendall(ws_frame(1, b"pong-ok" if ppl == b"p1" else b"pong-bad"))
+            elif msg_op == 1 and msg == b"frag":
+                sock.sendall(ws_frame(1, b"frag-", fin=False) + ws_frame(9, b"mid") + ws_frame(0, b"mented-", fin=False) +
+                             ws_frame(0, b"text"))
+            elif msg_op == 1 and msg.startswith(b"big:"):
+                sock.sendall(ws_frame(2, pattern(int(msg[4:]))))
+            elif msg_op == 1 and msg == b"badutf8":
+                sock.sendall(ws_frame(1, b"\xff\xfe"))
+            elif msg_op == 1 and msg == b"masked":
+                sock.sendall(ws_frame(1, b"oops", mask=b"\x01\x02\x03\x04"))
+            else:
+                sock.sendall(ws_frame(msg_op, msg))
+    except (EOFError, OSError, ssl.SSLError):
+        return
+
+
+
 def http_respond(sock, secure, method, path, query, head, body, state):
     """Answers one request. Returns False when the connection is finished."""
     send = sock.sendall
@@ -608,6 +730,9 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             tcp_abort(sock)
             return False
         send(body)
+    elif path in ("/ws", "/ws-badaccept"):
+        ws_serve(sock, path, query, head)
+        return False
     elif path == "/encoding":
         send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
     elif path == "/who":

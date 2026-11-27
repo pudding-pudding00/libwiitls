@@ -38,6 +38,7 @@ else()
     set(_wtls_keylog_default OFF)
 endif()
 option(WTLS_KEYLOG "TLS key log export (wtls_set_keylog_cb); debugging only, OFF in release builds" ${_wtls_keylog_default})
+option(WTLS_WEBSOCKET "WebSocket client (<wiitls/websocket.h>); OFF keeps the symbols but they return WTLS_ERR_UNSUPPORTED" ON)
 option(WTLS_THREAD_CHECK "Debug single-thread affinity checks (always ON in Debug builds)" OFF)
 option(WTLS_BUILD_FUZZ "Build Clang libFuzzer harnesses in tests/fuzz" OFF)
 option(WTLS_BUILD_CURL_SHIM "Build optional libcurl-lite compatibility shim (wiitls_curl)" OFF)
@@ -363,11 +364,13 @@ add_library(wiitls STATIC
     src/http/wtls_http.c
     src/http/wtls_http_pool.c
     src/http/wtls_http_download.c
+    src/ws/wtls_ws_frame.c
+    src/ws/wtls_ws.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
 )
-target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}> WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}>)
+target_compile_definitions(wiitls PRIVATE WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}> WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}> WTLS_WEBSOCKET=$<BOOL:${WTLS_WEBSOCKET}>)
 if(WTLS_ACCEL)
     # Called from Everest's mbedtls_x25519_scalarmult (patched above); the
     # tfpsacrypto -> wiitls link edge below resolves it.
@@ -512,6 +515,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
 
     wtls_host_test(test_smoke)
     wtls_host_test(test_abi)
+    wtls_host_test(test_ws_frame)
     wtls_host_test(test_sig tests/common/sig_tests.c)
     wtls_host_test(test_jitter)
     wtls_host_test(test_time)
@@ -570,6 +574,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         wtls_fuzz_corpus_test(fuzz_hpack hpack)
         wtls_fuzz_corpus_test(fuzz_h2_frames h2_frames)
     endif()
+    wtls_fuzz_corpus_test(fuzz_ws_frame ws_frame)
     if(WTLS_ACCEL)
         wtls_fuzz_corpus_test(fuzz_x25519_diff x25519_diff)
     endif()
@@ -597,6 +602,9 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_server_test(test_download tests/common/download_tests.c)
     add_dependencies(test_download wtls_test_certs)
     set_tests_properties(test_download PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    wtls_host_server_test(test_ws tests/common/ws_tests.c)
+    add_dependencies(test_ws wtls_test_certs)
+    set_tests_properties(test_ws PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
     wtls_host_server_test(test_http tests/common/http_tests.c)
     add_dependencies(test_http wtls_test_certs)
     if(WTLS_GZIP)
@@ -665,7 +673,7 @@ if(WTLS_BUILD_FUZZ)
     if(WTLS_GZIP)
         list(APPEND _wtls_fuzz_targets fuzz_http_gzip)
     endif()
-    list(APPEND _wtls_fuzz_targets fuzz_x25519_diff fuzz_p256_verify_diff)
+    list(APPEND _wtls_fuzz_targets fuzz_x25519_diff fuzz_p256_verify_diff fuzz_ws_frame)
     if(WTLS_HTTP2)
         list(APPEND _wtls_fuzz_targets fuzz_hpack fuzz_h2_frames)
     endif()
