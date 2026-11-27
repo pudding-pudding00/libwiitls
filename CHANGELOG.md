@@ -35,6 +35,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- `wtls_time_save()` / `wtls_time_load()` keep the SNTP clock correction across restarts.
 - `wtls_http_basic_auth()` and `wtls_http_bearer_auth()` build Authorization header values.
 - CMake options `WTLS_SSL_OUT_CONTENT_LEN` and `WTLS_SSL_IN_CONTENT_LEN` to
   shrink the per-connection record buffers (default 16384: unchanged). A

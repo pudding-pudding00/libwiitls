@@ -63,6 +63,7 @@ uint64_t wtls_plat_now_us(void);                                       /* monoto
 extern uint64_t wtls_plat_poll_wait_us;
 int64_t  wtls_plat_unix_time(void);                 /* time(NULL) + offset */
 void     wtls_plat_set_unix_time_offset(int64_t delta_s);
+int64_t  wtls_plat_unix_time_offset(void);          /* the delta set above (0 until SNTP ran) */
 
 /* Strict dotted-quad IPv4 literal ("a.b.c.d", each 0..255, no leading '+'/space).
  * Returns true and stores the address in network byte order. */

@@ -80,6 +80,12 @@ Wii's clock is often wrong (dead clock battery, never set). Two strategies:
   clock that is off by less shows up as `WTLS_ERR_CERT` with the
   `MBEDTLS_X509_BADCERT_EXPIRED` or `_FUTURE` flag. In both cases: sync, retry
   once.
+- Or remember the result: after a successful sync call
+  `wtls_time_save("sd:/apps/myapp/clock.bin")`; at the next start
+  `wtls_time_load(path, 7 * 86400)` applies it without network traffic. It is
+  only a hint (rejected if the file is damaged, older than the age you pass, or
+  the console clock went backwards); if a certificate still looks expired,
+  sync once and retry as above.
 
 **Network / Wi-Fi changes.** After `net_deinit()` / `net_init()` or switching
 access points, `wtls_net_reset()` flushes the DNS cache and pooled HTTP

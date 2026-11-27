@@ -438,6 +438,27 @@ typedef struct {
  */
 wtls_status wtls_set_allocator(const wtls_allocator *a);
 
+/**
+ * Saves the clock correction found by wtls_time_sync_sntp() to a small file (for
+ * example on the SD card) so the next start can skip the SNTP round trip.
+ *
+ * @return WTLS_OK; WTLS_ERR_STATE (no successful wtls_time_sync_sntp() in this
+ *         run, so there is nothing trustworthy to save); WTLS_ERR_FILE; WTLS_ERR_ARG.
+ */
+wtls_status wtls_time_save(const char *path);
+
+/**
+ * Applies a correction saved by wtls_time_save(), unless wtls_time_sync_sntp()
+ * already succeeded in this run. It is only a hint: the file is rejected when
+ * it is damaged (WTLS_ERR_FILE), when the console clock is earlier than at the
+ * time of saving, when more than @p max_age_s seconds (0 = no limit) have passed
+ * since then, or when the corrected time is implausible (all WTLS_ERR_CLOCK).
+ * Certificate checks still decide: after WTLS_ERR_CERT with an expired or
+ * not-yet-valid certificate, run wtls_time_sync_sntp() once and retry.
+ * Does not need wtls_init().
+ */
+wtls_status wtls_time_load(const char *path, uint32_t max_age_s);
+
 /** Human-readable text for a ::wtls_status value (never NULL). */
 const char *wtls_strerror(int status);
 

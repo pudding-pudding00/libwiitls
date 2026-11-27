@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <wiitls/wiitls.h>
@@ -157,6 +158,78 @@ static void test_sntp_needs_init(void) {
     CHECK_EQ_INT(wtls_time_sync_sntp("127.0.0.1", 100), WTLS_ERR_STATE);
 }
 
+/* ---- persisted offset ----------------------------------------------------- */
+
+static void test_time_state_roundtrip(void) {
+    int64_t now = wtls_time_build() + 5000;
+    uint8_t rec[WTLS_TIME_STATE_LEN];
+    wtls_time_state_encode(rec, 4321, now);
+    int64_t off = 0;
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now + 100, 3600, &off), WTLS_OK);
+    CHECK_EQ_INT((long long)off, 4321);
+    wtls_time_state_encode(rec, -777, now); /* RTCs run fast as well as slow */
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now, 0, &off), WTLS_OK);
+    CHECK_EQ_INT((long long)off, -777);
+}
+
+static void test_time_state_too_old_clock(void) {
+    int64_t now = wtls_time_build() + 5000;
+    uint8_t rec[WTLS_TIME_STATE_LEN];
+    int64_t off = 99;
+    wtls_time_state_encode(rec, 1000, now);
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now + 3601, 3600, &off), WTLS_ERR_CLOCK); /* older than max_age */
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now + 3600, 3600, &off), WTLS_OK);
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now + 100 * 86400, 0, &off), WTLS_OK);    /* 0 = no limit */
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now - 1, 0, &off), WTLS_ERR_CLOCK);       /* the RTC went back */
+    wtls_time_state_encode(rec, 40LL * 365 * 86400, now);
+    CHECK_EQ_INT(wtls_time_state_decode(rec, now, 0, &off), WTLS_ERR_CLOCK);           /* corrected time implausible */
+}
+
+static void test_time_state_corruption_rejected(void) {
+    int64_t now = wtls_time_build() + 5000;
+    uint8_t rec[WTLS_TIME_STATE_LEN];
+    int64_t off = 0;
+    wtls_time_state_encode(rec, 1000, now);
+    for (size_t i = 0; i < sizeof rec; i++) { /* every single flipped bit is detected */
+        for (int bit = 0; bit < 8; bit++) {
+            uint8_t bad[WTLS_TIME_STATE_LEN];
+            memcpy(bad, rec, sizeof bad);
+            bad[i] ^= (uint8_t)(1u << bit);
+            CHECK_EQ_INT(wtls_time_state_decode(bad, now, 0, &off), WTLS_ERR_FILE);
+        }
+    }
+}
+
+static void test_time_save_load_file(void) {
+    const char *path = "wtls_time_state.bin";
+    remove(path);
+    wtls_time_note_synced(false);
+    CHECK_EQ_INT(wtls_time_save(path), WTLS_ERR_STATE); /* never synced in this run */
+    wtls_plat_set_unix_time_offset(0);
+    wtls_time_note_synced(true);
+    CHECK_EQ_INT(wtls_time_save(path), WTLS_OK);
+    wtls_time_note_synced(false); /* "restart" */
+    CHECK_EQ_INT(wtls_time_load(path, 60), WTLS_OK);
+    CHECK_EQ_INT((long long)wtls_plat_unix_time_offset(), 0); /* the saved offset was 0 */
+    /* a synced run keeps its own offset */
+    wtls_plat_set_unix_time_offset(55);
+    wtls_time_note_synced(true);
+    CHECK_EQ_INT(wtls_time_load(path, 60), WTLS_OK);
+    CHECK_EQ_INT((long long)wtls_plat_unix_time_offset(), 55);
+    wtls_plat_set_unix_time_offset(0);
+    wtls_time_note_synced(false);
+    CHECK_EQ_INT(wtls_time_load("wtls_no_such_state.bin", 60), WTLS_ERR_FILE);
+    FILE *f = fopen(path, "wb"); /* truncated file */
+    CHECK(f != NULL);
+    if (f) {
+        fwrite("WTLSTM01", 1, 8, f);
+        fclose(f);
+    }
+    CHECK_EQ_INT(wtls_time_load(path, 60), WTLS_ERR_FILE);
+    CHECK_EQ_INT(wtls_time_load(NULL, 60), WTLS_ERR_ARG);
+    remove(path);
+}
+
 int main(void) {
     RUN(test_sntp_needs_init);
     RUN(test_time_check_bounds);
@@ -167,5 +240,9 @@ int main(void) {
     RUN(test_unix_time_offset);
     RUN(test_sntp_query_retries_lost_packet);
     RUN(test_sntp_query_gives_up_after_3);
+    RUN(test_time_state_roundtrip);
+    RUN(test_time_state_too_old_clock);
+    RUN(test_time_state_corruption_rejected);
+    RUN(test_time_save_load_file);
     return CHECK_DONE();
 }

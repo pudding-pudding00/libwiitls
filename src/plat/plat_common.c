@@ -13,6 +13,8 @@ int64_t wtls_plat_unix_time(void) { return (int64_t)time(NULL) + g_unix_offset; 
 
 void wtls_plat_set_unix_time_offset(int64_t delta_s) { g_unix_offset = delta_s; }
 
+int64_t wtls_plat_unix_time_offset(void) { return g_unix_offset; }
+
 bool wtls_plat_parse_ipv4(const char *s, uint32_t *ipv4_be) {
     uint8_t b[4];
     if (!s) return false;
