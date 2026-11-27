@@ -14,6 +14,7 @@
 #include <wiitls/http.h>
 
 #include "wtls_mem.h"
+#include "http/wtls_cookie.h"
 #include "http/wtls_http_chunked.h"
 #if WTLS_GZIP
 #include "http/wtls_http_gzip.h"
@@ -871,6 +872,32 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     return WTLS_OK;
 }
 
+/* Path of the request target without the query ("/" for none). */
+static void request_path(const wtls_url *u, char out[1025]) {
+    if (u->target_needs_slash || u->target_len == 0 || u->target[0] != '/') {
+        strcpy(out, "/");
+        return;
+    }
+    size_t n = 0;
+    while (n < u->target_len && n < 1024 && u->target[n] != '?') {
+        out[n] = u->target[n];
+        n++;
+    }
+    out[n] = '\0';
+}
+
+static bool has_cookie_header(const wtls_http_header *h, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        const char *a = h[i].name, *b = "cookie";
+        while (*a && *b && ((*a | 0x20) == *b)) {
+            a++;
+            b++;
+        }
+        if (!*a && !*b) return true;
+    }
+    return false;
+}
+
 static bool is_redirect(int s) { return s == 301 || s == 302 || s == 303 || s == 307 || s == 308; }
 
 static bool is_credential(const char *name) {
@@ -1086,8 +1113,38 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
 
     wtls_http_header *filtered = NULL;
     for (;;) {
+        char cpath[1025];
+        char *cookie_value = NULL;
+        wtls_http_header *with_cookie = NULL;
+        const wtls_http_header *saved_h = x.headers;
+        size_t saved_n = x.n_headers;
+        if (req->cookie_jar) {
+            request_path(&u, cpath);
+            if (!has_cookie_header(x.headers, x.n_headers)) {
+                cookie_value = wtls_cookie_jar_header(req->cookie_jar, u.host, cpath, u.secure, wtls_plat_unix_time());
+                if (cookie_value) {
+                    with_cookie = wtls_malloc((x.n_headers + 1) * sizeof *with_cookie);
+                    if (with_cookie) {
+                        if (x.n_headers) memcpy(with_cookie, x.headers, x.n_headers * sizeof *with_cookie);
+                        with_cookie[x.n_headers] = (wtls_http_header){"Cookie", cookie_value};
+                        x.headers = with_cookie;
+                        x.n_headers++;
+                    }
+                }
+            }
+        }
         st = hop(r, &x, &u);
+        x.headers = saved_h;
+        x.n_headers = saved_n;
+        wtls_free(with_cookie);
+        wtls_free(cookie_value);
         if (st != WTLS_OK) break;
+        if (req->cookie_jar) {
+            int64_t now = wtls_plat_unix_time();
+            for (size_t i = 0; i < r->head.n_fields; i++)
+                if (strcmp(r->head.fields[i].name, "set-cookie") == 0)
+                    (void)wtls_cookie_jar_set(req->cookie_jar, r->head.fields[i].value, u.host, cpath, u.secure, now);
+        }
         const char *location = wtls_http_head_get(&r->head, "location");
         if (req->max_redirects < 0 || !is_redirect(r->head.status) || !location) break;
         st = follow(r, &x, &u, location, &filtered);

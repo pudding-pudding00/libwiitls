@@ -2322,6 +2322,72 @@ static void http2_flow_upload_expect_gzip_cont(void) {
 }
 #endif
 
+/* ---- cookie jar --------------------------------------------------------- */
+
+static void fetch_with_jar(const char *u, wtls_cookie_jar *jar, bool no_h2, char *out, size_t cap) {
+    wtls_http_request req = {0};
+    req.url = u;
+    req.cookie_jar = jar;
+    req.no_h2 = no_h2;
+    wtls_http_result res;
+    int st = wtls_http_fetch(&req, 0, &res);
+    CHECK_EQ_INT(st, WTLS_OK);
+    out[0] = '\0';
+    if (st == WTLS_OK) {
+        snprintf(out, cap, "%.*s", (int)(res.body_len < cap - 1 ? res.body_len : cap - 1), res.body);
+        wtls_http_result_free(&res);
+    }
+}
+
+static void http_cookie_jar_roundtrip(void) {
+    wtls_http_pool_flush();
+    wtls_cookie_jar *jar = wtls_cookie_jar_new(0);
+    char body[2048];
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/setcookie?c=sid%3Dabc%3B+Path%3D%2F&c2=theme%3Ddark"), jar, true, body, sizeof body);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 2);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "cookie: sid=abc; theme=dark") != NULL || strstr(body, "Cookie: sid=abc; theme=dark") != NULL);
+    /* a Cookie header of your own wins */
+    wtls_http_header h[] = {{"Cookie", "mine=1"}};
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/headers");
+    req.cookie_jar = jar;
+    req.headers = h;
+    req.n_headers = 1;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 0, &res), WTLS_OK);
+    CHECK(res.body && strstr(res.body, "mine=1") != NULL && strstr(res.body, "sid=abc") == NULL);
+    wtls_http_result_free(&res);
+    wtls_cookie_jar_clear(jar);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "sid=abc") == NULL);
+    wtls_cookie_jar_free(jar);
+}
+
+static void http_cookie_jar_secure_and_redirect(void) {
+    wtls_http_pool_flush();
+    wtls_cookie_jar *jar = wtls_cookie_jar_new(0);
+    char body[2048];
+    /* set over https: a Secure cookie is stored and only sent back over https */
+    fetch_with_jar(url_of("https", P_HTTP, "/setcookie?c=tok%3D1%3B+Secure"), jar, true, body, sizeof body);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 1);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "tok=1") == NULL);
+    fetch_with_jar(url_of("https", P_HTTP, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "tok=1") != NULL);
+    /* the same host name on another port shares host-only cookies (cookies ignore ports); a cookie
+     * set by an intermediate redirect hop is already sent on the next hop */
+    wtls_cookie_jar_clear(jar);
+    char target[160];
+    snprintf(target, sizeof target, "/headers");
+    char u[400];
+    snprintf(u, sizeof u, "/cookie-redirect?c=hop%%3D1&to=%s", target);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, u), jar, true, body, sizeof body);
+    CHECK(strstr(body, "hop=1") != NULL);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 1);
+    wtls_cookie_jar_free(jar);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -2333,6 +2399,8 @@ void wtls_suite_http(void) {
         return;
     }
     RUN(http_get_hello);
+    RUN(http_cookie_jar_roundtrip);
+    RUN(http_cookie_jar_secure_and_redirect);
     RUN(http_len_big);
     RUN(http_chunked);
     RUN(http_close_delimited);

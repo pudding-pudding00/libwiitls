@@ -68,6 +68,8 @@ ignored, so a test can tag its requests and count them with /count.
                                   half of the gzip stream (framing complete);
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+  GET /setcookie?c=V[&c2=V][&c3=V] 200 "ok" with one Set-Cookie field per given value
+  GET /cookie-redirect?c=V&to=URL 302 to URL with Set-Cookie V
   GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
                                   subprotocol P when offered), then echoes text/binary messages; text
                                   commands: "close" (server Close 1000), "ping" (Ping, then "pong-ok"
@@ -730,6 +732,12 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             tcp_abort(sock)
             return False
         send(body)
+    elif path == "/setcookie":
+        hdrs = [("Set-Cookie", query[k]) for k in ("c", "c2", "c3") if k in query]
+        send(http_response(200, hdrs + [("Content-Length", 2)], b"ok"))
+    elif path == "/cookie-redirect":
+        send(http_response(302, [("Set-Cookie", query.get("c", "x=1")), ("Location", query.get("to", "/hello")),
+                                 ("Content-Length", 0)]))
     elif path in ("/ws", "/ws-badaccept"):
         ws_serve(sock, path, query, head)
         return False

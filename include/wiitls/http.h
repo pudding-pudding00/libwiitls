@@ -21,6 +21,18 @@
 extern "C" {
 #endif
 
+/** Opaque in-memory cookie jar, see wtls_http_request::cookie_jar. */
+typedef struct wtls_cookie_jar wtls_cookie_jar;
+
+/** Creates a jar holding at most @p max_cookies cookies (0 => 64; the oldest is evicted). NULL on no memory. */
+wtls_cookie_jar *wtls_cookie_jar_new(size_t max_cookies);
+/** Frees the jar and every cookie in it. NULL is allowed. */
+void wtls_cookie_jar_free(wtls_cookie_jar *jar);
+/** Drops all cookies (log out). */
+void wtls_cookie_jar_clear(wtls_cookie_jar *jar);
+/** Number of cookies currently stored. */
+size_t wtls_cookie_jar_count(const wtls_cookie_jar *jar);
+
 /** One request header field. */
 typedef struct {
     const char *name;  /**< RFC 9110 token; Host, Content-Length, Transfer-Encoding and Connection are refused */
@@ -83,6 +95,13 @@ typedef struct {
     const char *proxy_url;             /**< optional "http://host[:port]" HTTP proxy (uses absolute-form
                                             for http:// and CONNECT tunnel for https://; bypasses pool) */
     bool no_h2;                        /**< disable HTTP/2 ALPN ("h2") and force HTTP/1.1 */
+    wtls_cookie_jar *cookie_jar;       /**< (1.1) optional: Set-Cookie fields of every response, including each
+                                            redirect hop, are stored, and matching cookies are sent as Cookie
+                                            (RFC 6265: Domain, Path, Secure, Expires/Max-Age; HttpOnly is kept
+                                            but means nothing without scripts). A Cookie header you pass in
+                                            @c headers wins: then the jar is not consulted for that request.
+                                            Domain cookies need a dot in the domain; there is no public suffix
+                                            list, so "co.uk" is accepted. Not shared between jars or threads. */
 } wtls_http_request;
 
 /** Opaque response handle. */

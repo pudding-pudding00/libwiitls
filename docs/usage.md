@@ -341,6 +341,26 @@ Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
 push, cookies (send your own `Cookie` header), authentication schemes (send
 your own `Authorization`), caching, and `br` encoding.
 
+### Cookies
+
+```c
+wtls_cookie_jar *jar = wtls_cookie_jar_new(0);       /* 0 => up to 64 cookies */
+wtls_http_request req = {0};
+req.cookie_jar = jar;                                /* reuse the same jar for every request */
+req.url = "https://example.com/login";
+/* ... fetch ...; later requests send the matching cookies automatically */
+wtls_cookie_jar_free(jar);
+```
+
+The jar lives in memory only (persist what you need yourself). It follows
+RFC 6265: `Domain` (host-only without it), `Path`, `Secure` (never sent in clear
+and not accepted from plain http), `Expires` / `Max-Age` (deletion included),
+and it decides per redirect hop, so cookies set by a redirect are sent to its
+target. A `Cookie` header you pass yourself wins. Limits: there is no public
+suffix list (a `Domain=co.uk` cookie is accepted; a bare `com` is not), no
+`SameSite` handling (the library is not a browser), and cookies ignore ports as
+in browsers.
+
 ### Authorization headers
 
 ```c

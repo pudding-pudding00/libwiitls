@@ -127,6 +127,7 @@ jobs:
           ./build-fuzz/fuzz_content_range tests/fuzz/corpus/content_range -max_total_time=10
           ./build-fuzz/fuzz_http_gzip     tests/fuzz/corpus/http_gzip     -max_total_time=10
           ./build-fuzz/fuzz_client_cred   tests/fuzz/corpus/client_cred   -max_total_time=10
+          ./build-fuzz/fuzz_set_cookie      tests/fuzz/corpus/set_cookie      -max_total_time=20
           ./build-fuzz/fuzz_ws_frame        tests/fuzz/corpus/ws_frame        -max_total_time=20
           ./build-fuzz/fuzz_hpack           tests/fuzz/corpus/hpack           -max_total_time=30
           ./build-fuzz/fuzz_h2_frames       tests/fuzz/corpus/h2_frames       -max_total_time=30

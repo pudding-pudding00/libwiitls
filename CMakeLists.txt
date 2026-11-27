@@ -381,6 +381,7 @@ add_library(wiitls STATIC
     src/http/wtls_http.c
     src/http/wtls_http_pool.c
     src/http/wtls_http_download.c
+    src/http/wtls_cookie.c
     src/ws/wtls_ws_frame.c
     src/ws/wtls_ws.c
     ${WTLS_CA_BUNDLE_C}
@@ -555,6 +556,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_http_parse)
     wtls_host_test(test_http_chunked)
     wtls_host_test(test_http_util)
+    wtls_host_test(test_cookie)
     if(WTLS_GZIP)
         wtls_host_test(test_http_gzip)
     endif()
@@ -596,6 +598,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         wtls_fuzz_corpus_test(fuzz_h2_frames h2_frames)
     endif()
     wtls_fuzz_corpus_test(fuzz_ws_frame ws_frame)
+    wtls_fuzz_corpus_test(fuzz_set_cookie set_cookie)
     if(WTLS_ACCEL)
         wtls_fuzz_corpus_test(fuzz_x25519_diff x25519_diff)
     endif()
@@ -694,7 +697,7 @@ if(WTLS_BUILD_FUZZ)
     if(WTLS_GZIP)
         list(APPEND _wtls_fuzz_targets fuzz_http_gzip)
     endif()
-    list(APPEND _wtls_fuzz_targets fuzz_x25519_diff fuzz_p256_verify_diff fuzz_ws_frame)
+    list(APPEND _wtls_fuzz_targets fuzz_x25519_diff fuzz_p256_verify_diff fuzz_ws_frame fuzz_set_cookie)
     if(WTLS_HTTP2)
         list(APPEND _wtls_fuzz_targets fuzz_hpack fuzz_h2_frames)
     endif()

@@ -1,0 +1,5 @@
+a=1
+b=2; Path=/a
+c=3; Path=/a/b
+d=4; Domain=example.com
+e=5
