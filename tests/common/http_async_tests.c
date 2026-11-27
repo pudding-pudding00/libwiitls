@@ -678,18 +678,24 @@ typedef struct {
     uint64_t t_head, t_done;
 } job;
 
-static void job_start(job *j, const char *url, size_t cap) {
-    memset(j, 0, sizeof *j);
-    j->req.url = url;
-    j->cap = cap;
-    j->body = malloc(cap ? cap : 1);
+/* Starts a job whose req, body and cap are set. start may already finish the exchange, a failed one too:
+ * keep that error, since the job never reaches a step. */
+static void job_go(job *j) {
     j->st = wtls_http_start(&j->r, &j->req);
-    CHECK(j->st == WTLS_OK || j->st == WTLS_WANT_READ || j->st == WTLS_WANT_WRITE);
     if (j->st == WTLS_OK) j->head = true;
     if (j->st != WTLS_OK && j->st != WTLS_WANT_READ && j->st != WTLS_WANT_WRITE) {
         j->err = j->st;
         j->done = true;
     }
+}
+
+static void job_start(job *j, const char *url, size_t cap) {
+    memset(j, 0, sizeof *j);
+    j->req.url = url;
+    j->cap = cap;
+    j->body = malloc(cap ? cap : 1);
+    job_go(j);
+    CHECK(j->st == WTLS_OK || j->st == WTLS_WANT_READ || j->st == WTLS_WANT_WRITE);
 }
 
 static void job_free(job *j) {
@@ -841,7 +847,7 @@ static void test_async_h2_uploads(void) {
         j.req.url = h2url(P_MUX, "/echo");
         j.cap = want + 1;
         j.body = malloc(j.cap);
-        j.st = wtls_http_start(&j.r, &j.req);
+        job_go(&j);
         CHECK(j.st == WTLS_OK || j.st == WTLS_WANT_READ || j.st == WTLS_WANT_WRITE);
         CHECK(jobs_run(&j, 1, 20000, NULL, NULL));
         CHECK_EQ_INT(j.err, 0);
@@ -994,7 +1000,7 @@ static void test_async_h2_goaway_and_refused_stream_are_retried(void) {
     j.req.body_len = 1;
     j.cap = 32;
     j.body = malloc(32);
-    j.st = wtls_http_start(&j.r, &j.req);
+    job_go(&j);
     CHECK(jobs_run(&j, 1, 15000, NULL, NULL));
     CHECK(j.err != 0);
     job_free(&j);
@@ -1074,7 +1080,7 @@ static void test_async_h2_no_h2_option_uses_http11(void) {
     j.req = req;
     j.cap = 16;
     j.body = malloc(16);
-    j.st = wtls_http_start(&j.r, &j.req);
+    job_go(&j);
     CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
     wtls_http_info info;
     CHECK(j.r && wtls_http_get_info(j.r, &info) == WTLS_OK && !info.http2);

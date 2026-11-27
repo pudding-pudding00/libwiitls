@@ -25,6 +25,7 @@ enum { E_NO_ERROR = 0, E_PROTOCOL = 1, E_REFUSED = 7, E_CANCEL = 8 };
 typedef struct out_chunk {
     struct out_chunk *next;
     size_t len, off;
+    bool tried; /* offered to io.write: a WANT_WRITE retry must repeat it unchanged */
     uint8_t data[];
 } out_chunk;
 
@@ -110,6 +111,7 @@ static out_chunk *new_chunk(h2s_session *s, size_t len) {
     if (c) {
         c->len = len;
         c->off = 0;
+        c->tried = false;
     }
     return c;
 }
@@ -425,9 +427,43 @@ static int process(h2s_session *s, uint8_t type, uint8_t flags, uint32_t id, con
 
 /* ---- I/O ---- */
 
+/* Merges the untouched chunks at the head of the queue (up to one full frame) into
+ * one, so frames queued together leave in one write. The Wii cannot disable Nagle
+ * (IOS rejects TCP_NODELAY): small writes in a row wait for the server's delayed
+ * ACK. Without memory the chunks simply go out one by one. */
+static void coalesce_head(h2s_session *s) {
+    out_chunk *h = s->oh;
+    if (!h || h->tried || !h->next) return;
+    size_t total = 0;
+    out_chunk *end = h;
+    while (end && total + end->len <= F_HDR + F_MAX) {
+        total += end->len;
+        end = end->next;
+    }
+    if (end == h->next) return; /* only the head fits */
+    out_chunk *m = wtls_malloc(sizeof *m + total);
+    if (!m) return;
+    m->len = total;
+    m->off = 0;
+    m->tried = false;
+    size_t o = 0;
+    for (out_chunk *p = h; p != end;) {
+        out_chunk *n = p->next;
+        memcpy(m->data + o, p->data, p->len);
+        o += p->len;
+        wtls_free(p);
+        p = n;
+    }
+    m->next = end;
+    s->oh = m;
+    if (!end) s->ot = m;
+}
+
 static void flush_out(h2s_session *s) {
     while (s->oh && !s->err) {
+        coalesce_head(s);
         out_chunk *c = s->oh;
+        c->tried = true;
         int r = s->io.write(s->io_ctx, c->data + c->off, c->len - c->off);
         if (r == WTLS_WANT_WRITE || r == WTLS_WANT_READ) return;
         if (r <= 0) {

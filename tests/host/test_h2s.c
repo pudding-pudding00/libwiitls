@@ -19,6 +19,7 @@ typedef struct {
     size_t last_len;
     bool retry_mismatch;
     size_t max_write;     /* 0 = unlimited, else bytes accepted per call */
+    unsigned writes;      /* write calls that accepted bytes */
 } tp;
 
 static int t_read(void *c, void *buf, size_t len) {
@@ -45,6 +46,7 @@ static int t_write(void *c, const void *buf, size_t len) {
     if (t->max_write && len > t->max_write) len = t->max_write;
     memcpy(t->out + t->out_len, buf, len);
     t->out_len += len;
+    t->writes++;
     return (int)len;
 }
 
@@ -720,6 +722,37 @@ static void test_h2s_partial_writes(void) {
     fx_free(&f);
 }
 
+/* The Wii cannot turn Nagle off (IOS rejects TCP_NODELAY): frames written one by
+ * one wait for the server's delayed ACK (~40 ms per wave of requests measured).
+ * Frames queued together leave in one write. */
+static void test_h2s_frames_leave_together(void) {
+    fx f;
+    fx_init(&f, 8, 32768);
+    settle(&f);
+    pump_ok(&f);
+    unsigned before = f.t.writes;
+    h2s_stream *st[4];
+    static const char *paths[4] = {"/a", "/b", "/c", "/d"};
+    for (int i = 0; i < 4; i++) st[i] = get(&f, paths[i]);
+    pump_ok(&f);
+    TLOG("    writes for 4 requests: %u\n", f.t.writes - before);
+    CHECK_EQ_INT((int)(f.t.writes - before), 1);
+    CHECK_EQ_INT((int)count_frames(&f, 1, UINT32_MAX), 4);
+    /* A write answered with WANT_WRITE is retried unchanged, even if more frames are queued meanwhile. */
+    f.t.block_write = true;
+    h2s_stream *e = get(&f, "/e");
+    pump_ok(&f);
+    h2s_stream_release(st[0]);
+    pump_ok(&f);
+    f.t.block_write = false;
+    pump_ok(&f);
+    CHECK(!f.t.retry_mismatch);
+    CHECK_EQ_INT((int)count_frames(&f, 1, UINT32_MAX), 5);
+    for (int i = 1; i < 4; i++) h2s_stream_release(st[i]);
+    h2s_stream_release(e);
+    fx_free(&f);
+}
+
 static void test_h2s_connection_lost(void) {
     fx f;
     fx_init(&f, 4, 32768);
@@ -816,6 +849,7 @@ int main(void) {
     RUN(test_h2s_settings_window_change);
     RUN(test_h2s_output_backpressure);
     RUN(test_h2s_partial_writes);
+    RUN(test_h2s_frames_leave_together);
     RUN(test_h2s_connection_lost);
     RUN(test_h2s_work_budget);
     RUN(test_h2s_one_stream_until_settings);

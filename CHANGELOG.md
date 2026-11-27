@@ -18,6 +18,14 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- **HTTP/2 was ten times slower than HTTP/1.1 on the Wii:** the client wrote each frame, and each frame's header
+  and payload, with its own `send`. IOS does not allow `TCP_NODELAY`, so Nagle held every small write until the
+  server's delayed ACK came back, ~62 ms per sequential request. Both HTTP/2 engines now gather a request's frames
+  into one write (the blocking one buffers up to one maximum frame and flushes before reading; the non-blocking one
+  merges queued frames before each write): ~9 ms per request. 1.0.0 and 1.0.1 are affected. New host test
+  `test_h2_engine`, new case in `test_h2s`.
+- Tests: the non-blocking HTTP tests keep an error that `wtls_http_start()` returns at once. On the Wii the POST in
+  the GOAWAY test now fails inside `start`, and the test read that as success.
 - A non-blocking `wtls_write()` that returned `WTLS_WANT_WRITE` could send the same TLS record twice when
   `wtls_read()` ran before the retry and processed a TLS 1.3 session ticket (Mbed TLS flushes the pending output
   there). The peer then saw a corrupted stream; on the Wii this broke HTTP/2 uploads in `wtls_http_start()`. 1.0.0 and 1.0.1

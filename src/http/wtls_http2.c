@@ -63,7 +63,12 @@ struct wtls_h2_conn {
     uint8_t *rx_buf;
     size_t rx_off;
     size_t rx_end;
+    /* Outgoing frames gathered until the next read (see send_frame). */
+    uint8_t *tx_buf;
+    size_t tx_len;
 };
+
+#define H2_TX_CAP (H2_FRAME_HDR + H2_MAX_FRAME_CAP)
 
 static uint32_t read_u24(const uint8_t *p) {
     return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
@@ -109,7 +114,17 @@ static int h2_write_all(wtls_h2_conn *c, const void *buf, size_t len) {
     return WTLS_OK;
 }
 
+/* Sends the gathered frames in one write. */
+static int h2_flush(wtls_h2_conn *c) {
+    if (!c->tx_len) return WTLS_OK;
+    size_t n = c->tx_len;
+    c->tx_len = 0;
+    return h2_write_all(c, c->tx_buf, n);
+}
+
 static int h2_read_exact(wtls_h2_conn *c, void *buf, size_t len, uint64_t has_deadline, uint64_t deadline) {
+    int fst = h2_flush(c); /* whatever we owe the peer must leave before we wait for it */
+    if (fst != WTLS_OK) return fst;
     uint8_t *p = buf;
     while (len) {
         uint32_t max_wait = 0;
@@ -131,13 +146,22 @@ static int h2_read_exact(wtls_h2_conn *c, void *buf, size_t len, uint64_t has_de
     return WTLS_OK;
 }
 
+/* Queues a frame; frames leave together on the next read (h2_read_exact), when the
+ * buffer fills, or at the end of wtls_h2_alive. The Wii cannot disable Nagle (IOS
+ * rejects TCP_NODELAY), so a frame header and its payload written separately, or two
+ * small frames in a row, waited for the server's delayed ACK: ~60 ms per request.
+ * Every frame fits (len <= peer_max_frame <= H2_MAX_FRAME_CAP), so none is split. */
 static int send_frame(wtls_h2_conn *c, uint8_t type, uint8_t flags, uint32_t stream,
                       const void *payload, size_t len) {
-    uint8_t hdr[H2_FRAME_HDR];
-    write_frame_hdr(hdr, (uint32_t)len, type, flags, stream);
-    int st = h2_write_all(c, hdr, sizeof hdr);
-    if (st == WTLS_OK && len) st = h2_write_all(c, payload, len);
-    return st;
+    if (len > H2_MAX_FRAME_CAP) return WTLS_ERR_ARG;
+    if (c->tx_len + H2_FRAME_HDR + len > H2_TX_CAP) {
+        int st = h2_flush(c);
+        if (st != WTLS_OK) return st;
+    }
+    write_frame_hdr(c->tx_buf + c->tx_len, (uint32_t)len, type, flags, stream);
+    if (len) memcpy(c->tx_buf + c->tx_len + H2_FRAME_HDR, payload, len);
+    c->tx_len += H2_FRAME_HDR + len;
+    return WTLS_OK;
 }
 
 static int send_window_update(wtls_h2_conn *c, uint32_t stream, uint32_t inc) {
@@ -406,7 +430,10 @@ int wtls_h2_create_io(const wtls_h2_io *io, void *io_ctx, wtls_h2_conn **out) {
     wtls_h2_conn *c = wtls_calloc(1, sizeof *c);
     if (!c) return WTLS_ERR_NOMEM;
     c->rx_buf = wtls_malloc(H2_MAX_FRAME_CAP);
-    if (!c->rx_buf) {
+    c->tx_buf = wtls_malloc(H2_TX_CAP);
+    if (!c->rx_buf || !c->tx_buf) {
+        wtls_free(c->rx_buf);
+        wtls_free(c->tx_buf);
         wtls_free(c);
         return WTLS_ERR_NOMEM;
     }
@@ -448,6 +475,7 @@ void wtls_h2_free(wtls_h2_conn *c) {
     if (!c) return;
     wtls_hpack_free(&c->hpack);
     wtls_free(c->rx_buf);
+    wtls_free(c->tx_buf);
     wtls_free(c);
 }
 
@@ -455,9 +483,18 @@ bool wtls_h2_reusable(const wtls_h2_conn *c) {
     return c && !c->goaway_recv && !c->broken && c->next_stream_id <= 0x7fffffffu;
 }
 
+static bool alive_scan(wtls_h2_conn *c);
+
 bool wtls_h2_alive(wtls_h2_conn *c) {
     if (!wtls_h2_reusable(c)) return false;
     c->cur_stream_id = 0;
+    bool ok = alive_scan(c);
+    /* ACKs queued by the scan must not wait for the next request. */
+    if (h2_flush(c) != WTLS_OK) return false;
+    return ok && wtls_h2_reusable(c);
+}
+
+static bool alive_scan(wtls_h2_conn *c) {
     for (;;) {
         if (!c->io.readable(c->io_ctx)) return wtls_h2_reusable(c);
         uint8_t hdr[H2_FRAME_HDR];
