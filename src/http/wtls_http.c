@@ -49,6 +49,7 @@ typedef struct {
     uint32_t io_timeout_ms; /* plain only; TLS keeps its own */
     wtls_abort_cb abort_cb; /* plain only; TLS keeps its own */
     void *abort_ctx;
+    bool nonblock;          /* reads and writes return WTLS_WANT_* instead of waiting (wtls_http_start) */
 #if WTLS_HTTP2
     wtls_h2_conn *h2;
 #endif
@@ -65,6 +66,9 @@ struct wtls_http_response {
     wtls_chunked chunked;
     int err;             /* sticky read error */
     uint64_t deadline_ms; /* total_timeout_ms: absolute, 0 = none */
+    struct async_state *as; /* wtls_http_start: the request in flight until the head is complete */
+    uint32_t io_timeout_ms; /* non-blocking body reads: longest wait without any byte */
+    uint64_t last_io_ms;
     bool eof;            /* body read to its end */
     bool head_request;
     bool is_http2;
@@ -119,6 +123,13 @@ static int plain_poll_wait(http_tr *t, bool rd, bool wr, uint64_t deadline) {
  * or WTLS_ERR_CANCELLED. */
 static int plain_read(http_tr *t, void *buf, size_t len) {
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
+    if (t->nonblock) {
+        if (t->abort_cb && t->abort_cb(t->abort_ctx)) return WTLS_ERR_CANCELLED;
+        int k = wtls_plat_recv(t->fd, buf, len);
+        if (k > 0) return k;
+        if (k == 0) return WTLS_ERR_CLOSED;
+        return k == WTLS_WANT_READ ? WTLS_WANT_READ : WTLS_ERR_IO;
+    }
     uint64_t deadline = wtls_plat_now_ms() + t->io_timeout_ms;
     for (;;) {
         if (t->abort_cb && t->abort_cb(t->abort_ctx)) return WTLS_ERR_CANCELLED;
@@ -133,6 +144,12 @@ static int plain_read(http_tr *t, void *buf, size_t len) {
 
 static int plain_write(http_tr *t, const void *buf, size_t len) {
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
+    if (t->nonblock) {
+        if (t->abort_cb && t->abort_cb(t->abort_ctx)) return WTLS_ERR_CANCELLED;
+        int k = wtls_plat_send(t->fd, buf, len);
+        if (k > 0) return k;
+        return k == WTLS_WANT_WRITE ? WTLS_WANT_WRITE : WTLS_ERR_IO;
+    }
     uint64_t deadline = wtls_plat_now_ms() + t->io_timeout_ms;
     for (;;) {
         if (t->abort_cb && t->abort_cb(t->abort_ctx)) return WTLS_ERR_CANCELLED;
@@ -900,6 +917,10 @@ static int exchange(wtls_http_response *r, request_ctx *x, bool *got) {
  * request and holds no unread bytes; closes it otherwise. */
 static void release_conn(wtls_http_response *r) {
     if (!r->conn) return;
+    if (r->conn->nonblock) { /* pooled connections are blocking ones */
+        r->conn->nonblock = false;
+        if (r->conn->tls) wtls_set_nonblocking(r->conn->tls, false);
+    }
     tr_set_abort(r->conn, NULL, NULL);
     r->abort_cb = NULL;
     r->abort_ctx = NULL;
@@ -972,9 +993,9 @@ static int frame_h2(wtls_http_response *r, bool want_keepalive, bool early_final
 }
 #endif
 
-/* One request/response exchange against *u: head built, connection acquired
- * (pooled or new), final head read and framed. */
-static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
+/* First half of a hop: builds the request head for *u into x->head (the caller frees it) and fills the
+ * per-hop fields of r (scheme, port, host, pool identity) and resets its read state. */
+static int hop_begin(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     char *head = NULL;
     unsigned req_flags = (x->body_chunked ? WTLS_HTTP_REQ_CHUNKED : 0u) |
                          (x->req->no_keepalive ? WTLS_HTTP_REQ_NO_KEEPALIVE : 0u) |
@@ -1018,10 +1039,40 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     r->err = 0;
     r->eof = false;
     r->extra_off = r->extra_end = 0;
-
-    bool got = false;
     WTLS_LOG(WTLS_LOG_DEBUG, WTLS_LOG_CAT_HTTP, "%s %s://%s:%u", x->method, u->secure ? "https" : "http",
              u->host, (unsigned)u->port);
+    return WTLS_OK;
+}
+
+/* Second half: the final head is in r->head; works out how the body is framed. */
+static int hop_frame(wtls_http_response *r, request_ctx *x) {
+    int st;
+#if WTLS_HTTP2
+    if (r->conn->h2) {
+        r->is_http2 = true;
+        st = frame_h2(r, !x->req->no_keepalive, x->early_final, x->has_proxy);
+        if (st != WTLS_OK) return st;
+        r->remaining = r->fr.length;
+        r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
+        return WTLS_OK;
+    }
+#endif
+    st = wtls_http_frame(&r->head, r->head_request, !x->req->no_keepalive, &r->fr);
+    if (st != WTLS_OK) return st;
+    if (r->head.status == 101 || x->early_final || x->has_proxy) r->fr.reusable = false;
+    r->remaining = r->fr.length;
+    r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
+    wtls_chunked_init(&r->chunked);
+    return WTLS_OK;
+}
+
+/* One request/response exchange against *u: head built, connection acquired
+ * (pooled or new), final head read and framed. */
+static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
+    int st = hop_begin(r, x, u);
+    if (st != WTLS_OK) return st;
+    char *head = (char *)x->head; /* hop_begin allocated it */
+    bool got = false;
     st = acquire(r, x);
     if (st == WTLS_OK) {
         WTLS_LOG(WTLS_LOG_DEBUG, WTLS_LOG_CAT_HTTP, "%s:%u: %s connection", u->host, (unsigned)u->port,
@@ -1043,23 +1094,7 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     wtls_free(head);
     x->head = NULL;
     if (st != WTLS_OK) return st;
-#if WTLS_HTTP2
-    if (r->conn->h2) {
-        r->is_http2 = true;
-        st = frame_h2(r, !x->req->no_keepalive, x->early_final, x->has_proxy);
-        if (st != WTLS_OK) return st;
-        r->remaining = r->fr.length;
-        r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
-        return WTLS_OK;
-    }
-#endif
-    st = wtls_http_frame(&r->head, r->head_request, !x->req->no_keepalive, &r->fr);
-    if (st != WTLS_OK) return st;
-    if (r->head.status == 101 || x->early_final || x->has_proxy) r->fr.reusable = false;
-    r->remaining = r->fr.length;
-    r->eof = r->fr.kind == WTLS_BODY_NONE || (r->fr.kind == WTLS_BODY_LENGTH && r->fr.length == 0);
-    wtls_chunked_init(&r->chunked);
-    return WTLS_OK;
+    return hop_frame(r, x);
 }
 
 /* Path of the request target without the query ("/" for none). */
@@ -1219,17 +1254,24 @@ static int setup_encoding(wtls_http_response *r, bool want_gzip) {
     return WTLS_OK;
 }
 
-static wtls_status open_attempt(wtls_http_response **out, const wtls_http_request *req, uint64_t deadline_ms) {
-    if (!out) return WTLS_ERR_ARG;
-    *out = NULL;
+/* The configured stage timeouts (0 resolved to defaults); the total deadline cuts them per hop. */
+typedef struct {
+    uint32_t connect, handshake, io, header;
+} base_timeouts;
+
+/* Shared by wtls_http_open and wtls_http_start: validates req, allocates the response (*rp), parses the URL into *u
+ * and fills x. On an error *rp is NULL. async: refuses what the non-blocking path cannot do (yet). */
+static int request_setup(const wtls_http_request *req, bool async, wtls_http_response **rp, request_ctx *x,
+                         wtls_url *u, base_timeouts *bt, uint64_t deadline_ms) {
+    *rp = NULL;
     if (!req || !req->url) return WTLS_ERR_ARG;
     if (!wtls_core_initialized()) return WTLS_ERR_STATE;
-    if (!WTLS_THREAD_GUARD("wtls_http_open")) return WTLS_ERR_STATE;
     if (wtls_plat_net_changed()) wtls_net_reset();
     if (req->n_headers && !req->headers) return WTLS_ERR_ARG;
     if (req->body_len && !req->body && !req->body_cb) return WTLS_ERR_ARG;
     if (req->body && req->body_cb) return WTLS_ERR_ARG;
     if (req->body_chunked && !req->body_cb) return WTLS_ERR_ARG;
+    if (async && (req->proxy_url || req->expect_100_continue || req->allow_upgrade)) return WTLS_ERR_UNSUPPORTED;
 
     wtls_http_response *r = wtls_calloc(1, sizeof *r);
     if (!r) return WTLS_ERR_NOMEM;
@@ -1245,28 +1287,27 @@ static wtls_status open_attempt(wtls_http_response **out, const wtls_http_reques
     }
     memcpy(r->url, req->url, url_len + 1);
 
-    wtls_url u;
-    int st = wtls_url_parse(r->url, &u);
+    int st = wtls_url_parse(r->url, u);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
-    request_ctx x = {.req = req,
-                     .method = req->method ? req->method : "GET",
-                     .body = req->body,
-                     .body_len = req->body_len,
-                     .body_cb = req->body_cb,
-                     .body_ctx = req->body_ctx,
-                     .body_chunked = req->body_chunked,
-                     .headers = req->headers,
-                     .n_headers = req->n_headers,
-                     .allow_upgrade = req->allow_upgrade,
-                     .expect_100 = req->expect_100_continue &&
-                                   (req->body_cb != NULL || (req->body != NULL && req->body_len > 0))};
+    memset(x, 0, sizeof *x);
+    x->req = req;
+    x->method = req->method ? req->method : "GET";
+    x->body = req->body;
+    x->body_len = req->body_len;
+    x->body_cb = req->body_cb;
+    x->body_ctx = req->body_ctx;
+    x->body_chunked = req->body_chunked;
+    x->headers = req->headers;
+    x->n_headers = req->n_headers;
+    x->allow_upgrade = req->allow_upgrade;
+    x->expect_100 = req->expect_100_continue && (req->body_cb != NULL || (req->body != NULL && req->body_len > 0));
 #if WTLS_CODECS
     /* An application that sets Accept-Encoding itself gets the body as sent. */
-    x.want_gzip = !req->allow_upgrade && !req->no_gzip &&
-                  !wtls_http_headers_have(req->headers, req->n_headers, "Accept-Encoding");
+    x->want_gzip = !req->allow_upgrade && !req->no_gzip &&
+                   !wtls_http_headers_have(req->headers, req->n_headers, "Accept-Encoding");
 #endif
     if (req->proxy_url) {
         size_t plen = strnlen(req->proxy_url, WTLS_HTTP_MAX_URL + 1);
@@ -1274,102 +1315,145 @@ static wtls_status open_attempt(wtls_http_response **out, const wtls_http_reques
             response_free(r);
             return WTLS_ERR_ARG;
         }
-        int pst = parse_proxy(req->proxy_url, &x);
+        int pst = parse_proxy(req->proxy_url, x);
         if (pst != WTLS_OK) {
             response_free(r);
             return pst;
         }
     }
-    if (req->tls) x.opt = *req->tls;
+    if (req->tls) x->opt = *req->tls;
     uint8_t pin_check[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN];
     uint8_t n_pin_check = 0;
-    if (u.secure && wtls_pins_collect(&x.opt, pin_check, &n_pin_check) != WTLS_OK) {
+    if (u->secure && wtls_pins_collect(&x->opt, pin_check, &n_pin_check) != WTLS_OK) {
         response_free(r);
         return WTLS_ERR_ARG;
     }
 #if WTLS_HTTP2
-    x.want_h2 = !req->no_h2 && !req->allow_upgrade;
-    x.opt.alpn = x.want_h2 ? k_alpn_h2 : k_alpn_h1;
+    x->want_h2 = !req->no_h2 && !req->allow_upgrade && !async; /* async: HTTP/1.1 only for now */
+    x->opt.alpn = x->want_h2 ? k_alpn_h2 : k_alpn_h1;
 #else
-    x.opt.alpn = k_alpn_h1;
+    x->opt.alpn = k_alpn_h1;
 #endif
-    r->insecure = x.opt.insecure_skip_verify;
-    r->abort_cb = x.opt.abort_cb;
-    r->abort_ctx = x.opt.abort_ctx;
+    r->insecure = x->opt.insecure_skip_verify;
+    r->abort_cb = x->opt.abort_cb;
+    r->abort_ctx = x->opt.abort_ctx;
     if (r->abort_cb && r->abort_cb(r->abort_ctx)) {
         response_free(r);
         return WTLS_ERR_CANCELLED;
     }
-
-    x.header_timeout = req->header_timeout_ms ? req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
-    const uint32_t base_connect = x.opt.connect_timeout_ms ? x.opt.connect_timeout_ms : DEF_CONNECT_MS;
-    const uint32_t base_handshake = x.opt.handshake_timeout_ms ? x.opt.handshake_timeout_ms : DEF_HANDSHAKE_MS;
-    const uint32_t base_io = x.opt.io_timeout_ms ? x.opt.io_timeout_ms : DEF_IO_MS;
-    const uint32_t base_header = x.header_timeout;
+    x->header_timeout = req->header_timeout_ms ? req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+    bt->connect = x->opt.connect_timeout_ms ? x->opt.connect_timeout_ms : DEF_CONNECT_MS;
+    bt->handshake = x->opt.handshake_timeout_ms ? x->opt.handshake_timeout_ms : DEF_HANDSHAKE_MS;
+    bt->io = x->opt.io_timeout_ms ? x->opt.io_timeout_ms : DEF_IO_MS;
+    bt->header = x->header_timeout;
     r->deadline_ms = deadline_ms;
+    *rp = r;
+    return WTLS_OK;
+}
+
+/* total_timeout_ms: cuts the stage timeouts of the next hop to what is left. WTLS_ERR_TIMEOUT once nothing is. */
+static int apply_deadline(request_ctx *x, const base_timeouts *bt, uint64_t deadline_ms) {
+    if (!deadline_ms) return WTLS_OK;
+    uint64_t now = wtls_plat_now_ms();
+    if (now >= deadline_ms) return WTLS_ERR_TIMEOUT;
+    uint32_t left = deadline_ms - now > UINT32_MAX ? UINT32_MAX : (uint32_t)(deadline_ms - now);
+    x->opt.connect_timeout_ms = bt->connect < left ? bt->connect : left;
+    x->opt.handshake_timeout_ms = bt->handshake < left ? bt->handshake : left;
+    x->opt.io_timeout_ms = bt->io < left ? bt->io : left;
+    x->header_timeout = bt->header < left ? bt->header : left;
+    return WTLS_OK;
+}
+
+/* Cookie jar, one hop: the Cookie header for *u while the hop's head is built, and the Set-Cookie fields after. */
+typedef struct {
+    char path[1025];
+    char *value;
+    wtls_http_header *hdrs;
+    const wtls_http_header *saved_h;
+    size_t saved_n;
+} cookie_hop;
+
+static void cookie_hop_begin(const wtls_http_request *req, request_ctx *x, const wtls_url *u, cookie_hop *c) {
+    c->value = NULL;
+    c->hdrs = NULL;
+    c->saved_h = x->headers;
+    c->saved_n = x->n_headers;
+    c->path[0] = '\0';
+    if (!req->cookie_jar) return;
+    request_path(u, c->path);
+    if (has_cookie_header(x->headers, x->n_headers)) return;
+    c->value = wtls_cookie_jar_header(req->cookie_jar, u->host, c->path, u->secure, wtls_plat_unix_time());
+    if (!c->value) return;
+    c->hdrs = wtls_malloc((x->n_headers + 1) * sizeof *c->hdrs);
+    if (!c->hdrs) return;
+    if (x->n_headers) memcpy(c->hdrs, x->headers, x->n_headers * sizeof *c->hdrs);
+    c->hdrs[x->n_headers] = (wtls_http_header){"Cookie", c->value};
+    x->headers = c->hdrs;
+    x->n_headers++;
+}
+
+static void cookie_hop_end(request_ctx *x, cookie_hop *c) {
+    x->headers = c->saved_h;
+    x->n_headers = c->saved_n;
+    wtls_free(c->hdrs);
+    wtls_free(c->value);
+    c->hdrs = NULL;
+    c->value = NULL;
+}
+
+static void cookie_hop_store(const wtls_http_request *req, const wtls_http_response *r, const wtls_url *u,
+                             const cookie_hop *c) {
+    if (!req->cookie_jar) return;
+    int64_t now = wtls_plat_unix_time();
+    for (size_t i = 0; i < r->head.n_fields; i++)
+        if (strcmp(r->head.fields[i].name, "set-cookie") == 0)
+            (void)wtls_cookie_jar_set(req->cookie_jar, r->head.fields[i].value, u->host, c->path, u->secure, now);
+}
+
+/* What both entry points do once the final head is in: decoding, progress, the body deadline. */
+static int response_ready(wtls_http_response *r, const request_ctx *x, const wtls_http_request *req) {
+    int st = setup_encoding(r, x->want_gzip);
+    if (st != WTLS_OK) return st;
+    r->progress_cb = req->progress_cb;
+    r->progress_ctx = req->progress_ctx;
+    r->progress_done = 0;
+    r->progress_total = wtls_http_content_length(r);
+    return WTLS_OK;
+}
+
+static wtls_status open_attempt(wtls_http_response **out, const wtls_http_request *req, uint64_t deadline_ms) {
+    if (!out) return WTLS_ERR_ARG;
+    *out = NULL;
+    if (!req || !req->url) return WTLS_ERR_ARG;
+    if (!wtls_core_initialized()) return WTLS_ERR_STATE;
+    if (!WTLS_THREAD_GUARD("wtls_http_open")) return WTLS_ERR_STATE;
+    wtls_http_response *r;
+    request_ctx x;
+    wtls_url u;
+    base_timeouts bt;
+    int st = request_setup(req, false, &r, &x, &u, &bt, deadline_ms);
+    if (st != WTLS_OK) return st;
+
     wtls_http_header *filtered = NULL;
     for (;;) {
-        char cpath[1025];
-        char *cookie_value = NULL;
-        wtls_http_header *with_cookie = NULL;
-        const wtls_http_header *saved_h = x.headers;
-        size_t saved_n = x.n_headers;
-        if (req->cookie_jar) {
-            request_path(&u, cpath);
-            if (!has_cookie_header(x.headers, x.n_headers)) {
-                cookie_value = wtls_cookie_jar_header(req->cookie_jar, u.host, cpath, u.secure, wtls_plat_unix_time());
-                if (cookie_value) {
-                    with_cookie = wtls_malloc((x.n_headers + 1) * sizeof *with_cookie);
-                    if (with_cookie) {
-                        if (x.n_headers) memcpy(with_cookie, x.headers, x.n_headers * sizeof *with_cookie);
-                        with_cookie[x.n_headers] = (wtls_http_header){"Cookie", cookie_value};
-                        x.headers = with_cookie;
-                        x.n_headers++;
-                    }
-                }
-            }
-        }
-        if (deadline_ms) {
-            uint64_t now = wtls_plat_now_ms();
-            if (now >= deadline_ms) {
-                wtls_free(with_cookie);
-                wtls_free(cookie_value);
-                st = WTLS_ERR_TIMEOUT;
-                break;
-            }
-            uint32_t left = deadline_ms - now > UINT32_MAX ? UINT32_MAX : (uint32_t)(deadline_ms - now);
-            x.opt.connect_timeout_ms = base_connect < left ? base_connect : left;
-            x.opt.handshake_timeout_ms = base_handshake < left ? base_handshake : left;
-            x.opt.io_timeout_ms = base_io < left ? base_io : left;
-            x.header_timeout = base_header < left ? base_header : left;
-        }
-        st = hop(r, &x, &u);
-        x.headers = saved_h;
-        x.n_headers = saved_n;
-        wtls_free(with_cookie);
-        wtls_free(cookie_value);
+        cookie_hop ck;
+        cookie_hop_begin(req, &x, &u, &ck);
+        st = apply_deadline(&x, &bt, deadline_ms);
+        if (st == WTLS_OK) st = hop(r, &x, &u);
+        cookie_hop_end(&x, &ck);
         if (st != WTLS_OK) break;
-        if (req->cookie_jar) {
-            int64_t now = wtls_plat_unix_time();
-            for (size_t i = 0; i < r->head.n_fields; i++)
-                if (strcmp(r->head.fields[i].name, "set-cookie") == 0)
-                    (void)wtls_cookie_jar_set(req->cookie_jar, r->head.fields[i].value, u.host, cpath, u.secure, now);
-        }
+        cookie_hop_store(req, r, &u, &ck);
         const char *location = wtls_http_head_get(&r->head, "location");
         if (req->max_redirects < 0 || !is_redirect(r->head.status) || !location) break;
         st = follow(r, &x, &u, location, &filtered);
         if (st != WTLS_OK) break;
     }
     wtls_free(filtered);
-    if (st == WTLS_OK) st = setup_encoding(r, x.want_gzip);
+    if (st == WTLS_OK) st = response_ready(r, &x, req);
     if (st != WTLS_OK) {
         response_free(r);
         return st;
     }
-    r->progress_cb = req->progress_cb;
-    r->progress_ctx = req->progress_ctx;
-    r->progress_done = 0;
-    r->progress_total = wtls_http_content_length(r);
     *out = r;
     return WTLS_OK;
 }
@@ -1521,6 +1605,9 @@ static int fail(wtls_http_response *r, int err) {
     return err;
 }
 
+/* A non-blocking transport has nothing for us right now: not an error, not sticky. */
+static bool is_want(int k) { return k == WTLS_WANT_READ || k == WTLS_WANT_WRITE; }
+
 /* The body as framed on the wire (len >= 1, <= INT_MAX). */
 static int raw_read(wtls_http_response *r, void *buf, size_t len) {
     if (r->eof) return 0;
@@ -1544,6 +1631,7 @@ static int raw_read(wtls_http_response *r, void *buf, size_t len) {
     case WTLS_BODY_LENGTH: {
         if ((uint64_t)len > r->remaining) len = (size_t)r->remaining;
         int k = pull(r, buf, len);
+        if (is_want(k)) return k;
         if (k < 0) return fail(r, k == WTLS_ERR_CLOSED ? WTLS_ERR_IO : k); /* truncated */
         r->remaining -= (uint64_t)k;
         if (!r->remaining) r->eof = true;
@@ -1555,11 +1643,13 @@ static int raw_read(wtls_http_response *r, void *buf, size_t len) {
             r->eof = true;
             return 0;
         }
+        if (is_want(k)) return k;
         return k < 0 ? fail(r, k) : k;
     }
     case WTLS_BODY_CHUNKED:
         for (;;) {
             int k = pull(r, buf, len);
+            if (is_want(k)) return k;
             if (k < 0) return fail(r, k == WTLS_ERR_CLOSED ? WTLS_ERR_IO : k);
             size_t out = 0, rest = 0;
             int st = wtls_chunked_decode(&r->chunked, buf, (size_t)k, &out, &rest);
@@ -1629,6 +1719,15 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     k = raw_read(r, buf, len);
 #endif
     if (clamped && r->conn) tr_set_timeout(r->conn, saved_to);
+    if (r->conn && r->conn->nonblock) {
+        uint64_t now = wtls_plat_now_ms();
+        if (is_want(k)) {
+            /* the io timeout of a non-blocking response is the longest wait without a single byte */
+            if (r->io_timeout_ms && now - r->last_io_ms >= r->io_timeout_ms) return fail(r, WTLS_ERR_TIMEOUT);
+            return k;
+        }
+        if (k > 0) r->last_io_ms = now;
+    }
     if (k > 0) {
         r->progress_done += (size_t)k;
         if (r->progress_cb) r->progress_cb(r->progress_ctx, r->progress_done, r->progress_total);
