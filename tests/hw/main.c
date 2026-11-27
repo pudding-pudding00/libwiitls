@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
 
     int found = 0;
     if (r >= 0) {
-        const char *p = !strcmp(suite, "all") ? "time,plat,crypto,tls,log,alloc,http,soak,realworld" : suite;
+        const char *p = !strcmp(suite, "all") ? "time,plat,crypto,tls,log,alloc,sig,http,soak,realworld" : suite;
         while (*p) {
             const char *comma = strchr(p, ',');
             size_t len = comma ? (size_t)(comma - p) : strlen(p);

@@ -12,6 +12,7 @@ void wtls_suite_time(void);
 void wtls_suite_tls(void);
 void wtls_suite_log(void);
 void wtls_suite_alloc(void);
+void wtls_suite_sig(void);
 void wtls_suite_realworld(void);
 void wtls_suite_http(void);
 void wtls_suite_soak(void);

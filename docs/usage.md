@@ -526,6 +526,26 @@ initialised. Close all connections and free all results before switching
 allocators (after `wtls_shutdown()`). Each block carries a 16-byte header, so
 return 16-byte aligned memory from `calloc_fn`.
 
+## 9c. Verifying downloaded payloads
+
+TLS protects the connection, not the file (a compromised mirror serves a valid
+TLS session too). For updates, sign the payload offline and embed the public key:
+
+```sh
+python3 tools/sign_payload.py genkey update-key.pem          # once; keep it offline
+python3 tools/sign_payload.py pubkey-c update-key.pem        # paste the C array into your app
+python3 tools/sign_payload.py sign update-key.pem app.dol    # writes app.dol.sig (DER)
+```
+
+```c
+if (wtls_sig_verify_p256(k_update_pubkey, 65, data, len, sig, sig_len, WTLS_SIG_DER) != WTLS_OK)
+    /* WTLS_ERR_INTEGRITY: reject the file */;
+```
+
+For files too big for memory, hash while downloading (`wtls_sha256_init/update/finish`)
+and call `wtls_sig_verify_p256_digest()`. ECDSA P-256 with SHA-256 only; the
+signature format is passed explicitly (`WTLS_SIG_RAW` or canonical `WTLS_SIG_DER`).
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets

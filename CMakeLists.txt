@@ -339,6 +339,7 @@ add_library(wiitls STATIC
     src/wtls_dns.c
     src/wtls_log.c
     src/wtls_mem.c
+    src/wtls_sig.c
     src/wtls_keylog.c
     src/http/wtls_url.c
     src/http/wtls_http_req.c
@@ -496,6 +497,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
 
     wtls_host_test(test_smoke)
     wtls_host_test(test_abi)
+    wtls_host_test(test_sig tests/common/sig_tests.c)
     wtls_host_test(test_jitter)
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
