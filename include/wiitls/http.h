@@ -92,8 +92,12 @@ typedef struct {
                                             Connection: Upgrade when an Upgrade header is present */
     bool expect_100_continue;          /**< send Expect: 100-continue and wait up to 1000 ms for 100 Continue
                                             before sending the request body (useful with body_cb) */
-    const char *proxy_url;             /**< optional "http://host[:port]" HTTP proxy (uses absolute-form
-                                            for http:// and CONNECT tunnel for https://; bypasses pool) */
+    const char *proxy_url;             /**< optional proxy: "http://[user:pass@]host[:port]" (absolute-form for
+                                            http://, CONNECT tunnel for https://; user and password are
+                                            percent-decoded and sent as Basic Proxy-Authorization),
+                                            "socks5h://[user:pass@]host[:port]" (the proxy resolves host names)
+                                            or "socks5://..." (resolved here, IPv4 only; default port 1080).
+                                            Bypasses the keep-alive pool. */
     bool no_h2;                        /**< disable HTTP/2 ALPN ("h2") and force HTTP/1.1 */
     wtls_cookie_jar *cookie_jar;       /**< (1.1) optional: Set-Cookie fields of every response, including each
                                             redirect hop, are stored, and matching cookies are sent as Cookie

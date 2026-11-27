@@ -35,6 +35,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- Proxies: `user:pass@` in `proxy_url` (HTTP Basic Proxy-Authorization for CONNECT and forwarded requests) and `socks5://` / `socks5h://` proxies with optional username/password.
 - Cookie jar: `wtls_cookie_jar_new/free/clear/count` and `wtls_http_request::cookie_jar` (RFC 6265 subset, per redirect hop, in memory); `fuzz_set_cookie`.
 - Supply chain: `-DWTLS_REPRODUCIBLE=ON` (byte-identical builds, checked in CI on the host toolchain), an SPDX SBOM (`tools/gen_sbom.py`) and build provenance attestations for release packages, deterministic release zip; release process documented in `docs/releasing.md`.
 - `wiitls::curl` shim: `READFUNCTION`/`UPLOAD`/`INFILESIZE`, `XFERINFOFUNCTION`, `USERPWD`, more `getinfo` values and a (sequential) multi interface; supported subset documented in `docs/curl-shim.md`.

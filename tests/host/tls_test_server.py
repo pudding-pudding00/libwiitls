@@ -68,6 +68,9 @@ ignored, so a test can tag its requests and count them with /count.
                                   half of the gzip stream (framing complete);
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+  GET /socks-last                 what the last SOCKS5 request looked like (atyp 1 = IPv4, 3 = name, auth, host)
+  port 4444 HTTP proxy, 4446 the same requiring Proxy-Authorization (proxyuser / "p@ss w0rd"),
+  4447 SOCKS5, 4448 SOCKS5 requiring username/password (sockuser / "s0cks:pw")
   GET /setcookie?c=V[&c2=V][&c3=V] 200 "ok" with one Set-Cookie field per given value
   GET /cookie-redirect?c=V&to=URL 302 to URL with Set-Cookie V
   GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
@@ -732,6 +735,8 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             tcp_abort(sock)
             return False
         send(body)
+    elif path == "/socks-last":
+        send(http_response(200, [("Content-Length", len(repr(SOCKS_LAST)))], repr(SOCKS_LAST).encode()))
     elif path == "/setcookie":
         hdrs = [("Set-Cookie", query[k]) for k in ("c", "c2", "c3") if k in query]
         send(http_response(200, hdrs + [("Content-Length", 2)], b"ok"))
@@ -853,8 +858,14 @@ def http_handler(ctx, counter):
     return handle
 
 
-def proxy_handler(raw):
-    """Minimal HTTP/1.1 forward + CONNECT tunnel proxy on port 4444."""
+PROXY_AUTH_USER, PROXY_AUTH_PASS = "proxyuser", "p@ss w0rd"
+SOCKS_AUTH_USER, SOCKS_AUTH_PASS = "sockuser", "s0cks:pw"
+SOCKS_LAST = {}  # what the last SOCKS5 request looked like: atyp, auth, host
+ALLOWED_PROXY_PORTS = (4438, 4439, 4440, 4442, 4445)
+
+
+def proxy_handler(raw, auth_required=False):
+    """Minimal HTTP/1.1 forward + CONNECT tunnel proxy on port 4444 (4446 requires Proxy-Authorization)."""
     rd = HttpReader(raw)
     up = None
     try:
@@ -863,6 +874,16 @@ def proxy_handler(raw):
             return
         lines = head.replace(b"\r\n", b"\n").split(b"\n")
         method, target, ver = lines[0].decode().split(" ", 2)
+        if auth_required:
+            import base64
+            want = "Basic " + base64.b64encode(("%s:%s" % (PROXY_AUTH_USER, PROXY_AUTH_PASS)).encode()).decode()
+            got = ""
+            for line in lines[1:]:
+                if line.lower().startswith(b"proxy-authorization:"):
+                    got = line.split(b":", 1)[1].strip().decode()
+            if got != want:
+                raw.sendall(http_response(407, [("Proxy-Authenticate", 'Basic realm="test"'), ("Content-Length", 0)]))
+                return
         if method == "CONNECT":
             host, port_s = target.rsplit(":", 1)
             port = int(port_s)
@@ -921,6 +942,82 @@ def proxy_handler(raw):
             if s:
                 try:
                     s.close()
+                except OSError:
+                    pass
+
+
+def socks5_handler(raw, need_auth):
+    """SOCKS5 (RFC 1928) CONNECT proxy; with need_auth the username/password method (RFC 1929) is required."""
+    up = None
+    try:
+        ver, n = _ws_recv_exact(raw, 2)
+        methods = _ws_recv_exact(raw, n)
+        if ver != 5:
+            return
+        authed = False
+        if need_auth:
+            if 2 not in methods:
+                raw.sendall(b"\x05\xff")
+                return
+            raw.sendall(b"\x05\x02")
+            _, ul = _ws_recv_exact(raw, 2)
+            user = _ws_recv_exact(raw, ul).decode()
+            pl = _ws_recv_exact(raw, 1)[0]
+            pw = _ws_recv_exact(raw, pl).decode()
+            if (user, pw) != (SOCKS_AUTH_USER, SOCKS_AUTH_PASS):
+                raw.sendall(b"\x01\x01")
+                return
+            raw.sendall(b"\x01\x00")
+            authed = True
+        else:
+            if 0 not in methods:
+                raw.sendall(b"\x05\xff")
+                return
+            raw.sendall(b"\x05\x00")
+        _, cmd, _, atyp = _ws_recv_exact(raw, 4)
+        if atyp == 1:
+            host = ".".join(str(b) for b in _ws_recv_exact(raw, 4))
+        elif atyp == 3:
+            host = _ws_recv_exact(raw, _ws_recv_exact(raw, 1)[0]).decode()
+        else:
+            raw.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+            return
+        port = int.from_bytes(_ws_recv_exact(raw, 2), "big")
+        SOCKS_LAST.update(atyp=atyp, auth=int(authed), host=host, port=port)
+        if cmd != 1 or port not in ALLOWED_PROXY_PORTS:
+            raw.sendall(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")
+            return
+        up = socket.create_connection((host, port), timeout=5)
+        up.settimeout(None)
+        raw.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+
+        def pipe(src, dst):
+            try:
+                while True:
+                    d = src.recv(16384)
+                    if not d:
+                        break
+                    dst.sendall(d)
+            except OSError:
+                pass
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+        t1 = threading.Thread(target=pipe, args=(raw, up), daemon=True)
+        t2 = threading.Thread(target=pipe, args=(up, raw), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except (EOFError, OSError):
+        pass
+    finally:
+        for sk in (up, raw):
+            if sk:
+                try:
+                    sk.close()
                 except OSError:
                     pass
 
@@ -1295,7 +1392,10 @@ def http_listeners(bind):
     # mutual TLS, client certificate optional: /who shows who connected
     mtls = serve(bind, 4442, http_handler(mtls_context("ecdsa", required=False), Counter()))
     h2 = serve(bind, 4445, h2_or_h1_handler(ctx_h2, Counter()))
-    return tls + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler)]
+    return tls + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler),
+            serve(bind, 4446, lambda c: proxy_handler(c, True)),
+            serve(bind, 4447, lambda c: socks5_handler(c, False)),
+            serve(bind, 4448, lambda c: socks5_handler(c, True))]
 
 
 def serve(bind, port, handler):

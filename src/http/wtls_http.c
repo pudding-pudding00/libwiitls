@@ -266,6 +266,8 @@ static bool decoding(const wtls_http_response *r) {
 
 /* One request as it goes out on the current hop: a redirect may change the
  * method, drop the body and strip credential headers. */
+enum { PROXY_HTTP = 1, PROXY_SOCKS5 = 2, PROXY_SOCKS5H = 3 };
+
 typedef struct {
     const wtls_http_request *req;
     const char *method;
@@ -281,7 +283,11 @@ typedef struct {
     bool allow_upgrade;
     bool expect_100;
     bool early_final; /* server answered >= 200 before body was sent (Expect: 100-continue) */
-    bool has_proxy;
+    bool has_proxy;   /* any proxy: no pooling */
+    int proxy_kind;   /* PROXY_HTTP / PROXY_SOCKS5 / PROXY_SOCKS5H */
+    bool proxy_auth;
+    char proxy_user[256], proxy_pass[256];
+    char proxy_basic[700]; /* "Basic ..." for an HTTP proxy */
     bool want_h2;
     const wtls_url *url;
     char proxy_host[256];
@@ -483,6 +489,162 @@ static int send_body_only(http_tr *c, request_ctx *x) {
     return WTLS_OK;
 }
 
+static int pct_decode(const char *in, size_t n, char *out, size_t cap) {
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = in[i];
+        if (c == '%') {
+            if (i + 2 >= n) return -1;
+            int hi = in[i + 1], lo = in[i + 2];
+            hi = hi >= '0' && hi <= '9' ? hi - '0' : (hi | 0x20) >= 'a' && (hi | 0x20) <= 'f' ? (hi | 0x20) - 'a' + 10 : -1;
+            lo = lo >= '0' && lo <= '9' ? lo - '0' : (lo | 0x20) >= 'a' && (lo | 0x20) <= 'f' ? (lo | 0x20) - 'a' + 10 : -1;
+            if (hi < 0 || lo < 0) return -1;
+            c = (char)(hi * 16 + lo);
+            i += 2;
+        }
+        if (o + 1 >= cap) return -1;
+        out[o++] = c;
+    }
+    out[o] = '\0';
+    return (int)o;
+}
+
+/* "http://[user:pass@]host[:port]", "socks5://..." or "socks5h://...": fills the proxy fields of x. */
+static int parse_proxy(const char *url, request_ctx *x) {
+    int kind;
+    const char *rest;
+    uint16_t default_port;
+    if (strncmp(url, "http://", 7) == 0) { kind = PROXY_HTTP; rest = url + 7; default_port = 80; }
+    else if (strncmp(url, "socks5://", 9) == 0) { kind = PROXY_SOCKS5; rest = url + 9; default_port = 1080; }
+    else if (strncmp(url, "socks5h://", 10) == 0) { kind = PROXY_SOCKS5H; rest = url + 10; default_port = 1080; }
+    else return WTLS_ERR_ARG;
+    size_t alen = strcspn(rest, "/");
+    if (rest[alen] == '/' && rest[alen + 1] != '\0') return WTLS_ERR_ARG; /* no path on a proxy */
+    const char *auth_end = rest + alen;
+    const char *at = NULL;
+    for (const char *q = rest; q < auth_end; q++)
+        if (*q == '@') at = q;
+    const char *hostport = at ? at + 1 : rest;
+    if (at) {
+        const char *colon = memchr(rest, ':', (size_t)(at - rest));
+        size_t ul = colon ? (size_t)(colon - rest) : (size_t)(at - rest);
+        if (ul == 0) return WTLS_ERR_ARG;
+        if (pct_decode(rest, ul, x->proxy_user, sizeof x->proxy_user) < 0) return WTLS_ERR_ARG;
+        if (colon && pct_decode(colon + 1, (size_t)(at - colon - 1), x->proxy_pass, sizeof x->proxy_pass) < 0)
+            return WTLS_ERR_ARG;
+        x->proxy_auth = true;
+    }
+    size_t hl = (size_t)(auth_end - hostport);
+    char tmp[300];
+    if (hl == 0 || hl + 10 > sizeof tmp) return WTLS_ERR_ARG;
+    memcpy(tmp, "http://", 7);
+    memcpy(tmp + 7, hostport, hl);
+    tmp[7 + hl] = '/';
+    tmp[8 + hl] = '\0';
+    wtls_url pu;
+    if (wtls_url_parse(tmp, &pu) != WTLS_OK || pu.secure) return WTLS_ERR_ARG;
+    bool explicit_port = memchr(hostport, ':', hl) != NULL;
+    memcpy(x->proxy_host, pu.host, sizeof x->proxy_host);
+    x->proxy_port = explicit_port ? pu.port : default_port;
+    x->proxy_kind = kind;
+    x->has_proxy = true;
+    if (kind == PROXY_HTTP && x->proxy_auth) {
+        if (wtls_http_basic_auth(x->proxy_user, x->proxy_pass, x->proxy_basic, sizeof x->proxy_basic, NULL) != WTLS_OK)
+            return WTLS_ERR_ARG;
+    } else if (x->proxy_auth && (strlen(x->proxy_user) > 255 || strlen(x->proxy_pass) > 255)) {
+        return WTLS_ERR_ARG;
+    }
+    return WTLS_OK;
+}
+
+static int tr_read_exact(wtls_http_response *r, void *buf, size_t len) {
+    uint8_t *p = buf;
+    while (len) {
+        int k = tr_read(r, p, len);
+        if (k <= 0) return k == 0 || k == WTLS_ERR_CLOSED ? WTLS_ERR_IO : k;
+        p += k;
+        len -= (size_t)k;
+    }
+    return WTLS_OK;
+}
+
+/* RFC 1928 CONNECT (and RFC 1929 username/password) over r->conn. */
+static int socks5_connect(wtls_http_response *r, request_ctx *x) {
+    http_tr *t = r->conn;
+    uint8_t buf[300];
+    size_t n = 0;
+    buf[n++] = 5;
+    if (x->proxy_auth) { buf[n++] = 2; buf[n++] = 0; buf[n++] = 2; }
+    else { buf[n++] = 1; buf[n++] = 0; }
+    int st = tr_write_all(t, buf, n);
+    if (st == WTLS_OK) st = tr_read_exact(r, buf, 2);
+    if (st != WTLS_OK) return st;
+    if (buf[0] != 5 || buf[1] == 0xFF) return WTLS_ERR_CONNECT;
+    if (buf[1] == 2) {
+        size_t ul = strlen(x->proxy_user), pl = strlen(x->proxy_pass);
+        if (!x->proxy_auth || ul > 255 || pl > 255) return WTLS_ERR_CONNECT;
+        uint8_t msg[3 + 255 + 255];
+        size_t m = 0;
+        msg[m++] = 1;
+        msg[m++] = (uint8_t)ul;
+        memcpy(msg + m, x->proxy_user, ul);
+        m += ul;
+        msg[m++] = (uint8_t)pl;
+        memcpy(msg + m, x->proxy_pass, pl);
+        m += pl;
+        st = tr_write_all(t, msg, m);
+        if (st == WTLS_OK) st = tr_read_exact(r, buf, 2);
+        if (st != WTLS_OK) return st;
+        if (buf[1] != 0) return WTLS_ERR_CONNECT;
+    } else if (buf[1] != 0) {
+        return WTLS_ERR_CONNECT;
+    }
+    /* the request: names go to the proxy for socks5h, otherwise we resolve (IPv4) ourselves */
+    n = 0;
+    buf[n++] = 5;
+    buf[n++] = 1;
+    buf[n++] = 0;
+    uint32_t ip = 0;
+    bool by_name = x->proxy_kind == PROXY_SOCKS5H && !wtls_plat_parse_ipv4(r->host, &ip);
+    if (!by_name && !wtls_plat_parse_ipv4(r->host, &ip)) {
+        int rs = wtls_dns_lookup(r->host, &ip, wtls_plat_now_ms());
+        if (rs != WTLS_OK) return rs;
+    }
+    if (by_name) {
+        size_t hl = strlen(r->host);
+        if (hl == 0 || hl > 255) return WTLS_ERR_ARG;
+        buf[n++] = 3;
+        buf[n++] = (uint8_t)hl;
+        memcpy(buf + n, r->host, hl);
+        n += hl;
+    } else {
+        buf[n++] = 1;
+        memcpy(buf + n, &ip, 4); /* already in network order */
+        n += 4;
+    }
+    buf[n++] = (uint8_t)(r->port >> 8);
+    buf[n++] = (uint8_t)r->port;
+    st = tr_write_all(t, buf, n);
+    if (st == WTLS_OK) st = tr_read_exact(r, buf, 4);
+    if (st != WTLS_OK) return st;
+    if (buf[0] != 5 || buf[1] != 0) return WTLS_ERR_CONNECT;
+    size_t rest;
+    if (buf[3] == 1) rest = 4 + 2;
+    else if (buf[3] == 4) rest = 16 + 2;
+    else if (buf[3] == 3) {
+        st = tr_read_exact(r, buf, 1);
+        if (st != WTLS_OK) return st;
+        rest = (size_t)buf[0] + 2;
+    } else return WTLS_ERR_CONNECT;
+    while (rest) { /* the bound address is of no use to us */
+        size_t k = rest < sizeof buf ? rest : sizeof buf;
+        st = tr_read_exact(r, buf, k);
+        if (st != WTLS_OK) return st;
+        rest -= k;
+    }
+    return WTLS_OK;
+}
+
 static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
     http_tr *t = wtls_calloc(1, sizeof *t);
     if (!t) return WTLS_ERR_NOMEM;
@@ -498,35 +660,48 @@ static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
         wtls_free(t);
         return st;
     }
-    if (!r->secure) {
+    if (x->proxy_kind == PROXY_HTTP && !r->secure) {
         r->conn = t;
         return WTLS_OK;
     }
-    char creq[340];
-    int n = snprintf(creq, sizeof creq, "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
-                     r->host, (unsigned)r->port, r->host, (unsigned)r->port);
-    if (n <= 0 || (size_t)n >= sizeof creq) {
-        wtls_http_tr_close(t);
-        return WTLS_ERR_ARG;
-    }
     r->conn = t;
-    st = tr_write_all(t, creq, (size_t)n);
-    if (st == WTLS_OK) {
-        bool got = false;
-        size_t cap = 0, fill = 0;
-        uint32_t hdr_t = x->req->header_timeout_ms ? x->req->header_timeout_ms
-                                                   : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
-        st = read_head_ex(r, hdr_t, hdr_t, false, false, &cap, &fill, &got);
-        if (st == WTLS_OK && (r->head.status < 200 || r->head.status >= 300 || r->extra_end > r->extra_off))
-            st = WTLS_ERR_CONNECT;
-        wtls_free(r->buf);
-        r->buf = NULL;
-        r->extra_off = r->extra_end = 0;
-    }
-    if (st != WTLS_OK) {
-        wtls_http_tr_close(t);
-        r->conn = NULL;
-        return st;
+    if (x->proxy_kind != PROXY_HTTP) {
+        st = socks5_connect(r, x);
+        if (st != WTLS_OK) {
+            wtls_http_tr_close(t);
+            r->conn = NULL;
+            return st == WTLS_ERR_IO ? WTLS_ERR_CONNECT : st;
+        }
+        if (!r->secure) return WTLS_OK;
+    } else {
+        char creq[1100];
+        int n = snprintf(creq, sizeof creq, "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n%s%s%s\r\n", r->host,
+                         (unsigned)r->port, r->host, (unsigned)r->port,
+                         x->proxy_auth ? "Proxy-Authorization: " : "", x->proxy_auth ? x->proxy_basic : "",
+                         x->proxy_auth ? "\r\n" : "");
+        if (n <= 0 || (size_t)n >= sizeof creq) {
+            wtls_http_tr_close(t);
+            r->conn = NULL;
+            return WTLS_ERR_ARG;
+        }
+        st = tr_write_all(t, creq, (size_t)n);
+        if (st == WTLS_OK) {
+            bool got = false;
+            size_t cap = 0, fill = 0;
+            uint32_t hdr_t = x->req->header_timeout_ms ? x->req->header_timeout_ms
+                                                       : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+            st = read_head_ex(r, hdr_t, hdr_t, false, false, &cap, &fill, &got);
+            if (st == WTLS_OK && (r->head.status < 200 || r->head.status >= 300 || r->extra_end > r->extra_off))
+                st = WTLS_ERR_CONNECT;
+            wtls_free(r->buf);
+            r->buf = NULL;
+            r->extra_off = r->extra_end = 0;
+        }
+        if (st != WTLS_OK) {
+            wtls_http_tr_close(t);
+            r->conn = NULL;
+            return st;
+        }
     }
     int fd = t->fd;
     t->fd = -1;
@@ -803,9 +978,21 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
                          (x->want_gzip ? WTLS_HTTP_REQ_GZIP : 0u) |
                          (x->allow_upgrade ? WTLS_HTTP_REQ_UPGRADE : 0u) |
                          (x->expect_100 ? WTLS_HTTP_REQ_EXPECT_100 : 0u) |
-                         (x->has_proxy ? WTLS_HTTP_REQ_PROXY : 0u);
-    int st = wtls_http_build_head(x->method, u, x->headers, x->n_headers, x->body != NULL || x->body_cb != NULL,
+                         (x->proxy_kind == PROXY_HTTP ? WTLS_HTTP_REQ_PROXY : 0u);
+    const wtls_http_header *send_h = x->headers;
+    size_t send_n = x->n_headers;
+    wtls_http_header *with_pa = NULL;
+    if (x->proxy_kind == PROXY_HTTP && x->proxy_auth && !u->secure && !wtls_http_headers_have(x->headers, x->n_headers, "Proxy-Authorization")) {
+        with_pa = wtls_malloc((x->n_headers + 1) * sizeof *with_pa);
+        if (!with_pa) return WTLS_ERR_NOMEM;
+        if (x->n_headers) memcpy(with_pa, x->headers, x->n_headers * sizeof *with_pa);
+        with_pa[x->n_headers] = (wtls_http_header){"Proxy-Authorization", x->proxy_basic};
+        send_h = with_pa;
+        send_n = x->n_headers + 1;
+    }
+    int st = wtls_http_build_head(x->method, u, send_h, send_n, x->body != NULL || x->body_cb != NULL,
                                   x->body_len, req_flags, &head, &x->head_len);
+    wtls_free(with_pa);
     if (st != WTLS_OK) return st;
     x->head = head;
     x->url = u;
@@ -1069,25 +1256,10 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
             response_free(r);
             return WTLS_ERR_ARG;
         }
-        char *pcopy = wtls_malloc(plen + 1);
-        if (!pcopy) {
+        int pst = parse_proxy(req->proxy_url, &x);
+        if (pst != WTLS_OK) {
             response_free(r);
-            return WTLS_ERR_NOMEM;
-        }
-        memcpy(pcopy, req->proxy_url, plen + 1);
-        wtls_url pu;
-        int pst = wtls_url_parse(pcopy, &pu);
-        bool bad_proxy = pst != WTLS_OK || pu.secure || (!pu.target_needs_slash && pu.target_len > 1) ||
-                         (pu.target_len == 1 && pu.target[0] != '/');
-        if (!bad_proxy) {
-            x.has_proxy = true;
-            memcpy(x.proxy_host, pu.host, sizeof x.proxy_host);
-            x.proxy_port = pu.port;
-        }
-        wtls_free(pcopy);
-        if (bad_proxy) {
-            response_free(r);
-            return WTLS_ERR_ARG;
+            return pst;
         }
     }
     if (req->tls) x.opt = *req->tls;

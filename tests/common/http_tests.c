@@ -2122,6 +2122,111 @@ static void http_proxy_plain_and_connect(void) {
     CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_ARG);
 }
 
+/* ---- proxy authentication and SOCKS5 ------------------------------------ */
+
+static void fetch_via(const char *proxy, const char *target, int *status, int *rc, char *body, size_t cap) {
+    wtls_http_request req = {0};
+    req.url = target;
+    req.proxy_url = proxy;
+    wtls_http_result res;
+    *rc = wtls_http_fetch(&req, 1024, &res);
+    *status = *rc == WTLS_OK ? res.status : res.status;
+    body[0] = '\0';
+    if (*rc == WTLS_OK) {
+        snprintf(body, cap, "%.*s", (int)(res.body_len < cap - 1 ? res.body_len : cap - 1), res.body);
+        wtls_http_result_free(&res);
+    }
+}
+
+static void http_proxy_authentication(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "http://%s:4446", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 407); /* plain request: the proxy's answer is the response */
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT); /* CONNECT refused with 407 */
+    /* credentials in the URL, percent-encoded ("p@ss w0rd") */
+    snprintf(proxy, sizeof proxy, "http://proxyuser:p%%40ss%%20w0rd@%s:4446", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    CHECK(strcmp(body, "hello") == 0);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    snprintf(proxy, sizeof proxy, "http://proxyuser:wrong@%s:4446", g_env.server_host);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
+static void http_proxy_url_forms_rejected(void) {
+    char body[8];
+    int status, rc;
+    static const char *const bad[] = {"socks5://", "socks4://h:1080", "http://u@:80", "http://:p@h:80", "http://h:80/path",
+                                      "socks5://h:99999", "http://u:p%zz@h:80", "http://u:p%4@h:80", "ftp://h"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        fetch_via(bad[i], url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+        if (rc != WTLS_ERR_ARG) TLOG("  proxy url %s -> %d\n", bad[i], rc);
+        CHECK_EQ_INT(rc, WTLS_ERR_ARG);
+    }
+}
+
+static int socks_atyp(void) {
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/socks-last");
+    wtls_http_result res;
+    int atyp = -1;
+    if (wtls_http_fetch(&req, 1024, &res) == WTLS_OK) {
+        const char *p = strstr(res.body, "'atyp': ");
+        if (p) atyp = atoi(p + 8);
+        wtls_http_result_free(&res);
+    }
+    return atyp;
+}
+
+static void http_socks5_connect(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "socks5h://%s:4447", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    CHECK(strcmp(body, "hello") == 0);
+    CHECK_EQ_INT(socks_atyp(), 3); /* socks5h: the proxy gets the name */
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK); /* https through the tunnel, verified against the target name */
+    CHECK(strcmp(body, "hello") == 0);
+    snprintf(proxy, sizeof proxy, "socks5://%s:4447", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(socks_atyp(), 1); /* socks5: resolved here, an IPv4 address goes out */
+    /* a port the proxy refuses */
+    fetch_via(proxy, url_of("http", 4431, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
+static void http_socks5_authentication(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "socks5h://%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT); /* the proxy requires a user name */
+    snprintf(proxy, sizeof proxy, "socks5h://sockuser:s0cks%%3Apw@%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK(strcmp(body, "hello") == 0);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    snprintf(proxy, sizeof proxy, "socks5h://sockuser:nope@%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
 #if WTLS_HTTP2
 static void http2_get_and_info(void) {
     wtls_http_pool_flush();
@@ -2446,6 +2551,10 @@ void wtls_suite_http(void) {
     RUN(http_open_streaming_progress);
     RUN(http_expect_100_continue);
     RUN(http_proxy_plain_and_connect);
+    RUN(http_proxy_authentication);
+    RUN(http_proxy_url_forms_rejected);
+    RUN(http_socks5_connect);
+    RUN(http_socks5_authentication);
     RUN(http_net_reset_flushes_pool);
     RUN(http_spki_pin_ca_and_mismatch);
     RUN(http_spki_pin_pool_and_redirect);

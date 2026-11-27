@@ -311,9 +311,12 @@ Points that trip people up:
   (with your `Upgrade` header) and call `wtls_http_detach()` on a `101`
   response to take over the underlying `wtls_conn *` (`wss://`) or socket fd
   (`ws://`), preserving any early bytes received with the `101` head.
-- **HTTP proxy.** Set `req.proxy_url = "http://host[:port]"` for `http://`
-  forwarding and `https://` `CONNECT` tunneling (bypasses the keep-alive
-  pool).
+- **Proxies.** Set `req.proxy_url`: `"http://host[:port]"` for `http://`
+  forwarding and `https://` `CONNECT` tunneling, `"socks5h://host[:1080]"`
+  (the proxy resolves names) or `"socks5://host[:1080]"` (resolved locally,
+  IPv4). Add `user:pass@` (percent-encode special characters) for HTTP Basic
+  proxy authentication or SOCKS5 username/password. Proxied requests bypass
+  the keep-alive pool; `https://` is still verified against the target name.
 - **`http://`** works too, without TLS: only for servers you trust on a
   network you trust. `wtls_http_get_info` → `secure` tells you which one a
   response came over.
