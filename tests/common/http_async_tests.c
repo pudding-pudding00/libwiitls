@@ -113,6 +113,9 @@ static bool is_pattern(const uint8_t *p, size_t n) {
     return true;
 }
 
+/* wtls_http_start() is still waiting: for the answer, or (over a real network) still for the connect. */
+static bool is_pending(int st) { return st == WTLS_WANT_READ || st == WTLS_WANT_WRITE; }
+
 /* ---- tests ------------------------------------------------------------------ */
 
 static void get_hello(const char *u, bool tls) {
@@ -389,7 +392,7 @@ static void test_async_wait_times_out_without_data(void) {
     req.no_keepalive = true;
     wtls_http_response *r = NULL;
     int st = wtls_http_start(&r, &req);
-    CHECK(st == WTLS_WANT_READ);
+    CHECK(is_pending(st));
     if (!r) return;
     st = drive(r, st, 300);
     CHECK_EQ_INT(st, WTLS_ERR_TIMEOUT); /* drive gave up: the response is still pending */
@@ -410,13 +413,13 @@ static void test_async_close_while_pending_in_every_phase(void) {
     wtls_http_response *r = NULL;
     /* in the head phase */
     req.url = purl("/slowhead");
-    CHECK(wtls_http_start(&r, &req) == WTLS_WANT_READ);
+    CHECK(is_pending(wtls_http_start(&r, &req)));
     wtls_http_close(r);
     /* during the TLS handshake: a TLS client against the plain control port, which never answers */
     req.url = url_of("https", PLAIN_PORT, "/");
     r = NULL;
     int st = wtls_http_start(&r, &req);
-    CHECK(st == WTLS_WANT_READ || st == WTLS_WANT_WRITE);
+    CHECK(is_pending(st));
     wtls_http_close(r);
     /* in the body phase */
     req.url = purl("/slowbody?ms=1500");
@@ -462,7 +465,7 @@ static void test_async_abort_cb(void) {
     s_abort_at = wtls_plat_now_ms() + 150;
     wtls_http_response *r = NULL;
     int st = wtls_http_start(&r, &req);
-    CHECK(st == WTLS_WANT_READ);
+    CHECK(is_pending(st));
     if (!r) return;
     uint64_t t0 = wtls_plat_now_ms();
     st = drive(r, st, 3000);

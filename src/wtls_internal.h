@@ -28,6 +28,7 @@ struct wtls_conn {
     int fd;
     wtls_conn_stage stage;
     bool nonblocking;
+    size_t write_pending; /* plaintext bytes of an application record that is not completely sent yet */
     uint32_t connect_timeout_ms;
     uint32_t handshake_timeout_ms;
     uint32_t io_timeout_ms;

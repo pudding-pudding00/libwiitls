@@ -647,6 +647,31 @@ int wtls_read(wtls_conn *c, void *buf, size_t len) {
     }
 }
 
+/* mbedtls_ssl_write() with the retry after WANT_WRITE made safe for a full-duplex caller. Mbed TLS keeps only
+ * the unsent ciphertext and expects the same call again; but a read in between may send it (processing a TLS 1.3
+ * NewSessionTicket runs a handshake step, which flushes the output). The retry would then find nothing pending and
+ * encrypt the same data a second time. So remember what is pending, and count it once it is gone. */
+static int write_record(wtls_conn *c, const unsigned char *p, size_t len) {
+    if (!mbedtls_ssl_is_handshake_over(&c->ssl)) { /* a ticket in progress: finish it first, as ssl_write would */
+        int r = mbedtls_ssl_handshake(&c->ssl);
+        if (r != 0) return r;
+    }
+    if (c->write_pending && c->ssl.MBEDTLS_PRIVATE(out_left) == 0) { /* no public getter */
+        size_t n = c->write_pending < len ? c->write_pending : len;
+        c->write_pending = 0;
+        return (int)n;
+    }
+    int r = mbedtls_ssl_write(&c->ssl, p, len);
+    if (r > 0) {
+        c->write_pending = 0;
+    } else if ((r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) && !c->write_pending &&
+               c->ssl.MBEDTLS_PRIVATE(out_left) != 0) {
+        int max = mbedtls_ssl_get_max_out_record_payload(&c->ssl);
+        c->write_pending = max > 0 && (size_t)max < len ? (size_t)max : len;
+    }
+    return r;
+}
+
 int wtls_write(wtls_conn *c, const void *buf, size_t len) {
     if (!c || (!buf && len)) return WTLS_ERR_ARG;
     if (!WTLS_THREAD_GUARD("wtls_write") || c->stage != WTLS_CONN_READY) return WTLS_ERR_STATE;
@@ -660,7 +685,7 @@ int wtls_write(wtls_conn *c, const void *buf, size_t len) {
             c->aborted = true;
             return off ? (int)off : WTLS_ERR_CANCELLED;
         }
-        int r = mbedtls_ssl_write(&c->ssl, p + off, len - off);
+        int r = write_record(c, p + off, len - off);
         if (r > 0) {
             off += (size_t)r;
             continue;

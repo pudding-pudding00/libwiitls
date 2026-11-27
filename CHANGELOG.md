@@ -8,6 +8,11 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- A non-blocking `wtls_write()` that returned `WTLS_WANT_WRITE` could send the same TLS record twice when
+  `wtls_read()` ran before the retry and processed a TLS 1.3 session ticket (Mbed TLS flushes the pending output
+  there). The peer then saw a corrupted stream; on the Wii this broke HTTP/2 uploads in `wtls_http_start()`. 1.0.0 and 1.0.1
+  are affected when an application uses `wtls_set_nonblocking()` and reads between two writes.
+- Tests: `wtls_http_start()` may answer `WTLS_WANT_WRITE` while the connect is still running.
 - **HTTP/2 trailers (blocking engine):** trailers of a response were skipped without HPACK decoding, so a trailer that added a dynamic table entry left the client's table out of step with the server's for the next request on that connection (decoding error or wrong header). They are decoded and dropped now.
 - **HPACK heap use-after-free (HTTP/2):** a response header block with a
   literal-with-indexing field whose name referred to a dynamic table entry,

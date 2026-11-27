@@ -444,6 +444,55 @@ static void test_nonblocking_poll_then_read(void) {
     wtls_close(c);
 }
 
+/* A non-blocking write that answered WANT_WRITE, then a read before the retry: the read processes the
+ * TLS 1.3 NewSessionTickets, which flushes the pending record behind the writer's back. The retry must not
+ * send that record a second time: the server checks every byte of the stream. */
+static void test_nonblocking_write_retry_after_read(void) {
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL); /* nothing read yet: the tickets wait */
+    if (!c) return;
+    const size_t total = g_env.is_hw ? 2u * 1024u * 1024u : 16u * 1024u * 1024u, piece = 40000;
+    static uint8_t pat[40000 + 251];
+    for (size_t i = 0; i < sizeof pat; i++) pat[i] = (uint8_t)(i % 251);
+    char cmd[48];
+    snprintf(cmd, sizeof cmd, "SINK %lu 700\n", (unsigned long)total); /* the server reads after 700 ms */
+    if (!send_str(c, cmd)) {
+        wtls_close(c);
+        return;
+    }
+    CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
+    size_t off = 0, waits = 0;
+    uint64_t end = wtls_plat_now_ms() + 30000;
+    while (off < total && wtls_plat_now_ms() < end) {
+        size_t n = total - off < piece ? total - off : piece;
+        int k = wtls_write(c, pat + off % 251, n);
+        if (k < 0 && k != WTLS_WANT_WRITE && k != WTLS_WANT_READ) {
+            CHECK_EQ_INT(k, 0);
+            break;
+        }
+        if (k > 0) off += (size_t)k;
+        if (k != (int)n) { /* WANT_*, or a part: either way a record may be waiting to go out */
+            wtls_plat_poll(wtls_get_fd(c), false, true, 5000);
+            if (waits++ == 0) {
+                wtls_plat_sleep_ms(200); /* room for the whole pending record */
+                char b[16];
+                CHECK_EQ_INT(wtls_read(c, b, sizeof b), WTLS_WANT_READ);
+            }
+        }
+    }
+    CHECK(waits > 0); /* otherwise the test did not exercise anything */
+    CHECK_EQ_INT((long)off, (long)total);
+    CHECK_EQ_INT(wtls_set_nonblocking(c, false), WTLS_OK);
+    char line[64], want[48];
+    snprintf(want, sizeof want, "SUNK %lu", (unsigned long)total);
+    int r = read_line(c, line, sizeof line);
+    CHECK(r >= 0);
+    if (r >= 0 && strcmp(line, want) != 0) {
+        TLOG("  got \"%s\", want \"%s\"\n", line, want);
+        CHECK(strcmp(line, want) == 0);
+    }
+    wtls_close(c);
+}
+
 static void test_pending_counts_buffered(void) {
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
     if (!c) return;
@@ -1247,6 +1296,7 @@ void wtls_suite_tls(void) {
     RUN(test_handshake_profile);
     RUN(test_nonblocking_read_wants_read);
     RUN(test_nonblocking_poll_then_read);
+    RUN(test_nonblocking_write_retry_after_read);
     RUN(test_pending_counts_buffered);
     RUN(test_set_nonblocking_null_is_arg_error);
     RUN(test_host_extra_dots_rejected);

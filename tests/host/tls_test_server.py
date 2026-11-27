@@ -332,6 +332,18 @@ def tls_handler(ctx, counter):
                     data = bytes(i & 0xFF for i in range(n))
                     for k in range(0, n, 16384):
                         sock.sendall(data[k:k + 16384])
+                elif cmd.startswith(b"SINK "):  # SINK n ms: after ms, read n pattern bytes (i % 251)
+                    n, ms = (int(v) for v in cmd.split()[1:3])
+                    time.sleep(ms / 1000.0)
+                    got, bad, ref = 0, None, pattern(65536 + 251)
+                    while got < n:
+                        data = conn.recv(min(65536, n - got))
+                        if not data:
+                            return
+                        if bad is None and data != ref[got % 251:got % 251 + len(data)]:
+                            bad = got + next(i for i, b in enumerate(data) if b != (got + i) % 251)
+                        got += len(data)
+                    sock.sendall(b"SUNK %d\n" % n if bad is None else b"BAD %d\n" % bad)
                 elif cmd == b"CLOSE":
                     sock.unwrap().close()
                     return
