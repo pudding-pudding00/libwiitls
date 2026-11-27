@@ -298,14 +298,8 @@ static int dyn_insert(wtls_hpack_ctx *ctx, const char *name, size_t name_len,
         evict_to(ctx, 0);
         return WTLS_OK;
     }
-    evict_to(ctx, ctx->max_size - cost);
-    if (ctx->count == ctx->cap) {
-        size_t ncap = ctx->cap ? ctx->cap * 2 : 16u;
-        wtls_hpack_entry *ne = wtls_realloc(ctx->entries, ncap * sizeof *ne);
-        if (!ne) return WTLS_ERR_NOMEM;
-        ctx->entries = ne;
-        ctx->cap = ncap;
-    }
+    /* Copy first: name (and value) may point into a dynamic table entry, and
+     * making room below can free exactly that entry (RFC 7541 4.4). */
     char *nc = wtls_malloc(name_len + 1);
     char *vc = wtls_malloc(value_len + 1);
     if (!nc || !vc) {
@@ -317,6 +311,18 @@ static int dyn_insert(wtls_hpack_ctx *ctx, const char *name, size_t name_len,
     nc[name_len] = 0;
     memcpy(vc, value, value_len);
     vc[value_len] = 0;
+    evict_to(ctx, ctx->max_size - cost);
+    if (ctx->count == ctx->cap) {
+        size_t ncap = ctx->cap ? ctx->cap * 2 : 16u;
+        wtls_hpack_entry *ne = wtls_realloc(ctx->entries, ncap * sizeof *ne);
+        if (!ne) {
+            wtls_free(nc);
+            wtls_free(vc);
+            return WTLS_ERR_NOMEM;
+        }
+        ctx->entries = ne;
+        ctx->cap = ncap;
+    }
     if (ctx->count > 0)
         memmove(&ctx->entries[1], &ctx->entries[0], ctx->count * sizeof ctx->entries[0]);
     ctx->entries[0].name = nc;

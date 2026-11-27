@@ -45,7 +45,8 @@ enum {
 };
 
 struct wtls_h2_conn {
-    wtls_conn *tls;
+    wtls_h2_io io;
+    void *io_ctx;
     wtls_hpack_ctx hpack;
     uint32_t next_stream_id;
     uint32_t cur_stream_id;
@@ -100,36 +101,27 @@ static void write_frame_hdr(uint8_t *dst, uint32_t len, uint8_t type, uint8_t fl
 }
 
 static int h2_write_all(wtls_h2_conn *c, const void *buf, size_t len) {
-    const uint8_t *p = buf;
-    while (len) {
-        int k = wtls_write(c->tls, p, len);
-        if (k <= 0) {
-            c->broken = true;
-            return k == WTLS_ERR_CLOSED || k == 0 ? WTLS_ERR_IO : k;
-        }
-        p += k;
-        len -= (size_t)k;
+    int st = c->io.write(c->io_ctx, buf, len);
+    if (st != WTLS_OK) {
+        c->broken = true;
+        return st == WTLS_ERR_CLOSED ? WTLS_ERR_IO : st;
     }
     return WTLS_OK;
 }
 
 static int h2_read_exact(wtls_h2_conn *c, void *buf, size_t len, uint64_t has_deadline, uint64_t deadline) {
     uint8_t *p = buf;
-    uint32_t saved_to = c->tls->io_timeout_ms;
     while (len) {
+        uint32_t max_wait = 0;
         if (has_deadline) {
             uint64_t now = wtls_plat_now_ms();
-            if (now >= deadline) {
-                c->tls->io_timeout_ms = saved_to;
-                return WTLS_ERR_TIMEOUT;
-            }
+            if (now >= deadline) return WTLS_ERR_TIMEOUT;
             uint64_t left = deadline - now;
-            if (left < c->tls->io_timeout_ms) c->tls->io_timeout_ms = (uint32_t)left;
+            max_wait = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
         }
-        int k = wtls_read(c->tls, p, len);
-        c->tls->io_timeout_ms = saved_to;
+        int k = c->io.read(c->io_ctx, p, len, max_wait);
         if (k <= 0) {
-            if (k == WTLS_ERR_CLOSED) k = WTLS_ERR_IO;
+            if (k == WTLS_ERR_CLOSED || k == 0) k = WTLS_ERR_IO;
             c->broken = true;
             return k;
         }
@@ -358,8 +350,49 @@ static int extract_data_frame(wtls_h2_conn *c, const h2_frame *f, size_t *data_o
 
 /* ---- Public internal API -------------------------------------------------- */
 
+/* The TLS transport: wtls_read/wtls_write on the connection. */
+static int tls_io_read(void *ctx, void *buf, size_t len, uint32_t max_wait_ms) {
+    wtls_conn *tls = ctx;
+    uint32_t saved_to = tls->io_timeout_ms;
+    if (max_wait_ms && max_wait_ms < saved_to) tls->io_timeout_ms = max_wait_ms;
+    int k = wtls_read(tls, buf, len);
+    tls->io_timeout_ms = saved_to;
+    return k;
+}
+
+static int tls_io_write(void *ctx, const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    while (len) {
+        int k = wtls_write(ctx, p, len);
+        if (k <= 0) return k == 0 ? WTLS_ERR_IO : k;
+        p += k;
+        len -= (size_t)k;
+    }
+    return WTLS_OK;
+}
+
+static bool tls_io_readable(void *ctx) {
+    wtls_conn *tls = ctx;
+    return wtls_pending(tls) || wtls_plat_poll(tls->fd, true, false, 0) != 0;
+}
+
+static int tls_io_read_nowait(void *ctx, void *buf, size_t len) {
+    wtls_conn *tls = ctx;
+    if (wtls_set_nonblocking(tls, true) != WTLS_OK) return WTLS_ERR_IO;
+    int k = wtls_read(tls, buf, len);
+    wtls_set_nonblocking(tls, false);
+    return k;
+}
+
+static const wtls_h2_io k_tls_io = {tls_io_read, tls_io_write, tls_io_readable, tls_io_read_nowait};
+
 int wtls_h2_create(wtls_conn *tls, wtls_h2_conn **out) {
     if (!tls || !out) return WTLS_ERR_ARG;
+    return wtls_h2_create_io(&k_tls_io, tls, out);
+}
+
+int wtls_h2_create_io(const wtls_h2_io *io, void *io_ctx, wtls_h2_conn **out) {
+    if (!io || !io->read || !io->write || !io->readable || !io->read_nowait || !out) return WTLS_ERR_ARG;
     *out = NULL;
     wtls_h2_conn *c = wtls_calloc(1, sizeof *c);
     if (!c) return WTLS_ERR_NOMEM;
@@ -368,7 +401,8 @@ int wtls_h2_create(wtls_conn *tls, wtls_h2_conn **out) {
         wtls_free(c);
         return WTLS_ERR_NOMEM;
     }
-    c->tls = tls;
+    c->io = *io;
+    c->io_ctx = io_ctx;
     wtls_hpack_init(&c->hpack, WTLS_HPACK_DEFAULT_TABLE);
     c->next_stream_id = 1u;
     c->peer_initial_win = H2_DEF_WINDOW;
@@ -416,12 +450,9 @@ bool wtls_h2_alive(wtls_h2_conn *c) {
     if (!wtls_h2_reusable(c)) return false;
     c->cur_stream_id = 0;
     for (;;) {
-        if (!wtls_pending(c->tls) && wtls_plat_poll(c->tls->fd, true, false, 0) == 0)
-            return wtls_h2_reusable(c);
+        if (!c->io.readable(c->io_ctx)) return wtls_h2_reusable(c);
         uint8_t hdr[H2_FRAME_HDR];
-        if (wtls_set_nonblocking(c->tls, true) != WTLS_OK) return false;
-        int k = wtls_read(c->tls, hdr, sizeof hdr);
-        wtls_set_nonblocking(c->tls, false);
+        int k = c->io.read_nowait(c->io_ctx, hdr, sizeof hdr);
         if (k == WTLS_WANT_READ) return wtls_h2_reusable(c);
         if (k <= 0) return false;
         size_t got = (size_t)k;

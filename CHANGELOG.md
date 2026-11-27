@@ -6,8 +6,20 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ## [Unreleased]
 
+### Fixed
+
+- **HPACK heap use-after-free (HTTP/2):** a response header block with a
+  literal-with-indexing field whose name referred to a dynamic table entry,
+  and whose insertion evicted that very entry, copied the name out of freed
+  memory. A malicious or broken HTTP/2 server could trigger it. 1.0.0 and
+  1.0.1 are affected; found by the new `fuzz_hpack` / `fuzz_h2_frames`
+  harnesses.
+
 ### Added
 
+- HPACK and HTTP/2 frame fuzz harnesses (`fuzz_hpack`, `fuzz_h2_frames`); the
+  frame engine now runs over an internal transport interface so it can be
+  fuzzed without a socket.
 - Status codes `WTLS_ERR_UNSUPPORTED` (-14), `WTLS_ERR_WS` (-53),
   `WTLS_ERR_FILE` (-60) and `WTLS_ERR_INTEGRITY` (-61), used by the 1.1
   features; `wtls_strerror()` describes them.
