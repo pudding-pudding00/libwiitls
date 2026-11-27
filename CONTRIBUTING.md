@@ -79,6 +79,9 @@ CI runs all of this except the hardware tests on every push.
 
 ## Releasing (maintainers)
 
+When bumping the Mbed TLS LTS release, check the configure-time patches first
+([docs/mbedtls-patches.md](docs/mbedtls-patches.md)).
+
 1. Update the version in `CMakeLists.txt` (`project(libwiitls VERSION …)`) and
    `include/wiitls/wiitls.h` (`WTLS_VERSION` and `WTLS_VERSION_*`; the
    configure step checks that they match).
