@@ -35,16 +35,39 @@ for comparison.
 | 2609b | JIT, Sync GPU on | i | 50 000 | 65: 0.542, 64: 0.458 | – | **0.005** |
 | 2609b | interpreter (`Core.CPUCore=0`) | b | 200 000 | 23: 0.749, 22: 0.250 (12 distinct) | – | **0.002** |
 | 2609b | interpreter (`Core.CPUCore=0`) | i | 50 000 | 64: 0.792, 63: 0.208 | – | **0.000** |
+| 2609-324 | JIT (default) | b | 200 000 | 23: 1.000 (8 distinct) | – | **0.000** |
+| 2609-324 | JIT (default) | i | 50 000 | 64: 0.958, 65: 0.042 | – | **0.001** |
+| 2609-324 | interpreter (`Core.CPUCore=0`) | b | 200 000 | 23: 0.749, 22: 0.250 (13 distinct) | – | **0.002** |
+| 2609-324 | interpreter (`Core.CPUCore=0`) | i | 50 000 | 64: 0.792, 63: 0.208 | – | **0.000** |
 
-After the fix (same Dolphin, JIT), the `entropy` suite shows the refusal: 2
-pass, 2 skip. With `WTLS_DOLPHIN_DEV_ENTROPY=ON` the `tls` suite passes 49/0/5,
-with the same skips as on the Wii. The same DOL on a real Wii still reports
-`emulator: no` and 4/4.
+Both versions, both CPU cores: no measurable entropy. Dolphin is also fully
+deterministic: three runs of the dev build's `entropy` suite in 2609-324 gave
+the same `wtls_init` time to the microsecond (295 769 µs), the same APT
+maximum (294) and the same number of `init_step` calls (59).
 
-Only one Dolphin version has been measured so far. The plan asks for two;
-the second is still open.
+After the fix, the `entropy` suite shows the refusal in both versions: 2
+pass, 2 skip. With `WTLS_DOLPHIN_DEV_ENTROPY=ON` the `tls` suite passes 49/0/5
+in both, with the same skips as on the Wii. The same DOL on a real Wii still
+reports `emulator: no` and 4/4.
 
 For comparison, a real Wii (IOS 58) gives ≥ 4.6 bits per sample for `b`.
+
+### Health tests: depends on the version
+
+The raw 64 KiB test of the `entropy` suite (`wtls_jitter_collect_ex`):
+
+| Dolphin | build | time | RCT max | APT max | health tests |
+|---|---|---|---|---|---|
+| 2609b | release | 4.8 s | 3/21 | 258/410 | pass |
+| 2609-324 | release | 75 ms | **21/21** | 2/410 | **fail** (RCT) |
+| 2609-324 | dev | 4.7 s | 3/21 | 294/410 | pass |
+
+In 2609-324 the release build, which has sampled nothing before this test
+(the init was refused), sees a constant delta and trips the RCT. After the
+dev build's 370 ms of sampling during init, the same version alternates like
+2609b and passes. The cause inside Dolphin is not known. It does not matter
+for the decision: the library refuses on detection, not on the health tests.
+On Dolphin the suite logs the outcome instead of requiring a pass.
 
 `entropy` suite in Dolphin 2609b (JIT), before the fix: `psa_crypto_init`
 369 ms, 64 KiB of raw samples in 4.7 s, RCT max 3/21, **APT max 284/410**
@@ -54,8 +77,8 @@ For comparison, a real Wii (IOS 58) gives ≥ 4.6 bits per sample for `b`.
 ## Decision (WP6, case C → fail closed)
 
 The plan foresaw three cases: A (enough entropy), B (the health tests fail),
-and C (they pass, but the entropy is lower than credited). Dolphin is
-case C, at the extreme: the measured entropy is ~0, so no reduction factor of
+and C (they pass, but the entropy is lower than credited). Dolphin is mostly
+case C, at the extreme (2609-324 at the start of a run is case B): the measured entropy is ~0, so no reduction factor of
 the credit helps. The library therefore refuses the jitter source whenever it
 detects the emulator (`IOS_Open("/dev/dolphin")` succeeds), as in case B:
 

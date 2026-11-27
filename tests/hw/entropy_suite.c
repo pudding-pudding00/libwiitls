@@ -56,7 +56,14 @@ static void hw_jitter_64k_passes_health_tests(void) {
     if (!buf) return;
     wtls_jitter_stats st = {0};
     u64 t0 = gettime();
-    CHECK_EQ_INT(wtls_jitter_collect_ex(sample_cb, NULL, buf, len, &st), WTLS_OK);
+    int rc = wtls_jitter_collect_ex(sample_cb, NULL, buf, len, &st);
+    /* Dolphin: the outcome is a measurement, not a requirement. Depending on
+     * the version the health tests pass (2609b, two alternating values) or
+     * the RCT trips (2609-324, constant delta); docs/dolphin.md. */
+    if (wtls_plat_is_dolphin())
+        TLOG("    emulator: health tests %s (rc %d)\n", rc == WTLS_OK ? "pass" : "fail", rc);
+    else
+        CHECK_EQ_INT(rc, WTLS_OK);
     TLOG("    64 KiB raw samples in %u ms (IOS %d, RCT max %u/%u, APT max %u/%u)\n",
          (unsigned)ticks_to_millisecs(gettime() - t0), (int)IOS_GetVersion(),
          st.max_rct, WTLS_RCT_CUTOFF, st.max_apt, WTLS_APT_CUTOFF);

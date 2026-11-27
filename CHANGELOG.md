@@ -9,8 +9,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 ### Changed
 
 - **Security – no TLS in Dolphin by default:** in Dolphin the timebase jitter of an IOS round trip is deterministic
-  (two alternating values, ~0 bits of min-entropy per sample, `docs/dolphin.md`) but passes the RCT/APT health
-  tests, so 1.0.0 and 1.0.1 seeded the random generator there from predictable data: keys and TLS secrets of an
+  (two alternating values or a constant, ~0 bits of min-entropy per sample in Dolphin 2609b and 2609-324,
+  `docs/dolphin.md`) but mostly passes the RCT/APT health tests, so 1.0.0 and 1.0.1 seeded the random generator there from predictable data: keys and TLS secrets of an
   application running in Dolphin can be reconstructed. When `/dev/dolphin` is present, `wtls_init()` and
   `wtls_init_step()` now fail with `WTLS_ERR_ENTROPY`. Real consoles are not affected. For testing in the emulator only,
   the CMake option `WTLS_DOLPHIN_DEV_ENTROPY=ON` (default `OFF`, link test `dolphin_dev_entropy_not_in_release`)
@@ -37,7 +37,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 ### Added
 
 - **Non-blocking start-up:** `wtls_init_start()` and `wtls_init_step(budget_ms)` collect the jitter entropy in time slices of 16 samples, so the budget holds to ~1.3 ms on the Wii (also before `net_init()`, e.g. next to `net_init_async()`) and finish like `wtls_init()`; the credited entropy is unchanged. New host test `test_init_step` (the host runs the jitter path with a test sampler), Wii timing in the `entropy` suite.
-- **Dolphin detection:** internal `wtls_plat_is_dolphin()` (`/dev/dolphin`); the `entropy` suite prints `emulator: yes/no`.
+- **Dolphin detection:** internal `wtls_plat_is_dolphin()` (`/dev/dolphin`); the `entropy` suite prints `emulator: yes/no`. In Dolphin its raw 64 KiB health-test check logs the outcome instead of requiring a pass (the RCT trips in 2609-324).
 - Tests: `tools/hwtest.py --dolphin <Dolphin.exe>` runs a hardware suite in the emulator (`--dolphin-config` for `-C`
   overrides such as the interpreter); the runner fetches its arguments over the log connection, since Dolphin boots a
   DOL without them.
