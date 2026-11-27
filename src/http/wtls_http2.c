@@ -1,4 +1,5 @@
 /* HTTP/2 client connection and sequential stream engine (RFC 9113). */
+#include "wtls_mem.h"
 #include "http/wtls_http2.h"
 
 #include <limits.h>
@@ -274,7 +275,7 @@ static int decode_headers_sequence(wtls_h2_conn *c, const h2_frame *first, bool 
     size_t frag_len = first->len - off - pad;
     if (frag_len > WTLS_HTTP_MAX_HEAD) return WTLS_ERR_HTTP_LIMIT;
 
-    uint8_t *blk = malloc(frag_len ? frag_len : 1);
+    uint8_t *blk = wtls_malloc(frag_len ? frag_len : 1);
     if (!blk) return WTLS_ERR_NOMEM;
     if (frag_len) memcpy(blk, first->payload + off, frag_len);
     size_t blk_len = frag_len;
@@ -295,7 +296,7 @@ static int decode_headers_sequence(wtls_h2_conn *c, const h2_frame *first, bool 
             break;
         }
         if (cont.len) {
-            uint8_t *nb = realloc(blk, blk_len + cont.len);
+            uint8_t *nb = wtls_realloc(blk, blk_len + cont.len);
             if (!nb) {
                 st = WTLS_ERR_NOMEM;
                 break;
@@ -307,11 +308,11 @@ static int decode_headers_sequence(wtls_h2_conn *c, const h2_frame *first, bool 
         if (cont.flags & H2_FLAG_END_HEADERS) end_headers = true;
     }
     if (st == WTLS_OK) st = wtls_hpack_decode_head(&c->hpack, blk, blk_len, head_out, arena_out);
-    free(blk);
+    wtls_free(blk);
     if (st != WTLS_OK) return st;
     if (head_out->status >= 100 && head_out->status < 200) {
         if (end_stream) {
-            free(*arena_out);
+            wtls_free(*arena_out);
             *arena_out = NULL;
             return WTLS_ERR_HTTP;
         }
@@ -360,11 +361,11 @@ static int extract_data_frame(wtls_h2_conn *c, const h2_frame *f, size_t *data_o
 int wtls_h2_create(wtls_conn *tls, wtls_h2_conn **out) {
     if (!tls || !out) return WTLS_ERR_ARG;
     *out = NULL;
-    wtls_h2_conn *c = calloc(1, sizeof *c);
+    wtls_h2_conn *c = wtls_calloc(1, sizeof *c);
     if (!c) return WTLS_ERR_NOMEM;
-    c->rx_buf = malloc(H2_MAX_FRAME_CAP);
+    c->rx_buf = wtls_malloc(H2_MAX_FRAME_CAP);
     if (!c->rx_buf) {
-        free(c);
+        wtls_free(c);
         return WTLS_ERR_NOMEM;
     }
     c->tls = tls;
@@ -403,8 +404,8 @@ int wtls_h2_create(wtls_conn *tls, wtls_h2_conn **out) {
 void wtls_h2_free(wtls_h2_conn *c) {
     if (!c) return;
     wtls_hpack_free(&c->hpack);
-    free(c->rx_buf);
-    free(c);
+    wtls_free(c->rx_buf);
+    wtls_free(c);
 }
 
 bool wtls_h2_reusable(const wtls_h2_conn *c) {
@@ -480,7 +481,7 @@ int wtls_h2_send_headers(wtls_h2_conn *c, const char *method, const wtls_url *u,
         off += chunk;
         first = false;
     }
-    free(blk);
+    wtls_free(blk);
     return st;
 }
 
@@ -510,7 +511,7 @@ int wtls_h2_send_data(wtls_h2_conn *c, const uint8_t *data, size_t len, bool end
                         if (early_final) *early_final = true;
                         return WTLS_OK;
                     }
-                    free(arena);
+                    wtls_free(arena);
                     continue;
                 }
                 st = handle_common_frame(c, &f);
@@ -552,7 +553,7 @@ int wtls_h2_wait_continue(wtls_h2_conn *c, uint32_t continue_timeout_ms, uint32_
                 return st;
             }
             if (tmp.status == 100) {
-                free(arena);
+                wtls_free(arena);
                 return WTLS_OK;
             }
             if (tmp.status >= 200) {
@@ -562,7 +563,7 @@ int wtls_h2_wait_continue(wtls_h2_conn *c, uint32_t continue_timeout_ms, uint32_
                 *early_final = true;
                 return WTLS_OK;
             }
-            free(arena);
+            wtls_free(arena);
             continue;
         }
         st = handle_common_frame(c, &f);
@@ -588,7 +589,7 @@ int wtls_h2_read_head(wtls_h2_conn *c, uint32_t header_timeout_ms, wtls_http_hea
             }
             if (got_head) *got_head = true;
             if (tmp.status < 200) {
-                free(arena);
+                wtls_free(arena);
                 dl = wtls_plat_now_ms() + header_timeout_ms;
                 continue;
             }

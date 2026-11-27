@@ -373,6 +373,30 @@ typedef void (*wtls_keylog_cb)(void *ctx, const char *line);
  */
 wtls_status wtls_set_keylog_cb(wtls_keylog_cb cb, void *ctx);
 
+/** Replacement allocator for all library memory, including Mbed TLS and zlib. */
+typedef struct {
+    void *(*calloc_fn)(void *ctx, size_t n, size_t size); /**< required; must return zeroed memory or NULL */
+    void *(*realloc_fn)(void *ctx, void *p, size_t size); /**< optional (NULL: emulated with calloc + copy + free) */
+    void  (*free_fn)(void *ctx, void *p);                 /**< required; NULL pointers are never passed */
+    void *ctx;                                            /**< opaque pointer passed to every call */
+} wtls_allocator;
+
+/**
+ * Installs an allocator (copied) so the application can place library memory,
+ * e.g. in MEM2. Pass NULL to return to the C library's malloc/free.
+ *
+ * Only allowed while the library is not initialised: call it before
+ * wtls_init() or after wtls_shutdown(), when no connection, response or
+ * wtls_http_result created with the previous allocator is still alive.
+ * The library keeps a 16-byte header in front of each block it allocates, so
+ * the allocator should return 16-byte aligned memory to keep every block
+ * aligned for any C type.
+ *
+ * @return WTLS_OK, WTLS_ERR_STATE (library initialised), or WTLS_ERR_ARG
+ *         (calloc_fn or free_fn missing).
+ */
+wtls_status wtls_set_allocator(const wtls_allocator *a);
+
 /** Human-readable text for a ::wtls_status value (never NULL). */
 const char *wtls_strerror(int status);
 

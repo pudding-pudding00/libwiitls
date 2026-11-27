@@ -506,6 +506,26 @@ lines show only the method, host and port.
 returns `WTLS_ERR_UNSUPPORTED` and the export code is not linked in. Never
 ship an application that writes these lines anywhere.
 
+## 9b. Custom allocator (e.g. MEM2)
+
+By default the library uses the C library's `malloc`/`free`. To place its
+memory elsewhere, install an allocator before `wtls_init()`; it also serves
+Mbed TLS and zlib:
+
+```c
+static void *my_calloc(void *ctx, size_t n, size_t size) { return mem2_calloc(n, size); }
+static void  my_free(void *ctx, void *p)                 { mem2_free(p); }
+
+wtls_allocator a = { my_calloc, NULL, my_free, NULL };   /* realloc_fn is optional */
+wtls_set_allocator(&a);
+wtls_init();
+```
+
+`wtls_set_allocator()` returns `WTLS_ERR_STATE` while the library is
+initialised. Close all connections and free all results before switching
+allocators (after `wtls_shutdown()`). Each block carries a 16-byte header, so
+return 16-byte aligned memory from `calloc_fn`.
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets

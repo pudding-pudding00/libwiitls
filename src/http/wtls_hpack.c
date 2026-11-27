@@ -1,4 +1,5 @@
 /* HPACK (RFC 7541) encoder and decoder for HTTP/2. */
+#include "wtls_mem.h"
 #include "http/wtls_hpack.h"
 
 #include <ctype.h>
@@ -139,7 +140,7 @@ static int huff_decode(const uint8_t *src, size_t slen, size_t max_out, char **o
     huff_init();
     size_t cap = slen < 16 ? 32 : slen * 2;
     if (cap > max_out) cap = max_out;
-    char *buf = malloc(cap + 1);
+    char *buf = wtls_malloc(cap + 1);
     if (!buf) return WTLS_ERR_NOMEM;
     size_t len = 0;
     uint32_t acc = 0;
@@ -154,19 +155,19 @@ static int huff_decode(const uint8_t *src, size_t slen, size_t max_out, char **o
                 acc >= s_huff.first[bits] && acc - s_huff.first[bits] < s_huff.count[bits]) {
                 uint16_t sym = s_huff.syms[s_huff.off[bits] + (acc - s_huff.first[bits])];
                 if (sym == 256) { /* EOS inside string */
-                    free(buf);
+                    wtls_free(buf);
                     return WTLS_ERR_HTTP;
                 }
                 if (len >= max_out) {
-                    free(buf);
+                    wtls_free(buf);
                     return WTLS_ERR_HTTP_LIMIT;
                 }
                 if (len == cap) {
                     size_t ncap = cap <= max_out / 2 ? cap * 2 : max_out;
                     if (ncap == cap) ncap = max_out;
-                    char *nb = realloc(buf, ncap + 1);
+                    char *nb = wtls_realloc(buf, ncap + 1);
                     if (!nb) {
-                        free(buf);
+                        wtls_free(buf);
                         return WTLS_ERR_NOMEM;
                     }
                     buf = nb;
@@ -179,7 +180,7 @@ static int huff_decode(const uint8_t *src, size_t slen, size_t max_out, char **o
         }
     }
     if (bits >= 8 || (bits > 0 && acc != ((1u << bits) - 1u))) {
-        free(buf);
+        wtls_free(buf);
         return WTLS_ERR_HTTP;
     }
     buf[len] = 0;
@@ -249,7 +250,7 @@ int wtls_hpack_decode_str(const uint8_t **p, const uint8_t *end, size_t max_out,
     *p += (size_t)slen;
     if (huff) return huff_decode(raw, (size_t)slen, max_out, out, out_len);
     if (slen > max_out) return WTLS_ERR_HTTP_LIMIT;
-    char *s = malloc((size_t)slen + 1);
+    char *s = wtls_malloc((size_t)slen + 1);
     if (!s) return WTLS_ERR_NOMEM;
     if (slen) memcpy(s, raw, (size_t)slen);
     s[slen] = 0;
@@ -271,10 +272,10 @@ void wtls_hpack_init(wtls_hpack_ctx *ctx, size_t max_allowed) {
 void wtls_hpack_free(wtls_hpack_ctx *ctx) {
     if (!ctx) return;
     for (size_t i = 0; i < ctx->count; i++) {
-        free(ctx->entries[i].name);
-        free(ctx->entries[i].value);
+        wtls_free(ctx->entries[i].name);
+        wtls_free(ctx->entries[i].value);
     }
-    free(ctx->entries);
+    wtls_free(ctx->entries);
     memset(ctx, 0, sizeof *ctx);
 }
 
@@ -282,8 +283,8 @@ static void evict_to(wtls_hpack_ctx *ctx, size_t limit) {
     while (ctx->count > 0 && ctx->size > limit) {
         size_t last = ctx->count - 1;
         size_t cost = ctx->entries[last].name_len + ctx->entries[last].value_len + 32u;
-        free(ctx->entries[last].name);
-        free(ctx->entries[last].value);
+        wtls_free(ctx->entries[last].name);
+        wtls_free(ctx->entries[last].value);
         ctx->count--;
         ctx->size -= cost;
     }
@@ -300,16 +301,16 @@ static int dyn_insert(wtls_hpack_ctx *ctx, const char *name, size_t name_len,
     evict_to(ctx, ctx->max_size - cost);
     if (ctx->count == ctx->cap) {
         size_t ncap = ctx->cap ? ctx->cap * 2 : 16u;
-        wtls_hpack_entry *ne = realloc(ctx->entries, ncap * sizeof *ne);
+        wtls_hpack_entry *ne = wtls_realloc(ctx->entries, ncap * sizeof *ne);
         if (!ne) return WTLS_ERR_NOMEM;
         ctx->entries = ne;
         ctx->cap = ncap;
     }
-    char *nc = malloc(name_len + 1);
-    char *vc = malloc(value_len + 1);
+    char *nc = wtls_malloc(name_len + 1);
+    char *vc = wtls_malloc(value_len + 1);
     if (!nc || !vc) {
-        free(nc);
-        free(vc);
+        wtls_free(nc);
+        wtls_free(vc);
         return WTLS_ERR_NOMEM;
     }
     memcpy(nc, name, name_len);
@@ -366,7 +367,7 @@ static void hbuf_ensure(hpack_buf *b, size_t extra) {
     while (b->len + extra > b->cap) {
         size_t ncap = b->cap <= WTLS_HTTP_MAX_HEAD / 2 ? b->cap * 2 : WTLS_HTTP_MAX_HEAD;
         if (ncap < b->len + extra) ncap = WTLS_HTTP_MAX_HEAD;
-        uint8_t *np = realloc(b->p, ncap);
+        uint8_t *np = wtls_realloc(b->p, ncap);
         if (!np) {
             b->err = WTLS_ERR_NOMEM;
             return;
@@ -448,7 +449,7 @@ int wtls_hpack_encode_request(const char *method, const wtls_url *u, const wtls_
             return WTLS_ERR_ARG;
     }
 
-    hpack_buf b = {malloc(512), 0, 512, WTLS_OK};
+    hpack_buf b = {wtls_malloc(512), 0, 512, WTLS_OK};
     if (!b.p) return WTLS_ERR_NOMEM;
 
     /* 1. :method */
@@ -506,7 +507,7 @@ int wtls_hpack_encode_request(const char *method, const wtls_url *u, const wtls_
         emit_literal(&b, h[i].name, h[i].value, true, is_sensitive_header(h[i].name));
 
     if (b.err != WTLS_OK) {
-        free(b.p);
+        wtls_free(b.p);
         return b.err;
     }
     *out = b.p;
@@ -563,7 +564,7 @@ static int arena_push(arena_buf *a, const char *s, size_t n, size_t *off_out) {
         size_t ncap = a->cap ? a->cap * 2 : 512u;
         if (ncap < a->len + n + 1u) ncap = a->len + n + 1u;
         if (ncap > WTLS_HTTP_MAX_HEAD) ncap = WTLS_HTTP_MAX_HEAD;
-        char *np = realloc(a->p, ncap);
+        char *np = wtls_realloc(a->p, ncap);
         if (!np) return WTLS_ERR_NOMEM;
         a->p = np;
         a->cap = ncap;
@@ -678,14 +679,14 @@ int wtls_hpack_decode_head(wtls_hpack_ctx *ctx, const uint8_t *block, size_t blo
             }
         }
         if (st == WTLS_OK && add_dyn) st = dyn_insert(ctx, name, name_len, val, val_len);
-        free(owned_name);
-        free(owned_val);
+        wtls_free(owned_name);
+        wtls_free(owned_val);
         if (st != WTLS_OK) break;
     }
 
     if (st == WTLS_OK && status < 0) st = WTLS_ERR_HTTP;
     if (st != WTLS_OK) {
-        free(arena.p);
+        wtls_free(arena.p);
         return st;
     }
     head->status = status;

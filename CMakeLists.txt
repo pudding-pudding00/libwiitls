@@ -338,6 +338,7 @@ add_library(wiitls STATIC
     src/wtls_scache.c
     src/wtls_dns.c
     src/wtls_log.c
+    src/wtls_mem.c
     src/wtls_keylog.c
     src/http/wtls_url.c
     src/http/wtls_http_req.c
@@ -555,6 +556,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     add_dependencies(test_log wtls_test_certs)
     target_compile_definitions(test_log PRIVATE WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}>)
     set_tests_properties(test_log PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    wtls_host_server_test(test_alloc tests/common/alloc_tests.c)
+    add_dependencies(test_alloc wtls_test_certs)
+    if(WTLS_GZIP)
+        target_compile_definitions(test_alloc PRIVATE WTLS_GZIP=1)
+    endif()
+    set_tests_properties(test_alloc PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
     wtls_host_server_test(test_http tests/common/http_tests.c)
     add_dependencies(test_http wtls_test_certs)
     if(WTLS_GZIP)

@@ -16,6 +16,9 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 - `wtls_set_keylog_cb()`: TLS key log in the NSS `SSLKEYLOGFILE` format, built
   only with the new `WTLS_KEYLOG` CMake option (default `ON` for Debug builds,
   `OFF` otherwise; release builds return `WTLS_ERR_UNSUPPORTED`).
+- `wtls_set_allocator()`: route all library memory (including Mbed TLS and zlib)
+  through application-supplied allocator functions, e.g. to use MEM2. The
+  Mbed TLS platform memory layer (`MBEDTLS_PLATFORM_MEMORY`) is now enabled.
 - `test_abi`: compile-time guard that the 1.0 layout of `wtls_options`,
   `wtls_http_request` and `wtls_http_info` stays unchanged.
 

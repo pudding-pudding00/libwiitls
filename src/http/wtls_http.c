@@ -13,6 +13,7 @@
 
 #include <wiitls/http.h>
 
+#include "wtls_mem.h"
 #include "http/wtls_http_chunked.h"
 #if WTLS_GZIP
 #include "http/wtls_http_gzip.h"
@@ -184,7 +185,7 @@ void wtls_http_tr_close(void *c) {
 #endif
     if (t->tls) wtls_close(t->tls);
     else wtls_plat_close(t->fd);
-    free(t);
+    wtls_free(t);
 }
 
 /* Liveness check of a pooled connection: alive if nothing is readable. A
@@ -212,7 +213,7 @@ static bool tr_alive(http_tr *t) {
 static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t port, const wtls_options *opt) {
     *out = NULL;
     if (!wtls_core_initialized()) return WTLS_ERR_STATE;
-    http_tr *t = calloc(1, sizeof *t);
+    http_tr *t = wtls_calloc(1, sizeof *t);
     if (!t) return WTLS_ERR_NOMEM;
     t->fd = -1;
     int st;
@@ -220,7 +221,7 @@ static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t por
         st = wtls_connect(&t->tls, host, port, opt);
     } else {
         if (opt->abort_cb && opt->abort_cb(opt->abort_ctx)) {
-            free(t);
+            wtls_free(t);
             return WTLS_ERR_CANCELLED;
         }
         st = wtls_connect_tcp(
@@ -232,7 +233,7 @@ static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t por
         t->abort_ctx = opt->abort_ctx;
     }
     if (st != WTLS_OK) {
-        free(t);
+        wtls_free(t);
         return st;
     }
     *out = t;
@@ -246,11 +247,11 @@ static void response_free(wtls_http_response *r) {
     if (r->conn) wtls_http_tr_close(r->conn);
 #if WTLS_GZIP
     wtls_gzip_free(r->gz);
-    free(r->gz_in);
+    wtls_free(r->gz_in);
 #endif
-    free(r->buf);
-    free(r->url);
-    free(r);
+    wtls_free(r->buf);
+    wtls_free(r->url);
+    wtls_free(r);
 }
 
 static bool decoding(const wtls_http_response *r) {
@@ -297,7 +298,7 @@ typedef struct {
 static int send_body_cb(http_tr *c, request_ctx *x) {
     if (!x->body_chunked && x->body_len == 0) return WTLS_OK;
     /* Heap-allocated to keep 16 KiB off Wii LWP network-thread stacks. */
-    uint8_t *buf = malloc(UPLOAD_BUF_SIZE);
+    uint8_t *buf = wtls_malloc(UPLOAD_BUF_SIZE);
     if (!buf) return WTLS_ERR_NOMEM;
     size_t left = x->body_len;
     int ret = WTLS_OK;
@@ -351,7 +352,7 @@ static int send_body_cb(http_tr *c, request_ctx *x) {
             break;
         }
     }
-    free(buf);
+    wtls_free(buf);
     return ret;
 }
 
@@ -362,12 +363,12 @@ static int send_request(http_tr *c, request_ctx *x) {
     }
     size_t body_len = x->body ? x->body_len : 0;
     if (body_len && x->head_len + body_len <= SINGLE_WRITE_MAX) {
-        char *all = malloc(x->head_len + body_len);
+        char *all = wtls_malloc(x->head_len + body_len);
         if (!all) return WTLS_ERR_NOMEM;
         memcpy(all, x->head, x->head_len);
         memcpy(all + x->head_len, x->body, body_len);
         int st = tr_write_all(c, all, x->head_len + body_len);
-        free(all);
+        wtls_free(all);
         return st;
     }
     int st = tr_write_all(c, x->head, x->head_len);
@@ -388,9 +389,9 @@ static int read_head_ex(wtls_http_response *r, uint32_t timeout_ms, uint32_t hea
                         bool *got) {
     size_t cap = *cap_io, fill = *fill_io;
     if (!r->buf || cap < HEAD_BUF_START) {
-        free(r->buf);
+        wtls_free(r->buf);
         cap = HEAD_BUF_START;
-        r->buf = malloc(cap);
+        r->buf = wtls_malloc(cap);
         if (!r->buf) return WTLS_ERR_NOMEM;
         fill = 0;
     }
@@ -431,7 +432,7 @@ static int read_head_ex(wtls_http_response *r, uint32_t timeout_ms, uint32_t hea
         if (fill == WTLS_HTTP_MAX_HEAD) return WTLS_ERR_HTTP_LIMIT;
         if (fill == cap) {
             size_t ncap = cap * 2 > WTLS_HTTP_MAX_HEAD ? WTLS_HTTP_MAX_HEAD : cap * 2;
-            char *nb = realloc(buf, ncap);
+            char *nb = wtls_realloc(buf, ncap);
             if (!nb) return WTLS_ERR_NOMEM;
             r->buf = buf = nb;
             cap = ncap;
@@ -482,7 +483,7 @@ static int send_body_only(http_tr *c, request_ctx *x) {
 }
 
 static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
-    http_tr *t = calloc(1, sizeof *t);
+    http_tr *t = wtls_calloc(1, sizeof *t);
     if (!t) return WTLS_ERR_NOMEM;
     t->fd = -1;
     t->io_timeout_ms = x->opt.io_timeout_ms ? x->opt.io_timeout_ms : DEF_IO_MS;
@@ -493,7 +494,7 @@ static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
         x->opt.connect_timeout_ms ? x->opt.connect_timeout_ms : DEF_CONNECT_MS,
         x->opt.abort_cb, x->opt.abort_ctx, &t->fd, NULL, NULL);
     if (st != WTLS_OK) {
-        free(t);
+        wtls_free(t);
         return st;
     }
     if (!r->secure) {
@@ -517,7 +518,7 @@ static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
         st = read_head_ex(r, hdr_t, hdr_t, false, false, &cap, &fill, &got);
         if (st == WTLS_OK && (r->head.status < 200 || r->head.status >= 300 || r->extra_end > r->extra_off))
             st = WTLS_ERR_CONNECT;
-        free(r->buf);
+        wtls_free(r->buf);
         r->buf = NULL;
         r->extra_off = r->extra_end = 0;
     }
@@ -530,7 +531,7 @@ static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
     t->fd = -1;
     st = wtls_connect_on_fd(&t->tls, fd, r->host, r->port, &x->opt);
     if (st != WTLS_OK) {
-        free(t);
+        wtls_free(t);
         r->conn = NULL;
         return st;
     }
@@ -591,7 +592,7 @@ static int acquire(wtls_http_response *r, request_ctx *x) {
 static int send_body_cb_h2(wtls_http_response *r, request_ctx *x, uint32_t hdr_to, bool *got) {
     wtls_h2_conn *h2 = r->conn->h2;
     if (!x->body_chunked && x->body_len == 0) return WTLS_OK;
-    uint8_t *buf = malloc(UPLOAD_BUF_SIZE);
+    uint8_t *buf = wtls_malloc(UPLOAD_BUF_SIZE);
     if (!buf) return WTLS_ERR_NOMEM;
     size_t left = x->body_len;
     int ret = WTLS_OK;
@@ -623,7 +624,7 @@ static int send_body_cb_h2(wtls_http_response *r, request_ctx *x, uint32_t hdr_t
         }
         if (!x->body_chunked) left -= (size_t)k;
     }
-    free(buf);
+    wtls_free(buf);
     return ret;
 }
 
@@ -631,7 +632,7 @@ static int exchange_h2(wtls_http_response *r, request_ctx *x, bool *got) {
     wtls_h2_conn *h2 = r->conn->h2;
     /* An earlier hop (redirect) leaves its head in r->buf; the HPACK decoder
      * hands out a new arena and would overwrite the pointer. */
-    free(r->buf);
+    wtls_free(r->buf);
     r->buf = NULL;
     memset(&r->head, 0, sizeof r->head); /* its fields pointed into r->buf */
     uint32_t io_timeout = tr_timeout(r->conn);
@@ -814,7 +815,7 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
     if (u->secure) {
         st = wtls_conn_identity_fp(&x->opt, &r->has_cred, r->cred_fp);
         if (st != WTLS_OK) {
-            free(head);
+            wtls_free(head);
             x->head = NULL;
             return st;
         }
@@ -848,7 +849,7 @@ static int hop(wtls_http_response *r, request_ctx *x, const wtls_url *u) {
         st = connect_fresh(r, x);
         if (st == WTLS_OK) st = exchange(r, x, &got);
     }
-    free(head);
+    wtls_free(head);
     x->head = NULL;
     if (st != WTLS_OK) return st;
 #if WTLS_HTTP2
@@ -892,7 +893,7 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
     wtls_url nu;
     if (st != WTLS_OK || strlen(next) > WTLS_HTTP_MAX_URL || wtls_url_parse(next, &nu) != WTLS_OK ||
         (u->secure && !nu.secure)) {
-        free(next);
+        wtls_free(next);
         return WTLS_ERR_HTTP_REDIRECT; /* bad Location, or https -> http */
     }
 
@@ -904,9 +905,9 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
          * be presented to a different origin. */
         x->opt.client_cred = NULL;
         if (x->n_headers) {
-            wtls_http_header *h = malloc(x->n_headers * sizeof *h);
+            wtls_http_header *h = wtls_malloc(x->n_headers * sizeof *h);
             if (!h) {
-                free(next);
+                wtls_free(next);
                 return WTLS_ERR_NOMEM;
             }
             size_t n = 0;
@@ -933,7 +934,7 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
      * dropped, the callback is not called for the follow-up request. */
     if (x->body_cb) {
         if (!dropped) {
-            free(next);
+            wtls_free(next);
             return WTLS_ERR_HTTP_REDIRECT;
         }
         x->body_cb = NULL;
@@ -946,11 +947,11 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
 
     /* location points into r->buf, which the next hop replaces: use it first. */
     if (drain_body(r) == WTLS_ERR_CANCELLED) {
-        free(next);
+        wtls_free(next);
         return WTLS_ERR_CANCELLED;
     }
     release_conn(r);
-    free(r->url);
+    wtls_free(r->url);
     r->url = next;
     *u = nu; /* nu.target points into next, now r->url */
     r->redirects++;
@@ -977,7 +978,7 @@ static int setup_encoding(wtls_http_response *r, bool want_gzip) {
     } else {
         return WTLS_ERR_HTTP;
     }
-    r->gz_in = malloc(GZ_IN_BUF);
+    r->gz_in = wtls_malloc(GZ_IN_BUF);
     if (!r->gz || !r->gz_in) return WTLS_ERR_NOMEM; /* response_free() frees what was made */
 #else
     (void)r;
@@ -998,16 +999,16 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
     if (req->body && req->body_cb) return WTLS_ERR_ARG;
     if (req->body_chunked && !req->body_cb) return WTLS_ERR_ARG;
 
-    wtls_http_response *r = calloc(1, sizeof *r);
+    wtls_http_response *r = wtls_calloc(1, sizeof *r);
     if (!r) return WTLS_ERR_NOMEM;
     size_t url_len = strnlen(req->url, WTLS_HTTP_MAX_URL + 1);
     if (url_len > WTLS_HTTP_MAX_URL) {
-        free(r);
+        wtls_free(r);
         return WTLS_ERR_ARG;
     }
-    r->url = malloc(url_len + 1);
+    r->url = wtls_malloc(url_len + 1);
     if (!r->url) {
-        free(r);
+        wtls_free(r);
         return WTLS_ERR_NOMEM;
     }
     memcpy(r->url, req->url, url_len + 1);
@@ -1041,7 +1042,7 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
             response_free(r);
             return WTLS_ERR_ARG;
         }
-        char *pcopy = malloc(plen + 1);
+        char *pcopy = wtls_malloc(plen + 1);
         if (!pcopy) {
             response_free(r);
             return WTLS_ERR_NOMEM;
@@ -1056,7 +1057,7 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
             memcpy(x.proxy_host, pu.host, sizeof x.proxy_host);
             x.proxy_port = pu.port;
         }
-        free(pcopy);
+        wtls_free(pcopy);
         if (bad_proxy) {
             response_free(r);
             return WTLS_ERR_ARG;
@@ -1090,7 +1091,7 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
         st = follow(r, &x, &u, location, &filtered);
         if (st != WTLS_OK) break;
     }
-    free(filtered);
+    wtls_free(filtered);
     if (st == WTLS_OK) st = setup_encoding(r, x.want_gzip);
     if (st != WTLS_OK) {
         response_free(r);
@@ -1320,7 +1321,7 @@ wtls_status wtls_http_detach(wtls_http_response *r, wtls_conn **tls_out, int *fd
 
     if (tls_out) *tls_out = r->conn->tls;
     if (fd_out) *fd_out = r->conn->tls ? r->conn->tls->fd : r->conn->fd;
-    free(r->conn);
+    wtls_free(r->conn);
     r->conn = NULL;
     r->extra_off = r->extra_end;
     return WTLS_OK;
@@ -1354,7 +1355,7 @@ wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_
     } else {
         cap = FETCH_BUF_START < max_body ? FETCH_BUF_START : max_body;
     }
-    char *buf = malloc(cap + 1);
+    char *buf = wtls_malloc(cap + 1);
     size_t fill = 0;
     st = buf ? WTLS_OK : WTLS_ERR_NOMEM;
     while (st == WTLS_OK) {
@@ -1372,7 +1373,7 @@ wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_
                 break;
             }
             size_t ncap = cap * 2 < max_body ? cap * 2 : max_body;
-            char *nb = realloc(buf, ncap + 1);
+            char *nb = wtls_realloc(buf, ncap + 1);
             if (!nb) {
                 st = WTLS_ERR_NOMEM;
                 break;
@@ -1390,7 +1391,7 @@ wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_
     if (st == WTLS_OK && fill == 0 && req->progress_cb) req->progress_cb(req->progress_ctx, 0, total);
     wtls_http_close(r);
     if (st != WTLS_OK) {
-        free(buf);
+        wtls_free(buf);
         return st;
     }
     buf[fill] = '\0';
@@ -1401,7 +1402,7 @@ wtls_status wtls_http_fetch(const wtls_http_request *req, size_t max_body, wtls_
 
 void wtls_http_result_free(wtls_http_result *res) {
     if (!res) return;
-    free(res->body);
+    wtls_free(res->body);
     res->body = NULL;
     res->body_len = 0;
 }

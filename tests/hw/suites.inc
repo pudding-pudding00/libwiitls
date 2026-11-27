@@ -7,6 +7,7 @@
 {"time", wtls_suite_time},
 {"tls", wtls_suite_tls},
 {"log", wtls_suite_log},
+{"alloc", wtls_suite_alloc},
 {"realworld", wtls_suite_realworld},
 {"http", wtls_suite_http},
 {"soak", wtls_suite_soak},

@@ -1,4 +1,5 @@
 /* Streaming gzip decoder over zlib inflate (built with Z_PREFIX). */
+#include "wtls_mem.h"
 #include "http/wtls_http_gzip.h"
 
 #include <stdbool.h>
@@ -14,12 +15,24 @@ struct wtls_gzip {
     bool ended;      /* deflate: Z_STREAM_END reached */
 };
 
+static voidpf zalloc_hook(voidpf opaque, uInt items, uInt size) {
+    (void)opaque;
+    return wtls_calloc(items, size);
+}
+
+static void zfree_hook(voidpf opaque, voidpf p) {
+    (void)opaque;
+    wtls_free(p);
+}
+
 static wtls_gzip *alloc_inflate(int window_bits, bool deflate) {
-    wtls_gzip *g = calloc(1, sizeof *g);
+    wtls_gzip *g = wtls_calloc(1, sizeof *g);
     if (!g) return NULL;
     g->deflate = deflate;
+    g->z.zalloc = zalloc_hook;
+    g->z.zfree = zfree_hook;
     if (inflateInit2(&g->z, window_bits) != Z_OK) {
-        free(g);
+        wtls_free(g);
         return NULL;
     }
     return g;
@@ -86,5 +99,5 @@ int wtls_gzip_finish(const wtls_gzip *g) {
 void wtls_gzip_free(wtls_gzip *g) {
     if (!g) return;
     inflateEnd(&g->z);
-    free(g);
+    wtls_free(g);
 }
