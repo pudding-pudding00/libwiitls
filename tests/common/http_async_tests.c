@@ -495,6 +495,7 @@ static void test_async_timeouts(void) {
     req.total_timeout_ms = 500;
     t0 = wtls_plat_now_ms();
     r = begin(&req, &st);
+    TLOG("  head under total timeout: %lu ms\n", (unsigned long)(wtls_plat_now_ms() - t0));
     CHECK_EQ_INT(st, WTLS_OK);
     if (r) {
         uint8_t buf[8];
@@ -864,7 +865,10 @@ static void test_async_h2_streams_share_one_connection(void) {
     uint64_t t0 = wtls_plat_now_ms();
     for (int i = 0; i < N; i++) job_start(&js[i], h2url(P_MUX, "/slow?n=30000&delay=300"), 30001);
     CHECK(jobs_run(js, N, 20000, NULL, NULL));
-    uint64_t dt = wtls_plat_now_ms() - t0;
+    uint64_t dt = wtls_plat_now_ms() - t0, first = 0;
+    for (int i = 0; i < N; i++)
+        if (js[i].head && (!first || js[i].t_head < first)) first = js[i].t_head;
+    TLOG("  4 streams: %lu ms, first head after %lu ms\n", (unsigned long)dt, (unsigned long)(first ? first - t0 : 0));
     int maxactive = 0;
     for (int i = 0; i < N; i++) {
         CHECK_EQ_INT(js[i].err, 0);

@@ -15,6 +15,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 - Tests: `wtls_http_start()` may answer `WTLS_WANT_WRITE` while the connect is still running.
 - Tests: the SOCKS5 test expects an IPv4 address type when the test server is given as an address.
 - Tests: the write-retry test skips on the Wii when the socket never refuses data, and logs the longest write.
+- Tests: the async timeout and stream-sharing tests log their timings.
 - **HTTP/2 trailers (blocking engine):** trailers of a response were skipped without HPACK decoding, so a trailer that added a dynamic table entry left the client's table out of step with the server's for the next request on that connection (decoding error or wrong header). They are decoded and dropped now.
 - **HPACK heap use-after-free (HTTP/2):** a response header block with a
   literal-with-indexing field whose name referred to a dynamic table entry,
