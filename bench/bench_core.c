@@ -561,6 +561,115 @@ static void bench_http_get(void) {
     wtls_http_pool_flush();
 }
 
+/* ---- 16 small requests (WP12) ------------------------------------------- */
+
+#define MUX_PORT 4449 /* concurrent HTTP/2 test server */
+#define N_SMALL 16
+#define SMALL_RUNS 5
+
+static char s_mux_url[128];
+
+/* The 1.0.1 way: one blocking request after the other on the pooled
+ * HTTP/2 connection. */
+static int small_seq(void) {
+    for (int i = 0; i < N_SMALL; i++) {
+        wtls_http_request q = {0};
+        q.url = s_mux_url;
+        wtls_http_response *r = NULL;
+        int st = wtls_http_open(&r, &q);
+        if (st != WTLS_OK) return st;
+        char buf[64];
+        int n;
+        while ((n = wtls_http_read(r, buf, sizeof buf)) > 0) {
+        }
+        int status = wtls_http_status(r);
+        wtls_http_close(r);
+        if (n < 0) return n;
+        if (status != 200) return WTLS_ERR_HTTP;
+    }
+    return WTLS_OK;
+}
+
+/* All 16 started at once through the non-blocking API, multiplexed as
+ * HTTP/2 streams, driven with wtls_http_wait()/step()/read(). */
+static int small_async(void) {
+    wtls_http_request q[N_SMALL];
+    wtls_http_response *r[N_SMALL] = {0};
+    bool head[N_SMALL] = {0}, done[N_SMALL] = {0};
+    int err = WTLS_OK, left = N_SMALL;
+    for (int i = 0; i < N_SMALL; i++) {
+        memset(&q[i], 0, sizeof q[i]);
+        q[i].url = s_mux_url;
+        int st = wtls_http_start(&r[i], &q[i]);
+        if (st == WTLS_OK) head[i] = true;
+        else if (st != WTLS_WANT_READ && st != WTLS_WANT_WRITE) { err = st; done[i] = true; left--; }
+    }
+    uint64_t end = wtls_plat_now_ms() + 10000;
+    while (left > 0 && err == WTLS_OK && wtls_plat_now_ms() < end) {
+        wtls_http_response *live[N_SMALL];
+        for (int i = 0; i < N_SMALL; i++) live[i] = done[i] ? NULL : r[i];
+        wtls_http_wait(live, N_SMALL, 50);
+        for (int i = 0; i < N_SMALL && err == WTLS_OK; i++) {
+            if (done[i]) continue;
+            if (!head[i]) {
+                int st = wtls_http_step(r[i]);
+                if (st == WTLS_OK) head[i] = true;
+                else if (st != WTLS_WANT_READ && st != WTLS_WANT_WRITE) err = st;
+                if (!head[i]) continue;
+            }
+            char buf[64];
+            int n;
+            while ((n = wtls_http_read(r[i], buf, sizeof buf)) > 0) {
+            }
+            if (n == 0) {
+                if (wtls_http_status(r[i]) != 200) err = WTLS_ERR_HTTP;
+                done[i] = true;
+                left--;
+            } else if (n != WTLS_WANT_READ && n != WTLS_WANT_WRITE) {
+                err = n;
+            }
+        }
+    }
+    for (int i = 0; i < N_SMALL; i++) wtls_http_close(r[i]);
+    if (err == WTLS_OK && left > 0) err = WTLS_ERR_TIMEOUT;
+    return err;
+}
+
+/* Median of SMALL_RUNS sequential rounds against @p port, after a warm-up round. */
+static bool small_seq_median(int port, const char *name) {
+    snprintf(s_mux_url, sizeof s_mux_url, "https://%s:%d/hello", g_env.server_host, port);
+    uint64_t seq[SMALL_RUNS];
+    wtls_http_pool_flush();
+    CHECK_EQ_INT(small_seq(), WTLS_OK);
+    for (int i = 0; i < SMALL_RUNS; i++) {
+        uint64_t t0 = wtls_plat_now_us();
+        int r = small_seq();
+        seq[i] = wtls_plat_now_us() - t0;
+        CHECK_EQ_INT(r, WTLS_OK);
+        if (r != WTLS_OK) return false;
+    }
+    report(name, (double)median(seq, SMALL_RUNS) / 1000.0, "ms");
+    return true;
+}
+
+/* All on an established session (warm-up round first), so none pays for a
+ * handshake. HTTP/1.1 on HTTP_PORT is the reference for the per-request cost. */
+static void bench_http_16_small(void) {
+    uint64_t par[SMALL_RUNS];
+    if (!small_seq_median(HTTP_PORT, "http_16_small_seq_h1_wall")) return;
+    if (!small_seq_median(MUX_PORT, "http_16_small_seq_wall")) return;
+    CHECK_EQ_INT(small_async(), WTLS_OK);
+    for (int i = 0; i < SMALL_RUNS; i++) {
+        uint64_t t0 = wtls_plat_now_us();
+        int r = small_async();
+        par[i] = wtls_plat_now_us() - t0;
+        CHECK_EQ_INT(r, WTLS_OK);
+        if (r != WTLS_OK) return;
+    }
+    report("http_16_small_async_wall", (double)median(par, SMALL_RUNS) / 1000.0, "ms");
+    wtls_http_pool_flush();
+}
+
 /* ---- gate --------------------------------------------------------------- */
 
 static void gate(const char *what, double value, bool met) {
@@ -596,6 +705,7 @@ void wtls_bench_run(void) {
         RUN(bench_handshake_resumed);
         RUN(bench_stream_4m);
         RUN(bench_http_get);
+        RUN(bench_http_16_small);
     } else {
         TLOG("cannot fetch the test CA from %s:%d - network benchmarks not run\n",
              g_env.server_host ? g_env.server_host : "-", PLAIN_PORT);

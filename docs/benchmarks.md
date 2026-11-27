@@ -42,6 +42,9 @@ All values are medians of 20 runs (streams: 3 runs).
 | `net_recv_4m` | 4 MiB over raw TCP (`wtls_plat_recv`), first byte to last | MB/s |
 | `wtls_read_4m` | 4 MiB through `wtls_read`, first byte to last | MB/s |
 | `wtls_read_vs_raw` | `wtls_read_4m` / `net_recv_4m` | % |
+| `http_16_small_seq_h1_wall` | 16 × `GET /hello` one after another with `wtls_http_open`, HTTP/1.1 keep-alive (port 4438), median of 5 | ms |
+| `http_16_small_seq_wall` | the same 16 requests over one pooled HTTP/2 connection (port 4449), median of 5 | ms |
+| `http_16_small_async_wall` | the 16 requests started at once with `wtls_http_start`, multiplexed on one HTTP/2 connection, median of 5 | ms |
 
 **CPU time** = wall time − time blocked in `wtls_plat_poll`
 (`wtls_plat_poll_wait_us`, including the polls of a pending TCP connect). It
@@ -98,6 +101,33 @@ target of ±5 %. `net_recv_4m` was 0.997 to 1.014 MB/s in every run, so the
 link stayed stable. Every run passed 10/0/0. At this link speed the
 comparison can only show that the branch is not slower; differences in CPU
 cost stay below what the Wi-Fi can resolve.
+
+### 16 small requests (HTTP/1.1, HTTP/2, multiplexed)
+
+Sixteen `GET /hello` (5-byte body) to the same host, after a warm-up that
+leaves a pooled connection. Same Wii and Wi-Fi, three bench runs (11/0/0 each):
+
+| Measurement | 1.0.1 (ms) | branch (ms) |
+|---|---|---|
+| `http_16_small_seq_h1_wall` | 98 | 95.5 – 97.5 |
+| `http_16_small_seq_wall` (HTTP/2) | 995 | 140.5 – 142.2 |
+| `http_16_small_async_wall` (HTTP/2, 16 at once) | – | 146.5 – 148.3 |
+
+In 1.0.1 a sequential HTTP/2 request cost ~62 ms, ten times an HTTP/1.1 one.
+The client wrote each frame (and each frame's header and payload) with its
+own `send`. IOS refuses `TCP_NODELAY`, so Nagle held every small write after
+the first until the PC's delayed ACK came back (~40–60 ms on Windows). Both
+HTTP/2 engines now gather the frames of a request and write them at once:
+the blocking one (`wtls_http2.c`) buffers up to one maximum frame and
+flushes before it reads, and the async one (`wtls_h2s.c`) merges queued
+frames up to the same size before each write. That gives ~9 ms per request.
+
+Multiplexing does not beat sequential requests on the Wii. Counting the IOS
+calls of one async run gave ~48 `net_recv` with data (~1.2 ms each), ~70
+empty ones (13–19 ms in all) and 12 `net_send` (25–36 ms), about 110 ms of
+IPC for 16 requests. That is nearly the whole run. Parallel streams save the
+round trips, but each response still costs its own IOS calls, and those
+dominate. Raising `WTLS_H2_MAX_STREAMS` from 4 to 16 changed nothing.
 
 ## Build options
 
