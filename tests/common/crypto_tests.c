@@ -87,6 +87,15 @@ static void test_x25519_generated_pairs_agree(void) {
     psa_destroy_key(y);
 }
 
+#if defined(WTLS_ACCEL_X25519) || defined(WTLS_ACCEL_P256)
+static uint32_t xorshift32(uint32_t *s) {
+    *s ^= *s << 13;
+    *s ^= *s >> 17;
+    *s ^= *s << 5;
+    return *s;
+}
+#endif
+
 #if defined(WTLS_ACCEL_X25519)
 /* The 32-bit-limb X25519 (src/accel), called directly. */
 #include "accel/wtls_x25519.h"
@@ -152,12 +161,6 @@ static void test_x25519_fast_rfc7748_6_1(void) {
     CHECK_MEM(out, k_shared, 32);
 }
 
-static uint32_t xorshift32(uint32_t *s) {
-    *s ^= *s << 13;
-    *s ^= *s >> 17;
-    *s ^= *s << 5;
-    return *s;
-}
 
 static void same_as_everest(const uint8_t k[32], const uint8_t u[32]) {
     uint8_t kc[32], uc[32], want[32], out[32];

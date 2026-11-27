@@ -250,8 +250,10 @@ static int handle_common_frame(wtls_h2_conn *c, const h2_frame *f) {
     }
 }
 
+/* A header block (HEADERS + CONTINUATION) of the current stream: the response head, or with trailers set the
+ * trailers, which are decoded and dropped (the shared dynamic table must see their entries). */
 static int decode_headers_sequence(wtls_h2_conn *c, const h2_frame *first, bool use_deadline,
-                                   uint64_t deadline, wtls_http_head *head_out, char **arena_out) {
+                                   uint64_t deadline, wtls_http_head *head_out, char **arena_out, bool trailers) {
     if (first->stream != c->cur_stream_id || first->stream == 0) return WTLS_ERR_HTTP;
     size_t off = 0;
     size_t pad = 0;
@@ -298,6 +300,13 @@ static int decode_headers_sequence(wtls_h2_conn *c, const h2_frame *first, bool 
             blk_len += cont.len;
         }
         if (cont.flags & H2_FLAG_END_HEADERS) end_headers = true;
+    }
+    if (st == WTLS_OK && trailers) {
+        st = end_stream ? wtls_hpack_decode_trailers(&c->hpack, blk, blk_len) : WTLS_ERR_HTTP;
+        wtls_free(blk);
+        if (st != WTLS_OK) return st;
+        c->stream_remote_eof = true;
+        return WTLS_OK;
     }
     if (st == WTLS_OK) st = wtls_hpack_decode_head(&c->hpack, blk, blk_len, head_out, arena_out);
     wtls_free(blk);
@@ -530,7 +539,7 @@ int wtls_h2_send_data(wtls_h2_conn *c, const uint8_t *data, size_t len, bool end
                 if (f.type == H2_HEADERS && f.stream == c->cur_stream_id && head_out && arena_out) {
                     wtls_http_head tmp;
                     char *arena = NULL;
-                    st = decode_headers_sequence(c, &f, false, 0, &tmp, &arena);
+                    st = decode_headers_sequence(c, &f, false, 0, &tmp, &arena, false);
                     if (st != WTLS_OK) {
                         c->broken = true;
                         return st;
@@ -578,7 +587,7 @@ int wtls_h2_wait_continue(wtls_h2_conn *c, uint32_t continue_timeout_ms, uint32_
         if (f.type == H2_HEADERS && f.stream == c->cur_stream_id) {
             wtls_http_head tmp;
             char *arena = NULL;
-            st = decode_headers_sequence(c, &f, true, dl_hdr, &tmp, &arena);
+            st = decode_headers_sequence(c, &f, true, dl_hdr, &tmp, &arena, false);
             if (st != WTLS_OK) {
                 c->broken = true;
                 return st;
@@ -613,7 +622,7 @@ int wtls_h2_read_head(wtls_h2_conn *c, uint32_t header_timeout_ms, wtls_http_hea
         if (f.type == H2_HEADERS && f.stream == c->cur_stream_id) {
             wtls_http_head tmp;
             char *arena = NULL;
-            st = decode_headers_sequence(c, &f, true, dl, &tmp, &arena);
+            st = decode_headers_sequence(c, &f, true, dl, &tmp, &arena, false);
             if (st != WTLS_OK) {
                 c->broken = true;
                 return st;
@@ -681,22 +690,11 @@ int wtls_h2_read_data(wtls_h2_conn *c, void *buf, size_t len, bool *eof_out) {
         }
         if (f.type == H2_HEADERS && f.stream == c->cur_stream_id) {
             /* Trailers (END_STREAM) on an open response stream */
-            if (!(f.flags & H2_FLAG_END_STREAM)) {
+            st = decode_headers_sequence(c, &f, false, 0, NULL, NULL, true);
+            if (st != WTLS_OK) {
                 c->broken = true;
-                return WTLS_ERR_HTTP;
+                return st;
             }
-            bool end_hdrs = (f.flags & H2_FLAG_END_HEADERS) != 0;
-            while (!end_hdrs) {
-                h2_frame cont;
-                st = read_frame(c, &cont, false, 0);
-                if (st != WTLS_OK) return st;
-                if (cont.type != H2_CONTINUATION || cont.stream != c->cur_stream_id) {
-                    c->broken = true;
-                    return WTLS_ERR_HTTP;
-                }
-                if (cont.flags & H2_FLAG_END_HEADERS) end_hdrs = true;
-            }
-            c->stream_remote_eof = true;
             *eof_out = true;
             return 0;
         }

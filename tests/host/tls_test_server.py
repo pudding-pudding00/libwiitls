@@ -1322,6 +1322,16 @@ def h2_session(sock, state):
         elif path == "/goaway":
             send_resp(200, [("content-length", 3)], b"bye")
             sock.sendall(_h2_frame(7, 0, 0, sid.to_bytes(4, "big") + (0).to_bytes(4, "big")))
+        elif path == "/trailers":
+            # head, body, then a trailer block that adds "x-trailer: t1" to the client's dynamic table
+            sock.sendall(_h2_frame(1, 4, sid, _hpack_enc_headers(200, [])))
+            sock.sendall(_h2_frame(0, 0, sid, b"t" * n))
+            sock.sendall(_h2_frame(1, 4 | 1, sid, _hpack_enc_headers_raw([("x-trailer", "t1")], inc_dyn=True)))
+        elif path == "/dynref":
+            # refers to that entry by its index (62): decodes only if the trailers were decoded too
+            blk = bytes([0x88, 0xbe]) + _hpack_enc_int(0x00, 4, 0) + _hpack_enc_str("content-length") + _hpack_enc_str("2")
+            sock.sendall(_h2_frame(1, 4, sid, blk))
+            send_data_flow(sid, b"ok")
         elif path == "/cont":
             blk = _hpack_enc_headers(200, [("x-custom", "hpack-dyn"), ("content-length", 4)], inc_dyn=True)
             sock.sendall(_h2_frame(1, 0, sid, blk[:5]))

@@ -2517,6 +2517,29 @@ static void http2_get_and_info(void) {
     }
 }
 
+static void http2_trailers_keep_the_hpack_table_in_step(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_H2, "/trailers?n=100");
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    int last = -1;
+    CHECK_EQ_INT((int)strlen(body_str(r, &last)), 100);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+    /* the same connection: the next head refers to the dynamic table entry the trailers made */
+    req.url = url_of("https", P_H2, "/dynref");
+    r = open_req(&req);
+    if (!r) return;
+    wtls_http_info info;
+    CHECK_EQ_INT(wtls_http_get_info(r, &info), WTLS_OK);
+    CHECK(info.http2 && info.reused_connection);
+    const char *t = wtls_http_get_header(r, "x-trailer");
+    CHECK(t && strcmp(t, "t1") == 0);
+    CHECK(strcmp(body_str(r, &last), "ok") == 0);
+    wtls_http_close(r);
+}
+
 static void http2_reuse_and_goaway(void) {
     wtls_http_pool_flush();
     wtls_http_request req = {0};
@@ -2866,6 +2889,7 @@ void wtls_suite_http(void) {
 #endif
 #if WTLS_HTTP2
     RUN(http2_get_and_info);
+    RUN(http2_trailers_keep_the_hpack_table_in_step);
     RUN(http2_reuse_and_goaway);
     RUN(http2_flow_upload_expect_gzip_cont);
 #endif

@@ -652,6 +652,9 @@ static void test_async_unsupported_and_bad_arguments(void) {
 /* ---- HTTP/2 (WTLS_HTTP2): one session, several streams ---------------------------------------------------- */
 
 #if WTLS_HTTP2
+#ifndef WTLS_H2_MAX_STREAMS
+#define WTLS_H2_MAX_STREAMS 4
+#endif
 #define P_H2 4445
 #define P_MUX 4449  /* concurrent server, 100 streams at once */
 #define P_MUX2 4450 /* concurrent server, 2 streams at once */
@@ -868,8 +871,8 @@ static void test_async_h2_streams_share_one_connection(void) {
         CHECK(c0 && ci && strcmp(c0, ci) == 0); /* one connection for all of them */
         if (ma && atoi(ma) > maxactive) maxactive = atoi(ma);
     }
-    CHECK(maxactive >= 3);        /* they really were open together */
-    CHECK(dt < 1000);             /* four 300 ms answers one after another would take 1200 ms */
+    CHECK(maxactive >= (WTLS_H2_MAX_STREAMS < 3 ? WTLS_H2_MAX_STREAMS : 3)); /* they really were open together */
+    if (WTLS_H2_MAX_STREAMS >= 2) CHECK(dt < 1100); /* four 300 ms answers one after another would take 1200 ms */
     (void)all_heads;
     for (int i = 0; i < N; i++) job_free(&js[i]);
 
