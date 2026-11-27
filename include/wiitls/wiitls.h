@@ -125,6 +125,16 @@ typedef struct {
                                          pinning is active when the two counts add up to more than 0 */
     uint8_t n_spki_pins_ext;        /**< (1.1) 0..WTLS_SPKI_MAX_PINS_EXT; larger, or non-zero with a NULL
                                          spki_pins_ext => WTLS_ERR_ARG */
+    bool async_dns;                 /**< (1.1) wtls_connect_start(): resolve host names without blocking. A name
+                                         that is not cached then makes the call return WTLS_WANT_READ with
+                                         wtls_get_fd() == -1 until the lookup is done: call wtls_connect_step()
+                                         again after a few milliseconds (there is nothing to poll yet). Needs a
+                                         helper thread (host builds); on the Wii the lookup still runs inside the
+                                         call. wtls_connect() always resolves this way, which is what lets it
+                                         honour abort_cb and dns_timeout_ms during the lookup */
+    uint32_t dns_timeout_ms;        /**< (1.1) 0 => wait as long as the resolver takes (as in 1.0); otherwise a
+                                         lookup that is still running after this long fails with
+                                         WTLS_ERR_TIMEOUT (the answer is dropped when it arrives) */
 } wtls_options;
 
 /** Facts about an established connection (see wtls_get_info()). */
@@ -291,9 +301,12 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port,
  * the non-blocking TCP connect, and advances as far as possible without
  * blocking.
  *
+ * With wtls_options::async_dns the lookup does not block either (see there).
+ *
  * @return WTLS_OK (handshake already finished), WTLS_WANT_READ or
  *         WTLS_WANT_WRITE (*out is set; poll wtls_get_fd(*out) and drive with
- *         wtls_connect_step()), or a negative error (*out is NULL).
+ *         wtls_connect_step(); a descriptor of -1 means the DNS lookup is still
+ *         running), or a negative error (*out is NULL).
  */
 wtls_status wtls_connect_start(wtls_conn **out, const char *host, uint16_t port,
                                const wtls_options *opt);

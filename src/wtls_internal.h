@@ -18,7 +18,8 @@ typedef enum {
     WTLS_CONN_TCP_CONNECT = 0,
     WTLS_CONN_TLS_HANDSHAKE,
     WTLS_CONN_READY,
-    WTLS_CONN_FAILED
+    WTLS_CONN_FAILED,
+    WTLS_CONN_DNS /* host name lookup running on a helper thread */
 } wtls_conn_stage;
 
 struct wtls_conn {
@@ -39,6 +40,9 @@ struct wtls_conn {
     size_t n_addrs;
     size_t addr_idx;
     bool dns_from_cache;
+    int dns_job;             /* WTLS_CONN_DNS: the lookup job */
+    uint64_t dns_deadline_ms; /* 0: none */
+    bool async_dns;          /* resolve on a helper thread */
     bool dns_retried;
     char host[256];          /* normalized: lower case, no trailing dot */
     uint16_t port;

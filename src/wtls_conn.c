@@ -158,6 +158,7 @@ static int wait_io(wtls_conn *c, int want, uint64_t deadline) {
 
 static void conn_free(wtls_conn *c) {
     if (!c) return;
+    if (c->dns_job >= 0) wtls_dns_job_cancel(c->dns_job);
     if (c->cred) wtls_client_cred_release(c->cred);
     mbedtls_ssl_free(&c->ssl);
     mbedtls_ssl_config_free(&c->conf);
@@ -220,6 +221,37 @@ static int start_tls_handshake(wtls_conn *c) {
     c->stage_deadline_ms = c->handshake_t0_ms + c->handshake_timeout_ms;
     c->stage = WTLS_CONN_TLS_HANDSHAKE;
     wtls_prof_last.setup_us += wtls_plat_now_us() - p1;
+    return WTLS_OK;
+}
+
+/* The helper thread's lookup: WTLS_OK once the addresses are in (the TCP connect stage starts), WTLS_WANT_READ while
+ * it runs (wtls_get_fd() is -1), or the error. */
+static int step_dns(wtls_conn *c) {
+    if (c->abort_cb && c->abort_cb(c->abort_ctx)) {
+        wtls_dns_job_cancel(c->dns_job);
+        c->dns_job = -1;
+        c->aborted = true;
+        c->stage = WTLS_CONN_FAILED;
+        return WTLS_ERR_CANCELLED;
+    }
+    int r = wtls_dns_job_poll(c->dns_job, c->addrs, &c->n_addrs);
+    if (r == WTLS_WANT_READ) {
+        if (c->dns_deadline_ms && wtls_plat_now_ms() >= c->dns_deadline_ms) {
+            wtls_dns_job_cancel(c->dns_job);
+            c->dns_job = -1;
+            c->stage = WTLS_CONN_FAILED;
+            return WTLS_ERR_TIMEOUT;
+        }
+        return WTLS_WANT_READ;
+    }
+    c->dns_job = -1;
+    if (r != WTLS_OK) {
+        c->stage = WTLS_CONN_FAILED;
+        return WTLS_ERR_DNS;
+    }
+    c->dns_from_cache = false;
+    c->stage = WTLS_CONN_TCP_CONNECT;
+    c->stage_deadline_ms = wtls_plat_now_ms() + c->connect_timeout_ms; /* the connect budget starts when the address is known */
     return WTLS_OK;
 }
 
@@ -341,7 +373,7 @@ static int step_tls_handshake(wtls_conn *c) {
 }
 
 static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t port,
-                                 const wtls_options *opt, bool resolve_dns) {
+                                 const wtls_options *opt, bool resolve_dns, bool async_dns) {
     *out = NULL;
     if (!host || port == 0) return WTLS_ERR_ARG;
     if (!wtls_core_initialized()) return WTLS_ERR_STATE;
@@ -362,6 +394,7 @@ static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t por
     wtls_conn *c = mbedtls_calloc(1, sizeof *c);
     if (!c) return WTLS_ERR_NOMEM;
     c->fd = -1;
+    c->dns_job = -1;
     c->stage = WTLS_CONN_TCP_CONNECT;
     mbedtls_ssl_init(&c->ssl);
     mbedtls_ssl_config_init(&c->conf);
@@ -403,6 +436,18 @@ static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t por
     if (resolve_dns) {
         if (c->ip_literal) {
             c->n_addrs = 1;
+        } else if (async_dns) {
+            c->async_dns = true;
+            c->dns_job = -1;
+            int dr = wtls_dns_lookup_begin(name, &c->dns_job, c->addrs, &c->n_addrs, &c->dns_from_cache,
+                                           wtls_plat_now_ms());
+            if (dr == WTLS_WANT_READ) {
+                c->stage = WTLS_CONN_DNS;
+                if (opt->dns_timeout_ms) c->dns_deadline_ms = wtls_plat_now_ms() + opt->dns_timeout_ms;
+            } else if (dr != WTLS_OK) {
+                conn_free(c);
+                return dr == WTLS_ERR_NOMEM ? WTLS_ERR_NOMEM : WTLS_ERR_DNS;
+            }
         } else if (wtls_dns_lookup_list(name, c->addrs, &c->n_addrs,
                                         &c->dns_from_cache, wtls_plat_now_ms()) != WTLS_OK) {
             conn_free(c);
@@ -435,7 +480,9 @@ static wtls_status conn_drive(wtls_conn **out, wtls_conn *c, wtls_status st) {
             hs_w0 = wtls_plat_poll_wait_us;
             in_hs = true;
         }
-        if (c->stage == WTLS_CONN_TCP_CONNECT) {
+        if (c->stage == WTLS_CONN_DNS) {
+            wtls_plat_sleep_ms(2); /* the lookup runs on its own thread; step_dns() checks abort_cb and the DNS timeout */
+        } else if (c->stage == WTLS_CONN_TCP_CONNECT) {
             if (c->abort_cb && c->abort_cb(c->abort_ctx)) {
                 c->aborted = true;
                 st = WTLS_ERR_CANCELLED;
@@ -479,12 +526,13 @@ static wtls_status conn_drive(wtls_conn **out, wtls_conn *c, wtls_status st) {
     return WTLS_OK;
 }
 
-wtls_status wtls_connect_start(wtls_conn **out, const char *host, uint16_t port, const wtls_options *opt) {
+static wtls_status connect_start_ex(wtls_conn **out, const char *host, uint16_t port, const wtls_options *opt,
+                                    bool force_async) {
     if (!out) return WTLS_ERR_ARG;
     *out = NULL;
     if (!WTLS_THREAD_GUARD("wtls_connect_start")) return WTLS_ERR_STATE;
     wtls_conn *c = NULL;
-    wtls_status st = conn_init_tls(&c, host, port, opt, true);
+    wtls_status st = conn_init_tls(&c, host, port, opt, true, force_async || (opt && opt->async_dns));
     if (st != WTLS_OK) return st;
 
     c->connect_t0_us = wtls_plat_now_us();
@@ -500,11 +548,19 @@ wtls_status wtls_connect_start(wtls_conn **out, const char *host, uint16_t port,
     return st;
 }
 
+wtls_status wtls_connect_start(wtls_conn **out, const char *host, uint16_t port, const wtls_options *opt) {
+    return connect_start_ex(out, host, port, opt, false);
+}
+
 wtls_status wtls_connect_step(wtls_conn *c) {
     if (!c) return WTLS_ERR_ARG;
     if (!WTLS_THREAD_GUARD("wtls_connect_step")) return WTLS_ERR_STATE;
     if (c->stage == WTLS_CONN_READY) return WTLS_OK;
     if (c->stage == WTLS_CONN_FAILED) return WTLS_ERR_STATE;
+    if (c->stage == WTLS_CONN_DNS) {
+        int st = step_dns(c);
+        if (st != WTLS_OK) return (wtls_status)st;
+    }
     if (c->stage == WTLS_CONN_TCP_CONNECT) {
         int st = step_tcp_connect(c);
         if (st != WTLS_OK || c->stage != WTLS_CONN_TLS_HANDSHAKE) return (wtls_status)st;
@@ -520,7 +576,7 @@ wtls_status wtls_connect(wtls_conn **out, const char *host, uint16_t port, const
     if (!WTLS_THREAD_GUARD("wtls_connect")) return WTLS_ERR_STATE;
 
     wtls_conn *c = NULL;
-    wtls_status st = wtls_connect_start(&c, host, port, opt);
+    wtls_status st = connect_start_ex(&c, host, port, opt, true);
     return conn_drive(out, c, st);
 }
 
@@ -532,7 +588,7 @@ wtls_status wtls_connect_on_fd(wtls_conn **out, int fd, const char *host, uint16
     }
     *out = NULL;
     wtls_conn *c = NULL;
-    wtls_status st = conn_init_tls(&c, host, port, opt, false);
+    wtls_status st = conn_init_tls(&c, host, port, opt, false, false);
     if (st != WTLS_OK) {
         wtls_plat_close(fd);
         return st;

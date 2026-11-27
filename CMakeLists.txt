@@ -488,6 +488,10 @@ target_link_libraries(wiitls
         $<BUILD_INTERFACE:mbedtls>
         $<BUILD_INTERFACE:mbedx509>
         $<BUILD_INTERFACE:tfpsacrypto>)
+if(WTLS_PLATFORM STREQUAL "host" AND NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(wiitls PUBLIC Threads::Threads) # helper thread for asynchronous DNS
+endif()
 add_library(wiitls::wiitls ALIAS wiitls)
 # tfpsacrypto calls back into libwiitls (mbedtls_platform_get_entropy): close the
 # static-link cycle so linkers that do not rescan archives still resolve it.

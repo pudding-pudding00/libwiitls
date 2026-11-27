@@ -48,6 +48,15 @@ mbedtls_ms_time_t mbedtls_ms_time(void) {
 
 void wtls_plat_sleep_ms(uint32_t ms) { usleep((useconds_t)ms * 1000u); }
 
+/* No helper thread on the Wii yet: DNS lookups run inline (see docs/usage.md). */
+int wtls_plat_async_run(void (*fn)(void *), void *arg) {
+    (void)fn;
+    (void)arg;
+    return WTLS_ERR_UNSUPPORTED;
+}
+void wtls_plat_async_lock(void) {}
+void wtls_plat_async_unlock(void) {}
+
 uint64_t wtls_plat_now_ms(void) { return (uint64_t)ticks_to_millisecs(gettime()); }
 uint64_t wtls_plat_now_us(void) { return (uint64_t)ticks_to_microsecs(gettime()); }
 

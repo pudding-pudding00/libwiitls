@@ -55,6 +55,12 @@ void     wtls_plat_close(int fd);
 int      wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, size_t req_len,
                                 uint8_t *resp, size_t resp_cap,
                                 uint32_t timeout_ms);                  /* bytes | ERR_TIMEOUT | ERR_IO */
+/* Runs fn(arg) once on a detached helper thread (used for DNS lookups). WTLS_OK, or WTLS_ERR_UNSUPPORTED where
+ * the platform has none (Wii, Windows host): the caller then does the work itself. The lock below guards the
+ * small shared tables such helpers use; without threads it does nothing. */
+int      wtls_plat_async_run(void (*fn)(void *), void *arg);
+void     wtls_plat_async_lock(void);
+void     wtls_plat_async_unlock(void);
 void     wtls_plat_sleep_ms(uint32_t ms);                              /* blocks the calling thread */
 uint64_t wtls_plat_now_ms(void);                                       /* monotonic */
 uint64_t wtls_plat_now_us(void);                                       /* monotonic, microseconds */

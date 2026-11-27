@@ -456,6 +456,21 @@ for (;;) {
 After `WTLS_WANT_WRITE` from `wtls_write`, call it again with **the same
 buffer and length**.
 
+**Host name lookups.** By default `wtls_connect_start()` still resolves a name
+that is not cached inside the call (as in 1.0), so even the non-blocking path can
+wait for the DNS timeout. Set `opt.async_dns = true` to avoid that: the lookup
+then runs on a helper thread, the call returns `WTLS_WANT_READ` with
+`wtls_get_fd(c) == -1` (nothing to poll yet: call `wtls_connect_step()` again
+after a few milliseconds), and the connect continues once the address is in.
+Addresses are cached after the first successful connect as before. The blocking
+`wtls_connect()` uses the same mechanism, so `abort_cb` now also cancels a
+connect that is stuck in DNS (a change from 1.0, where the lookup could not be
+interrupted), and `opt.dns_timeout_ms` bounds the lookup (`WTLS_ERR_TIMEOUT`;
+0 keeps the old unlimited wait). `wtls_net_reset()` discards the answer of a
+lookup that was running during the reset. **On the Wii** there is no helper
+thread yet: the lookup still runs inside the call, exactly as in 1.0, and the
+abort and timeout options have no effect on it.
+
 ## 8. Your own server / self-signed certificates
 
 Add your CA (DER, or PEM including the terminating NUL in `len`) after

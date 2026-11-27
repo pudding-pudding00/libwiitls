@@ -1087,6 +1087,134 @@ static void test_nonblocking_connect_start_step(void) {
     if (bad && bad != (wtls_conn *)1) wtls_close(bad);
 }
 
+/* ---- asynchronous DNS ------------------------------------------------------ */
+
+static uint32_t s_dns_ip;
+static uint32_t s_dns_delay_ms;
+
+/* Resolver hook: every name is the test server, after a delay. */
+static int slow_dns(const char *host, uint32_t *addrs, size_t cap, size_t *count) {
+    (void)host;
+    (void)cap;
+    wtls_plat_sleep_ms(s_dns_delay_ms);
+    addrs[0] = s_dns_ip;
+    *count = 1;
+    return WTLS_OK;
+}
+
+static bool dns_test_setup(uint32_t delay_ms) {
+    if (g_env.is_hw) {
+        SKIP("the Wii resolves inside the call (no helper thread yet)");
+        return false;
+    }
+    if (wtls_plat_resolve(g_env.server_host, &s_dns_ip) != WTLS_OK) return false;
+    s_dns_delay_ms = delay_ms;
+    wtls_dns_clear();
+    wtls_dns_set_resolver_all(slow_dns);
+    return true;
+}
+
+static void dns_test_teardown(void) {
+    wtls_dns_set_resolver_all(NULL);
+    wtls_dns_clear();
+}
+
+static void test_connect_start_async_dns_nonblocking(void) {
+    if (!dns_test_setup(500)) return;
+    wtls_options o = {0};
+    o.async_dns = true;
+    wtls_conn *c = NULL;
+    uint64_t t0 = wtls_plat_now_ms();
+    wtls_status st = wtls_connect_start(&c, g_env.server_host, P_TLS13_ECDSA, &o);
+    CHECK(wtls_plat_now_ms() - t0 < 200); /* the lookup takes 500 ms */
+    CHECK_EQ_INT(st, WTLS_WANT_READ);
+    CHECK(c != NULL);
+    if (c) CHECK_EQ_INT(wtls_get_fd(c), -1); /* nothing to poll while the name is being resolved */
+    int steps = 0;
+    while (c && (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) && steps++ < 5000) {
+        int fd = wtls_get_fd(c);
+        if (fd >= 0) wtls_plat_poll(fd, st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 5);
+        else wtls_plat_sleep_ms(5);
+        st = wtls_connect_step(c);
+    }
+    CHECK_EQ_INT(st, WTLS_OK);
+    CHECK(wtls_plat_now_ms() - t0 >= 450);
+    if (c && st == WTLS_OK) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    } else if (c) {
+        wtls_close(c);
+    }
+    dns_test_teardown();
+}
+
+static void test_connect_start_default_resolves_inline(void) {
+    if (!dns_test_setup(120)) return;
+    wtls_options o = {0};
+    wtls_conn *c = NULL;
+    uint64_t t0 = wtls_plat_now_ms();
+    wtls_status st = wtls_connect_start(&c, g_env.server_host, P_TLS13_ECDSA, &o);
+    CHECK(wtls_plat_now_ms() - t0 >= 100); /* as in 1.0: the call waits for the lookup */
+    CHECK(st == WTLS_WANT_READ || st == WTLS_WANT_WRITE || st == WTLS_OK);
+    if (c && st != WTLS_OK) CHECK(wtls_get_fd(c) >= 0);
+    int steps = 0;
+    while (c && (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) && steps++ < 5000) {
+        wtls_plat_poll(wtls_get_fd(c), st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 5);
+        st = wtls_connect_step(c);
+    }
+    CHECK_EQ_INT(st, WTLS_OK);
+    if (c) wtls_close(c);
+    dns_test_teardown();
+}
+
+static uint64_t s_abort_at;
+
+static bool abort_at_time_cb(void *ctx) {
+    (void)ctx;
+    return wtls_plat_now_ms() >= s_abort_at;
+}
+
+static void test_connect_abort_during_dns(void) {
+    if (!dns_test_setup(1500)) return;
+    wtls_options o = {0};
+    o.abort_cb = abort_at_time_cb;
+    s_abort_at = wtls_plat_now_ms() + 100;
+    wtls_conn *c = (wtls_conn *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
+    CHECK(c == NULL);
+    CHECK(wtls_plat_now_ms() - t0 < 400); /* 1.0 waited for the whole lookup */
+    wtls_plat_sleep_ms(1600); /* let the abandoned lookup finish: it must not leak into the next test */
+    dns_test_teardown();
+}
+
+static void test_connect_dns_timeout(void) {
+    if (!dns_test_setup(2000)) return;
+    wtls_options o = {0};
+    o.dns_timeout_ms = 300;
+    wtls_conn *c = (wtls_conn *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(c == NULL);
+    CHECK(dt >= 280 && dt < 900);
+    wtls_plat_sleep_ms(1800);
+    dns_test_teardown();
+}
+
+static void test_connect_dns_uses_cache_after_first(void) {
+    if (!dns_test_setup(300)) return;
+    wtls_options o = {0};
+    wtls_conn *c = NULL;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_OK); /* resolves, caches on success */
+    if (c) wtls_close(c);
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_OK);
+    CHECK(wtls_plat_now_ms() - t0 < 250); /* no second lookup */
+    if (c) wtls_close(c);
+    dns_test_teardown();
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -1146,6 +1274,11 @@ void wtls_suite_tls(void) {
     RUN(test_pin_ext_resumption_isolated);
     RUN(test_reset_trusted_cas);
     RUN(test_nonblocking_connect_start_step);
+    RUN(test_connect_start_async_dns_nonblocking);
+    RUN(test_connect_start_default_resolves_inline);
+    RUN(test_connect_abort_during_dns);
+    RUN(test_connect_dns_timeout);
+    RUN(test_connect_dns_uses_cache_after_first);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
     else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();
