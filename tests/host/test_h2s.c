@@ -186,6 +186,12 @@ static void take_head(h2s_stream *st, int status) {
 
 static void pump_ok(fx *f) { CHECK_EQ_INT(h2s_pump(f->s), WTLS_OK); }
 
+/* The server's SETTINGS have arrived (before them only one stream is opened). */
+static void settle(fx *f) {
+    sf(f, 4, 0, 0, NULL, 0);
+    pump_ok(f);
+}
+
 static void test_h2s_basic(void) {
     fx f;
     fx_init(&f, 4, 32768);
@@ -197,7 +203,7 @@ static void test_h2s_basic(void) {
     CHECK(out_frame(&f, 1, &c) && c.type == 8 && c.id == 0);
     CHECK_EQ_INT((int)sum_window_updates(&f, 0), 4 * 32768 - 65535);
 
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *st = get(&f, "/a");
     CHECK(find_frame(&f, 1, 1, &c) == false); /* queued, not yet written */
     pump_ok(&f);
@@ -229,7 +235,7 @@ static void test_h2s_basic(void) {
 static void test_h2s_interleaved(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b");
     sf_head(&f, 3, false);
     sf_head(&f, 1, false);
@@ -256,7 +262,7 @@ static void test_h2s_interleaved(void) {
 static void test_h2s_stream_limits(void) {
     fx f;
     fx_init(&f, 2, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     pump_ok(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b"), *x = NULL;
     CHECK_EQ_INT(h2s_stream_open(f.s, &x), WTLS_WANT_READ); /* client cap */
@@ -285,7 +291,7 @@ static void test_h2s_stream_limits(void) {
 static void test_h2s_limit_lowered_by_settings(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b"), *x = NULL;
     CHECK_EQ_INT(h2s_stream_open(f.s, &x), WTLS_OK);
     sf_setting(&f, 3, 2);
@@ -306,7 +312,7 @@ static void test_h2s_limit_lowered_by_settings(void) {
 static void test_h2s_flow_control_bounded(void) {
     fx f;
     fx_init(&f, 4, 16384);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a");
     static uint8_t blob[16384];
     memset(blob, 'z', sizeof blob);
@@ -334,7 +340,7 @@ static void test_h2s_flow_control_bounded(void) {
     fx_free(&f);
 
     fx_init(&f, 4, 16384);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     a = get(&f, "/a");
     sf_head(&f, 1, false);
     sf_data(&f, 1, blob, sizeof blob, false);
@@ -348,7 +354,7 @@ static void test_h2s_flow_control_bounded(void) {
 static void test_h2s_stalled_reader_does_not_block_others(void) {
     fx f;
     fx_init(&f, 2, 16384);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b");
     static uint8_t blob[16384];
     memset(blob, 'q', sizeof blob);
@@ -372,7 +378,7 @@ static void test_h2s_stalled_reader_does_not_block_others(void) {
 static void test_h2s_goaway(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b"), *x = NULL;
     sf_goaway(&f, 1, 0);
     sf_head(&f, 1, false);
@@ -397,7 +403,7 @@ static void test_h2s_goaway(void) {
 static void test_h2s_rst(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b"), *c3 = get(&f, "/c");
     sf_u32(&f, 3, 1, 7); /* REFUSED_STREAM */
     sf_u32(&f, 3, 3, 8); /* CANCEL */
@@ -417,7 +423,7 @@ static void test_h2s_rst(void) {
 static void test_h2s_cancel_and_late_frames(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b");
     pump_ok(&f);
     h2s_stream_release(a); /* unfinished: reset this stream only */
@@ -444,7 +450,7 @@ static void test_h2s_cancel_and_late_frames(void) {
 static void test_h2s_hpack_table_shared_with_cancelled_stream(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b");
     pump_ok(&f);
     h2s_stream_release(a);
@@ -467,7 +473,7 @@ static void test_h2s_hpack_table_shared_with_cancelled_stream(void) {
 static void test_h2s_trailers(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b");
     sf_head(&f, 1, false);
     sf_data(&f, 1, "t", 1, false);
@@ -494,7 +500,7 @@ static void test_h2s_trailers(void) {
 
     /* trailers without END_STREAM are a stream error */
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     a = get(&f, "/a");
     sf_head(&f, 1, false);
     sf(&f, 1, 4, 1, tr, sizeof tr);
@@ -507,7 +513,7 @@ static void test_h2s_trailers(void) {
 static void test_h2s_padding_and_continuation_and_1xx(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a");
     static const uint8_t i100[] = {0x08, 3, '1', '0', '0'}; /* :status 100 */
     sf(&f, 1, 4, 1, i100, sizeof i100);
@@ -588,7 +594,7 @@ static void test_h2s_ping_and_protocol_errors(void) {
     fx_free(&f);
     /* DATA before the response head: the stream is reset, the session lives on */
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a");
     sf_data(&f, 1, "x", 1, false);
     pump_ok(&f);
@@ -601,7 +607,7 @@ static void test_h2s_ping_and_protocol_errors(void) {
 static void test_h2s_upload_flow_control(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     pump_ok(&f);
     h2s_stream *st = NULL;
     CHECK_EQ_INT(h2s_stream_open(f.s, &st), WTLS_OK);
@@ -650,7 +656,7 @@ static void test_h2s_settings_window_change(void) {
     fx f;
     fx_init(&f, 4, 32768);
     sf_setting(&f, 4, 100);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     pump_ok(&f);
     h2s_stream *st = NULL;
     CHECK_EQ_INT(h2s_stream_open(f.s, &st), WTLS_OK);
@@ -673,7 +679,7 @@ static void test_h2s_output_backpressure(void) {
     fx_init(&f, 4, 32768);
     sf_setting(&f, 4, 1u << 20);
     sf_u32(&f, 8, 0, 1u << 20);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     pump_ok(&f);
     f.t.block_write = true;
     h2s_stream *st = NULL;
@@ -705,7 +711,7 @@ static void test_h2s_partial_writes(void) {
     fx f;
     fx_init(&f, 4, 32768);
     f.t.max_write = 7;
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a");
     for (int i = 0; i < 200; i++) pump_ok(&f);
     cf c;
@@ -717,7 +723,7 @@ static void test_h2s_partial_writes(void) {
 static void test_h2s_connection_lost(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = get(&f, "/a"), *b = get(&f, "/b"), *c3 = get(&f, "/c");
     sf_head(&f, 3, false);
     sf_data(&f, 3, "part", 4, false);
@@ -754,10 +760,25 @@ static void test_h2s_work_budget(void) {
     fx_free(&f);
 }
 
+static void test_h2s_one_stream_until_settings(void) {
+    fx f;
+    fx_init(&f, 4, 32768);
+    pump_ok(&f);
+    CHECK_EQ_INT((int)h2s_capacity(f.s), 1); /* the server's limit is not known yet */
+    h2s_stream *a = get(&f, "/a"), *x = NULL;
+    CHECK_EQ_INT(h2s_stream_open(f.s, &x), WTLS_WANT_READ);
+    settle(&f);
+    CHECK_EQ_INT((int)h2s_capacity(f.s), 4);
+    CHECK_EQ_INT(h2s_stream_open(f.s, &x), WTLS_OK);
+    h2s_stream_release(x);
+    h2s_stream_release(a);
+    fx_free(&f);
+}
+
 static void test_h2s_stream_ids_in_send_order(void) {
     fx f;
     fx_init(&f, 4, 32768);
-    sf(&f, 4, 0, 0, NULL, 0);
+    settle(&f);
     h2s_stream *a = NULL, *b = NULL;
     CHECK_EQ_INT(h2s_stream_open(f.s, &a), WTLS_OK);
     CHECK_EQ_INT(h2s_stream_open(f.s, &b), WTLS_OK);
@@ -766,8 +787,12 @@ static void test_h2s_stream_ids_in_send_order(void) {
     CHECK_EQ_INT(h2s_stream_send_headers(a, "GET", &URL, NULL, 0, false, 0, false, false), WTLS_OK);
     pump_ok(&f);
     cf c;
-    CHECK(out_frame(&f, 2, &c) && c.type == 1 && c.id == 1); /* b went first and got id 1 */
-    CHECK(out_frame(&f, 3, &c) && c.type == 1 && c.id == 3);
+    uint32_t ids[2] = {0, 0};
+    size_t k = 0;
+    for (size_t i = 0; out_frame(&f, i, &c) && k < 2; i++)
+        if (c.type == 1) ids[k++] = c.id;
+    CHECK(ids[0] == 1 && ids[1] == 3); /* on the wire in id order: b went first and got id 1 */
+    CHECK_EQ_INT((int)count_frames(&f, 1, 1), 1);
     h2s_stream_release(a);
     h2s_stream_release(b);
     fx_free(&f);
@@ -793,6 +818,7 @@ int main(void) {
     RUN(test_h2s_partial_writes);
     RUN(test_h2s_connection_lost);
     RUN(test_h2s_work_budget);
+    RUN(test_h2s_one_stream_until_settings);
     RUN(test_h2s_stream_ids_in_send_order);
     return CHECK_DONE();
 }

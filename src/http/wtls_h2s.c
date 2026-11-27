@@ -64,6 +64,7 @@ struct h2s_session {
     uint8_t *hblock;
     size_t hlen, hcap;
     bool goaway, unusable, more;
+    bool got_settings; /* the peer's first SETTINGS arrived: until then its stream limit is unknown */
     uint32_t goaway_last;
     int err;
 };
@@ -148,6 +149,10 @@ static h2s_stream *find(h2s_session *s, uint32_t id) {
     return NULL;
 }
 
+/* The server's concurrent stream limit as far as we know it: one stream until its SETTINGS are in (a server may
+ * allow far fewer than the unlimited default, and a stream over its limit is refused). */
+static uint32_t peer_limit(const h2s_session *s) { return s->got_settings ? s->peer_max_conc : 1u; }
+
 static size_t started_open(const h2s_session *s) {
     size_t n = 0;
     for (uint32_t i = 0; i < s->max_streams; i++)
@@ -205,6 +210,7 @@ static int on_settings(h2s_session *s, uint8_t flags, uint32_t id, const uint8_t
     if (id != 0) return WTLS_ERR_HTTP;
     if (flags & FL_ACK) return len == 0 ? WTLS_OK : WTLS_ERR_HTTP;
     if (len % 6u) return WTLS_ERR_HTTP;
+    s->got_settings = true;
     for (uint32_t o = 0; o < len; o += 6) {
         uint16_t sid = rd16(p + o);
         uint32_t v = rd32(p + o + 2);
@@ -565,6 +571,8 @@ bool h2s_pending(const h2s_session *s) { return s && s->more && !s->err; }
 
 unsigned h2s_wants(const h2s_session *s) { return 1u | (s && s->oh ? 2u : 0u); }
 
+bool h2s_settings_known(const h2s_session *s) { return s && s->got_settings; }
+
 bool h2s_usable(const h2s_session *s) { return s && !s->err && !s->goaway && !s->unusable; }
 
 size_t h2s_active(const h2s_session *s) {
@@ -576,7 +584,8 @@ size_t h2s_active(const h2s_session *s) {
 
 size_t h2s_capacity(const h2s_session *s) {
     if (!s) return 0;
-    return s->peer_max_conc < s->max_streams ? s->peer_max_conc : s->max_streams;
+    uint32_t lim = peer_limit(s);
+    return lim < s->max_streams ? lim : s->max_streams;
 }
 
 int h2s_error(const h2s_session *s) { return s ? s->err : WTLS_ERR_ARG; }
@@ -594,7 +603,7 @@ int h2s_stream_open(h2s_session *s, h2s_stream **out) {
             break;
         }
     if (slot == s->max_streams) return WTLS_WANT_READ;
-    if (started_open(s) >= s->peer_max_conc) return WTLS_WANT_READ;
+    if (started_open(s) >= peer_limit(s)) return WTLS_WANT_READ;
     h2s_stream *st = wtls_calloc(1, sizeof *st);
     if (!st) return WTLS_ERR_NOMEM;
     st->s = s;
@@ -614,7 +623,7 @@ int h2s_stream_send_headers(h2s_stream *st, const char *method, const wtls_url *
         s->unusable = true;
         return WTLS_ERR_IO;
     }
-    if (started_open(s) >= s->peer_max_conc) return WTLS_WANT_READ;
+    if (started_open(s) >= peer_limit(s)) return WTLS_WANT_READ;
     uint8_t *blk = NULL;
     size_t blk_len = 0;
     int r = wtls_hpack_encode_request(method, u, h, n, has_content_length, body_len, want_gzip, false, &blk, &blk_len);
@@ -689,6 +698,11 @@ bool h2s_stream_retryable(const h2s_stream *st) {
 }
 
 bool h2s_stream_got_data(const h2s_stream *st) { return st && st->got_data; }
+bool h2s_stream_request_done(const h2s_stream *st) { return st && st->id && st->local_end; }
+bool h2s_stream_ready(const h2s_stream *st) {
+    if (!st) return false;
+    return (st->have_head && !st->head_taken) || st->used || st->remote_end || stream_err(st);
+}
 bool h2s_stream_ended(const h2s_stream *st) { return st && st->remote_end; }
 size_t h2s_stream_buffered(const h2s_stream *st) { return st ? st->used : 0; }
 

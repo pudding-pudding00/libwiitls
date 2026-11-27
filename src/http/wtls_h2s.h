@@ -49,6 +49,7 @@ unsigned h2s_wants(const h2s_session *s);
 
 /* No GOAWAY, no error, ids left: new streams may be opened. */
 bool h2s_usable(const h2s_session *s);
+bool h2s_settings_known(const h2s_session *s); /* the peer's first SETTINGS are in (its stream limit is known) */
 size_t h2s_active(const h2s_session *s);
 /* Streams the session would open at once now: the client cap or the server's SETTINGS_MAX_CONCURRENT_STREAMS. */
 size_t h2s_capacity(const h2s_session *s);
@@ -83,6 +84,8 @@ size_t h2s_stream_buffered(const h2s_stream *st);
 bool h2s_stream_ended(const h2s_stream *st);      /* the whole response has arrived */
 int h2s_stream_error(const h2s_stream *st);       /* 0, or why it failed */
 bool h2s_stream_retryable(const h2s_stream *st);  /* failed in a way another connection may fix (GOAWAY above last id, REFUSED_STREAM) */
+bool h2s_stream_request_done(const h2s_stream *st); /* the whole request (headers, body, END_STREAM) is queued */
+bool h2s_stream_ready(const h2s_stream *st);      /* a step would make progress: head, data, end or failure is there */
 bool h2s_stream_got_data(const h2s_stream *st);   /* the server sent something for it */
 
 /* The application is done with the stream: an unfinished one is reset with CANCEL (this stream only), unread

@@ -15,6 +15,8 @@ typedef enum {
     AS_TLS,     /* https: wtls_connect_step */
     AS_SEND,    /* request head and body out */
     AS_HEAD,    /* response head in */
+    AS_H2WAIT,  /* https: another connection to the host is still negotiating its protocol */
+    AS_H2SEND,  /* HTTP/2: stream, request headers and body out */
 } as_phase;
 
 struct async_state {
@@ -29,6 +31,10 @@ struct async_state {
     unsigned attempt; /* retries used so far */
     uint64_t retry_at_ms;
     bool fresh_only; /* the pooled connection was stale: only a new one will do */
+    bool h2_hdr_sent; /* HTTP/2: the request headers are queued on the stream */
+    unsigned h2_tries; /* streams repeated on another connection after GOAWAY or REFUSED_STREAM */
+    uint64_t h2_wait_since; /* waiting for a busy session's slot (0: not waiting) */
+    bool h2_wait_over;      /* waited long enough: a connection of its own now */
     bool got;        /* any response byte arrived on this attempt */
     /* connecting */
     int dns_job;
@@ -50,9 +56,16 @@ struct async_state {
     uint64_t head_deadline_ms;
 };
 
+#if WTLS_HTTP2
+#define H2_SLOT_WAIT_MS 1000u /* how long a request waits for a stream slot of a busy session before it opens a connection */
+#endif
 #define CB_LEAD 16u /* room before a callback chunk for its "<hex>\r\n" */
 
 static void as_drop_conn_state(wtls_http_response *r, struct async_state *as) {
+#if WTLS_HTTP2
+    h2_detach(r);
+    h2_pend_remove(as);
+#endif
     if (as->dns_job >= 0) wtls_dns_job_cancel(as->dns_job);
     as->dns_job = -1;
     if (as->fd >= 0) wtls_plat_close(as->fd);
@@ -67,6 +80,9 @@ static void as_drop_conn_state(wtls_http_response *r, struct async_state *as) {
 
 static void async_free(struct async_state *as) {
     if (!as) return;
+#if WTLS_HTTP2
+    h2_pend_remove(as);
+#endif
     if (as->dns_job >= 0) wtls_dns_job_cancel(as->dns_job);
     if (as->fd >= 0) wtls_plat_close(as->fd);
     if (as->tls) wtls_close(as->tls);
@@ -101,8 +117,31 @@ static int as_schedule_retry(wtls_http_response *r, struct async_state *as, uint
     return WTLS_WANT_READ;
 }
 
+#if WTLS_HTTP2
+/* The stream cannot go on here (GOAWAY, REFUSED_STREAM, a connection that was gone): the request starts again on
+ * another session or connection. */
+static int as_h2_retry(wtls_http_response *r, struct async_state *as, int st) {
+    if (++as->h2_tries > 3) return st;
+    h2_detach(r);
+    as->h2_hdr_sent = false;
+    as->snd_stage = 0;
+    as->snd_off = as->snd_len = 0;
+    as->got = false;
+    wtls_free(r->buf);
+    r->buf = NULL;
+    memset(&r->head, 0, sizeof r->head);
+    as->phase = AS_ACQUIRE;
+    return WTLS_WANT_READ;
+}
+#endif
+
 static int as_after_error(wtls_http_response *r, struct async_state *as, int st) {
     bool total_over = r->deadline_ms && wtls_plat_now_ms() >= r->deadline_ms;
+#if WTLS_HTTP2
+    if (r->h2st && !total_over && h2s_stream_retryable(r->h2st) && !as->x.cb_started &&
+        wtls_http_method_idempotent(as->x.method))
+        return as_h2_retry(r, as, st);
+#endif
     if (st == WTLS_ERR_IO && r->conn && r->reused && !as->got && !as->x.cb_started && !as->fresh_only &&
         wtls_http_method_idempotent(as->x.method)) {
         /* the server closed a pooled connection as the request went out: once more on a new one */
@@ -128,9 +167,42 @@ static int as_after_error(wtls_http_response *r, struct async_state *as, int st)
 /* ---- connecting ------------------------------------------------------------ */
 
 /* The TCP/TLS transport is up: wrap it, switch it to non-blocking and go on to sending. */
+#if WTLS_HTTP2
+static int as_h2_attach(wtls_http_response *r, struct async_state *as, h2_sess *hs) {
+    r->h2sess = hs;
+    hs->refs++;
+    hs->idle_since = 0;
+    r->reused = hs->used;
+    hs->used = true;
+    r->info = hs->info;
+    r->h2st = NULL;
+    as->h2_hdr_sent = false;
+    as->snd_stage = 0;
+    as->snd_off = as->snd_len = 0;
+    as->phase = AS_H2SEND;
+    return WTLS_OK;
+}
+#endif
+
 static int as_wrap_transport(wtls_http_response *r, struct async_state *as, wtls_conn *tls, int fd) {
     http_tr *t = wtls_calloc(1, sizeof *t);
     if (!t) return WTLS_ERR_NOMEM;
+#if WTLS_HTTP2
+    if (tls && as->x.want_h2) {
+        h2_pend_remove(as); /* the protocol is known now */
+        wtls_conn_info ci;
+        if (wtls_get_info(tls, &ci) == WTLS_OK && ci.alpn && strcmp(ci.alpn, "h2") == 0) {
+            t->tls = tls;
+            t->fd = -1;
+            t->nonblock = true;
+            wtls_set_nonblocking(tls, true);
+            as->tls = NULL;
+            h2_sess *hs = h2_sess_create(r, t);
+            if (!hs) return WTLS_ERR_NOMEM;
+            return as_h2_attach(r, as, hs);
+        }
+    }
+#endif
     t->tls = tls;
     t->fd = tls ? -1 : fd;
     t->io_timeout_ms = as->x.opt.io_timeout_ms ? as->x.opt.io_timeout_ms : DEF_IO_MS;
@@ -186,6 +258,14 @@ connected:
 
 static int as_acquire(wtls_http_response *r, struct async_state *as) {
     request_ctx *x = &as->x;
+#if WTLS_HTTP2
+    const bool h2_able = as->u.secure && x->want_h2;
+    if (h2_able) {
+        h2_sess_gc(wtls_plat_now_ms());
+        h2_sess *hs = h2_sess_find(r);
+        if (hs) return as_h2_attach(r, as, hs);
+    }
+#endif
     if (!as->fresh_only && take_live(r, x, false)) {
         http_tr *t = r->conn;
         t->nonblock = true;
@@ -196,12 +276,28 @@ static int as_acquire(wtls_http_response *r, struct async_state *as) {
         return WTLS_OK;
     }
     r->reused = false;
+#if WTLS_HTTP2
+    if (h2_able && (h2_pend_find(r) || (!as->h2_wait_over && h2_full_find(r)))) {
+        /* someone is finding out whether the host speaks HTTP/2, or its session has no free stream yet */
+        as->phase = AS_H2WAIT;
+        as->want = 1;
+        as->h2_wait_since = wtls_plat_now_ms();
+        return WTLS_WANT_READ;
+    }
+#endif
     if (as->u.secure) {
         wtls_options opt = x->opt;
         opt.async_dns = true;
         int st = wtls_connect_start(&as->tls, as->u.host, as->u.port, &opt);
         if (st == WTLS_OK) return as_wrap_transport(r, as, as->tls, -1);
         if (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) {
+#if WTLS_HTTP2
+            if (h2_able && h2_pend_add(r, as) != WTLS_OK) {
+                wtls_close(as->tls);
+                as->tls = NULL;
+                return WTLS_ERR_NOMEM;
+            }
+#endif
             as->phase = AS_TLS;
             as->want = st == WTLS_WANT_READ ? 1 : 2;
         }
@@ -333,6 +429,122 @@ static int as_send(wtls_http_response *r, struct async_state *as) {
     }
 }
 
+
+/* ---- HTTP/2: one stream of a shared session ---------------------------------------------------------- */
+
+#if WTLS_HTTP2
+static void as_h2_want(struct async_state *as, const h2_sess *hs) {
+    as->want = (uint8_t)(1u | (h2s_wants(hs->s) & 2u)); /* the write side only while output is stuck */
+}
+
+static int as_h2_enter_head(wtls_http_response *r, struct async_state *as) {
+    wtls_free(as->cbuf);
+    as->cbuf = NULL;
+    wtls_free(r->buf);
+    r->buf = NULL;
+    memset(&r->head, 0, sizeof r->head);
+    as->head_deadline_ms = wtls_plat_now_ms() + as->x.header_timeout;
+    as->phase = AS_HEAD;
+    return WTLS_OK;
+}
+
+static int as_h2_send(wtls_http_response *r, struct async_state *as) {
+    request_ctx *x = &as->x;
+    h2_sess *hs = r->h2sess;
+    h2s_pump(hs->s);
+    if (!r->h2st) {
+        int st = h2s_stream_open(hs->s, &r->h2st);
+        if (st == WTLS_WANT_READ) { /* every slot is busy: wait for one */
+            as_h2_want(as, hs);
+            return st;
+        }
+        if (st == WTLS_ERR_IO) return as_h2_retry(r, as, st); /* the session takes no more streams */
+        if (st != WTLS_OK) return st;
+    }
+    if (!as->h2_hdr_sent) {
+        bool has_body = x->body != NULL || x->body_cb != NULL;
+        bool has_cl = !x->body_chunked && (has_body || strcmp(x->method, "POST") == 0 ||
+                                           strcmp(x->method, "PUT") == 0 || strcmp(x->method, "PATCH") == 0);
+        int st = h2s_stream_send_headers(r->h2st, x->method, x->url, x->headers, x->n_headers, has_cl,
+                                         has_body ? x->body_len : 0, has_body, x->want_gzip);
+        if (st == WTLS_WANT_READ) { /* the server's concurrent stream limit */
+            as_h2_want(as, hs);
+            return st;
+        }
+        if (st == WTLS_ERR_IO) return as_h2_retry(r, as, st);
+        if (st != WTLS_OK) return st;
+        as->h2_hdr_sent = true;
+        as->snd_stage = x->body_cb ? 2 : (x->body ? 1 : 3);
+        as->snd_off = as->snd_len = 0;
+        as->body_left = x->body_len;
+    }
+    for (;;) {
+        h2s_stream *st = r->h2st;
+        if (as->snd_stage == 3 || h2s_stream_request_done(st)) {
+            h2s_pump(hs->s);
+            return as_h2_enter_head(r, as);
+        }
+        int n;
+        if (as->snd_stage == 1) {
+            n = h2s_stream_send_data(st, (const uint8_t *)x->body + as->snd_off, x->body_len - as->snd_off, true);
+            if (n > 0) as->snd_off += (size_t)n;
+        } else {
+            if (as->snd_off >= as->snd_len) { /* the next piece from the callback */
+                if (!as->cbuf) {
+                    as->cbuf = wtls_malloc(UPLOAD_BUF_SIZE);
+                    if (!as->cbuf) return WTLS_ERR_NOMEM;
+                }
+                size_t want = UPLOAD_BUF_SIZE;
+                if (!x->body_chunked && want > as->body_left) want = as->body_left;
+                int k = 0;
+                if (want) {
+                    x->cb_started = true;
+                    k = x->body_cb(x->body_ctx, as->cbuf, want);
+                    if (k < 0 || (size_t)k > want) return WTLS_ERR_IO;
+                }
+                if (!x->body_chunked) {
+                    if (want && k == 0) return WTLS_ERR_IO; /* short of body_len: no rewind */
+                    as->body_left -= (size_t)k;
+                    as->cb_last = as->body_left == 0;
+                } else {
+                    as->cb_last = k == 0;
+                }
+                as->snd = as->cbuf;
+                as->snd_len = (size_t)k;
+                as->snd_off = 0;
+            }
+            n = h2s_stream_send_data(st, as->snd + as->snd_off, as->snd_len - as->snd_off, as->cb_last);
+            if (n > 0) as->snd_off += (size_t)n;
+        }
+        if (n < 0) return n;
+        h2s_pump(hs->s);
+        if (n == 0 && !h2s_stream_request_done(st)) { /* flow control or a full output queue */
+            as_h2_want(as, hs);
+            return WTLS_WANT_READ;
+        }
+    }
+}
+
+static int as_h2_read_head(wtls_http_response *r, struct async_state *as) {
+    h2_sess *hs = r->h2sess;
+    h2s_pump(hs->s);
+    char *arena = NULL;
+    int st = h2s_stream_head(r->h2st, &r->head, &arena);
+    if (st == WTLS_OK) {
+        r->buf = arena;
+        as->got = true;
+        return WTLS_OK;
+    }
+    if (st == WTLS_WANT_READ) {
+        if (wtls_plat_now_ms() >= as->head_deadline_ms) return WTLS_ERR_TIMEOUT;
+        as_h2_want(as, hs);
+        return st;
+    }
+    as->got = h2s_stream_got_data(r->h2st);
+    return st;
+}
+#endif
+
 /* ---- the response head ------------------------------------------------------- */
 
 static int as_read_head(wtls_http_response *r, struct async_state *as) {
@@ -386,6 +598,7 @@ static int as_head_complete(wtls_http_response *r, struct async_state *as) {
     const wtls_http_request *req = x->req;
     wtls_free((char *)x->head);
     x->head = NULL;
+    cookie_hop_end(x, &as->ck); /* the headers went out (and may be needed again for a redirect) */
     int st = hop_frame(r, x);
     if (st != WTLS_OK) return st;
     cookie_hop_store(req, r, &as->u, &as->ck);
@@ -447,9 +660,12 @@ static int as_step_once(wtls_http_response *r, struct async_state *as) {
     case AS_BEGIN: {
         int st = apply_deadline(x, &as->bt, r->deadline_ms);
         if (st != WTLS_OK) return st;
+        cookie_hop_end(x, &as->ck); /* no-op unless an earlier attempt left it open */
+#if WTLS_HTTP2
+        as->h2_wait_over = false;
+#endif
         cookie_hop_begin(x->req, x, &as->u, &as->ck);
-        st = hop_begin(r, x, &as->u);
-        cookie_hop_end(x, &as->ck); /* the head is built: the headers go back to the caller's list */
+        st = hop_begin(r, x, &as->u); /* the Cookie field stays in x->headers until the head is complete: HTTP/2 encodes it later */
         if (st != WTLS_OK) return st;
         x->cb_started = false;
         x->early_final = false;
@@ -489,6 +705,9 @@ static int as_step_once(wtls_http_response *r, struct async_state *as) {
         else {
             wtls_close(as->tls); /* a failed connection must be freed by us */
             as->tls = NULL;
+#if WTLS_HTTP2
+            h2_pend_remove(as);
+#endif
         }
         return st;
     }
@@ -501,10 +720,39 @@ static int as_step_once(wtls_http_response *r, struct async_state *as) {
         return st == WTLS_OK ? WTLS_WANT_READ : st;
     }
     case AS_HEAD: {
+#if WTLS_HTTP2
+        int st = r->h2st ? as_h2_read_head(r, as) : as_read_head(r, as);
+#else
         int st = as_read_head(r, as);
+#endif
         if (st != WTLS_OK) return st;
         return as_head_complete(r, as);
     }
+#if WTLS_HTTP2
+    case AS_H2WAIT: {
+        h2_sess_gc(wtls_plat_now_ms());
+        h2_sess *hs = h2_sess_find(r);
+        if (hs) {
+            as_h2_attach(r, as, hs);
+            return WTLS_WANT_READ;
+        }
+        if (!h2_pend_find(r)) {
+            /* the other connection turned out not to speak HTTP/2, or failed; or the session's streams are
+             * all busy: give them H2_SLOT_WAIT_MS, then connect */
+            if (!h2_full_find(r) || wtls_plat_now_ms() - as->h2_wait_since >= H2_SLOT_WAIT_MS) {
+                if (h2_full_find(r)) as->h2_wait_over = true;
+                as->phase = AS_ACQUIRE;
+                return WTLS_WANT_READ;
+            }
+        }
+        as->want = 1;
+        return WTLS_WANT_READ;
+    }
+    case AS_H2SEND: {
+        int st = as_h2_send(r, as);
+        return st == WTLS_OK ? WTLS_WANT_READ : st;
+    }
+#endif
     }
     return WTLS_ERR_INTERNAL;
 }
@@ -583,6 +831,9 @@ wtls_status wtls_http_start(wtls_http_response **out, const wtls_http_request *r
 /* ---- waiting ------------------------------------------------------------------------ */
 
 static int conn_fd(const wtls_http_response *r) {
+#if WTLS_HTTP2
+    if (r->h2sess) return wtls_get_fd(r->h2sess->tr->tls);
+#endif
     if (!r->conn) return -1;
     return r->conn->tls ? wtls_get_fd(r->conn->tls) : r->conn->fd;
 }
@@ -596,6 +847,9 @@ int wtls_http_get_fd(const wtls_http_response *r) {
     case AS_TLS: return as->tls ? wtls_get_fd(as->tls) : -1;
     case AS_SEND:
     case AS_HEAD: return conn_fd(r);
+#if WTLS_HTTP2
+    case AS_H2SEND: return as->h2_hdr_sent ? conn_fd(r) : -1; /* waiting for a free slot is a matter of time, not of bytes */
+#endif
     default: return -1; /* name lookup, backoff, between hops */
     }
 }
@@ -604,6 +858,10 @@ bool wtls_http_pending(const wtls_http_response *r) {
     if (!r) return false;
     if (r->extra_off < r->extra_end) return true;
     if (r->conn && r->conn->tls && wtls_pending(r->conn->tls)) return true;
+#if WTLS_HTTP2
+    if (r->h2st && (h2s_stream_ready(r->h2st) || h2s_pending(r->h2sess->s) || wtls_pending(r->h2sess->tr->tls)))
+        return true;
+#endif
 #if WTLS_CODECS
     if (r->gz && r->gz_off < r->gz_end) return true;
 #endif
@@ -631,6 +889,9 @@ int wtls_http_wait(wtls_http_response *const *rs, size_t n, uint32_t timeout_ms)
         }
         fds[i] = wtls_http_get_fd(r);
         if (r->as) want[i] = r->as->want ? r->as->want : 1;
+#if WTLS_HTTP2
+        else if (r->h2sess) want[i] = (uint8_t)(1u | (h2s_wants(r->h2sess->s) & 2u));
+#endif
         if (fds[i] < 0 && r->as) {
             timer[i] = true;
             any_timer = true;

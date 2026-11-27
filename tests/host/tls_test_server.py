@@ -69,6 +69,7 @@ ignored, so a test can tag its requests and count them with /count.
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
   GET /socks-last                 what the last SOCKS5 request looked like (atyp 1 = IPv4, 3 = name, auth, host)
+  4449/4450 concurrent HTTP/2 (100 / 2 streams at once; routes at h2mux_session),
   port 4444 HTTP proxy, 4446 the same requiring Proxy-Authorization (proxyuser / "p@ss w0rd"),
   4447 SOCKS5, 4448 SOCKS5 requiring username/password (sockuser / "s0cks:pw")
   GET /flaky?id=K&fails=N[&mode=drop|503][&ra=S]
@@ -1420,6 +1421,315 @@ def h2_or_h1_handler(ctx, counter):
     return handle
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# A concurrent HTTP/2 server for the multiplexing tests (ports 4449: 100 concurrent streams, 4450: 2).
+#
+#   /hello                      "hello"
+#   /len?n=N                    N pattern bytes
+#   /slow?n=N&delay=MS          nothing for MS milliseconds, then N pattern bytes
+#   /trickle?n=N&chunk=C&gap=MS the body in pieces of C bytes, MS milliseconds apart (headers at once)
+#   /echo                       the request body (POST)
+#   /stats                      "conn=ID streams=N max_active=M cancelled=C"
+#   /goaway_once?token=T        first time per token: GOAWAY with last stream id below this one, no answer
+#   /refuse_once?token=T        first time per token: RST_STREAM(REFUSED_STREAM), then normal answers
+#   /trailers?n=N               headers, N bytes, then a trailer block
+# Every answer carries x-conn, x-sid and x-maxactive (the most streams this connection had open at once).
+# A client that opens more than the advertised number of streams gets GOAWAY(PROTOCOL_ERROR).
+# ---------------------------------------------------------------------------------------------------------------
+
+H2MUX_ONCE = set()
+H2MUX_ONCE_LOCK = threading.Lock()
+
+
+def _h2mux_once(kind, token):
+    with H2MUX_ONCE_LOCK:
+        key = (kind, token)
+        if key in H2MUX_ONCE:
+            return False
+        H2MUX_ONCE.add(key)
+        return True
+
+
+def h2mux_session(sock, state, max_conc):
+    import time
+    import select as _select
+
+    if _h2_recv_exact(sock, 24) != b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n":
+        return
+    sock.sendall(_h2_frame(4, 0, 0, b"\x00\x03" + max_conc.to_bytes(4, "big") + b"\x00\x05\x00\x00\x40\x00"))
+    sock.setblocking(False)
+    inbuf = bytearray()
+    dyn = []
+    client_init_win = 65535
+    conn_send_win = 65535
+    streams = {}
+    order = []
+    state.update(max_active=0, cancelled=0, total=0)
+    goaway_last = None
+    closing = False
+
+    def send(b):
+        view = memoryview(b)
+        while len(view):
+            try:
+                n = sock.send(view)
+                view = view[n:]
+            except (ssl.SSLWantWriteError, ssl.SSLWantReadError, BlockingIOError):
+                _select.select([], [sock], [], 1.0)
+
+    def fill(timeout):
+        if not sock.pending():
+            r, _, _ = _select.select([sock], [], [], timeout)
+            if not r:
+                return True
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except (ssl.SSLWantReadError, BlockingIOError):
+                return True
+            if not chunk:
+                return False
+            inbuf.extend(chunk)
+            if not sock.pending():
+                return True
+
+    def common_headers(sid, extra):
+        return [("x-conn", state["conn_id"]), ("x-sid", sid), ("x-maxactive", state["max_active"])] + extra
+
+    def plan_response(sid, status, hdrs, body=b"", delay=0.0, chunk=0, gap=0.0, trailers=None, end_on_hdrs=False):
+        streams[sid]["plan"] = dict(status=status, hdrs=hdrs, body=body, off=0, due=time.time() + delay,
+                                    chunk=chunk, gap=gap, next_t=0.0, hdr_sent=False, trailers=trailers,
+                                    end_on_hdrs=end_on_hdrs)
+
+    def finish_request(sid):
+        nonlocal goaway_last
+        st = streams[sid]
+        hmap = {}
+        for k, v in st["headers"]:
+            hmap.setdefault(k, []).append(v)
+        method = hmap.get(":method", ["GET"])[0]
+        parsed = urllib.parse.urlsplit(hmap.get(":path", ["/"])[0] if isinstance(hmap.get(":path"), list) else "/")
+        path = parsed.path
+        q = dict(urllib.parse.parse_qsl(parsed.query))
+        n = int(q.get("n", "0"))
+        if path == "/hello":
+            plan_response(sid, 200, common_headers(sid, [("content-length", 5)]), b"hello")
+        elif path == "/len":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n))
+        elif path == "/slow":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n),
+                          delay=int(q.get("delay", "0")) / 1000.0)
+        elif path == "/trickle":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n),
+                          chunk=int(q.get("chunk", "1000")), gap=int(q.get("gap", "10")) / 1000.0)
+        elif path == "/echo":
+            body = bytes(st["body"])
+            plan_response(sid, 200, common_headers(sid, [("content-length", len(body))]), body)
+        elif path == "/stats":
+            out = ("conn=%d streams=%d max_active=%d cancelled=%d" %
+                   (state["conn_id"], state["total"], state["max_active"], state["cancelled"])).encode()
+            plan_response(sid, 200, common_headers(sid, [("content-length", len(out))]), out)
+        elif path == "/goaway_once" and _h2mux_once("goaway", q.get("token", "")):
+            goaway_last = max(sid - 2, 0)
+            send(_h2_frame(7, 0, 0, goaway_last.to_bytes(4, "big") + (0).to_bytes(4, "big")))
+            streams.pop(sid, None)
+        elif path == "/refuse_once" and _h2mux_once("refuse", q.get("token", "")):
+            send(_h2_frame(3, 0, sid, (7).to_bytes(4, "big")))
+            streams.pop(sid, None)
+        elif path in ("/goaway_once", "/refuse_once"):
+            plan_response(sid, 200, common_headers(sid, [("content-length", 5)]), b"again")
+        elif path == "/trailers":
+            plan_response(sid, 200, common_headers(sid, []), pattern(n), trailers=[("x-trailer", "t%d" % sid)])
+        else:
+            plan_response(sid, 404, common_headers(sid, [("content-length", 0)]), end_on_hdrs=True)
+
+    def serve_streams():
+        nonlocal conn_send_win
+        progressed = False
+        now = time.time()
+        for sid in list(order):
+            st = streams.get(sid)
+            if st is None:
+                order.remove(sid)
+                continue
+            plan = st.get("plan")
+            if not plan or now < plan["due"]:
+                continue
+            if not plan["hdr_sent"]:
+                blk = _hpack_enc_headers(plan["status"], plan["hdrs"])
+                done = plan["end_on_hdrs"]
+                send(_h2_frame(1, 4 | (1 if done else 0), sid, blk))
+                plan["hdr_sent"] = True
+                progressed = True
+                if done:
+                    streams.pop(sid, None)
+                    order.remove(sid)
+                continue
+            body = plan["body"]
+            left = len(body) - plan["off"]
+            if left > 0:
+                if plan["gap"] and now < plan["next_t"]:
+                    continue
+                chunk = min(left, 16384, conn_send_win, st["send_win"], plan["chunk"] or left)
+                if chunk <= 0:
+                    continue
+                last = plan["off"] + chunk == len(body) and not plan["trailers"]
+                send(_h2_frame(0, 1 if last else 0, sid, body[plan["off"]:plan["off"] + chunk]))
+                plan["off"] += chunk
+                conn_send_win -= chunk
+                st["send_win"] -= chunk
+                plan["next_t"] = now + plan["gap"]
+                progressed = True
+                if last:
+                    streams.pop(sid, None)
+                    order.remove(sid)
+                continue
+            if plan["trailers"]:
+                send(_h2_frame(1, 4 | 1, sid, _hpack_enc_headers_raw(plan["trailers"], inc_dyn=True)))
+                progressed = True
+            elif not body:
+                send(_h2_frame(0, 1, sid, b""))
+                progressed = True
+            streams.pop(sid, None)
+            order.remove(sid)
+        return progressed
+
+    def next_deadline():
+        ts = [st["plan"]["due"] for st in streams.values() if st.get("plan") and not st["plan"]["hdr_sent"]]
+        ts += [st["plan"]["next_t"] for st in streams.values()
+               if st.get("plan") and st["plan"]["hdr_sent"] and st["plan"]["gap"]]
+        return min(ts) if ts else None
+
+    def frames():
+        while len(inbuf) >= 9:
+            flen = int.from_bytes(inbuf[:3], "big")
+            if len(inbuf) < 9 + flen:
+                return
+            ftype, flags = inbuf[3], inbuf[4]
+            sid = int.from_bytes(inbuf[5:9], "big") & 0x7fffffff
+            pay = bytes(inbuf[9:9 + flen])
+            del inbuf[:9 + flen]
+            yield flen, ftype, flags, sid, pay
+
+    while True:
+        # anything the streams can do right now
+        while serve_streams():
+            pass
+        if closing or (goaway_last is not None and not streams):
+            return
+        dl = next_deadline()
+        timeout = 0.5 if dl is None else max(0.0, min(0.5, dl - time.time()))
+        # stream windows or the connection window may be what the streams wait for: the client answers by itself
+        if not fill(timeout):
+            return
+        for flen, ftype, flags, sid, pay in frames():
+            if ftype == 4:  # SETTINGS
+                if not (flags & 1):
+                    for off in range(0, len(pay), 6):
+                        pid = int.from_bytes(pay[off:off + 2], "big")
+                        pval = int.from_bytes(pay[off + 2:off + 6], "big")
+                        if pid == 4:
+                            for stt in streams.values():
+                                stt["send_win"] += pval - client_init_win
+                            client_init_win = pval
+                    send(_h2_frame(4, 1, 0))
+            elif ftype == 6:
+                if not (flags & 1):
+                    send(_h2_frame(6, 1, 0, pay))
+            elif ftype == 8:  # WINDOW_UPDATE
+                inc = int.from_bytes(pay, "big") & 0x7fffffff
+                if sid == 0:
+                    conn_send_win += inc
+                elif sid in streams:
+                    streams[sid]["send_win"] += inc
+            elif ftype == 3:  # RST_STREAM
+                if streams.pop(sid, None) is not None:
+                    state["cancelled"] += 1
+            elif ftype == 7:
+                return
+            elif ftype in (1, 9):  # HEADERS, CONTINUATION
+                if ftype == 1:
+                    if goaway_last is not None and sid > goaway_last:
+                        continue
+                    off = 0
+                    pad = 0
+                    if flags & 0x08:
+                        pad = pay[0]
+                        off += 1
+                    if flags & 0x20:
+                        off += 5
+                    frag = pay[off:len(pay) - pad]
+                    if sid not in streams:
+                        if len(streams) >= max_conc:
+                            send(_h2_frame(7, 0, 0, sid.to_bytes(4, "big") + (1).to_bytes(4, "big")))
+                            return
+                        streams[sid] = {"hdr_blk": bytearray(), "headers": [], "body": bytearray(),
+                                        "send_win": client_init_win, "end_recv": False}
+                        order.append(sid)
+                        state["total"] += 1
+                        state["max_active"] = max(state["max_active"], len(streams))
+                    st = streams[sid]
+                    if flags & 0x01:
+                        st["end_recv"] = True
+                else:
+                    if sid not in streams:
+                        continue
+                    st = streams[sid]
+                    frag = pay
+                st["hdr_blk"] += frag
+                if flags & 0x04:
+                    st["headers"] = _hpack_dec_block(bytes(st["hdr_blk"]), dyn)
+                    st["hdr_blk"] = bytearray()
+                    if st["end_recv"]:
+                        finish_request(sid)
+            elif ftype == 0 and sid in streams:  # DATA
+                st = streams[sid]
+                off = 0
+                pad = 0
+                if flags & 0x08:
+                    pad = pay[0]
+                    off += 1
+                st["body"] += pay[off:len(pay) - pad]
+                if flen > 0:
+                    upd = flen.to_bytes(4, "big")
+                    send(_h2_frame(8, 0, 0, upd) + (_h2_frame(8, 0, sid, upd) if not (flags & 1) else b""))
+                if flags & 0x01:
+                    st["end_recv"] = True
+                    finish_request(sid)
+
+
+def _hpack_enc_headers_raw(hdrs, inc_dyn=False):
+    """A header block without :status (trailers)."""
+    out = bytearray()
+    for k, v in hdrs:
+        mask = 0x40 if inc_dyn else 0x00
+        bits = 6 if inc_dyn else 4
+        out += _hpack_enc_int(mask, bits, 0) + _hpack_enc_str(k.lower()) + _hpack_enc_str(str(v))
+    return bytes(out)
+
+
+def h2mux_handler(ctx, counter, max_conc):
+    def handle(raw):
+        counter.inc()
+        state = {"conn_id": counter.n}
+        try:
+            sock = ctx.wrap_socket(raw, server_side=True)
+        except (OSError, ssl.SSLError):
+            raw.close()
+            return
+        try:
+            if sock.selected_alpn_protocol() == "h2":
+                h2mux_session(sock, state, max_conc)
+        except (OSError, ssl.SSLError, ValueError):
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return handle
+
+
 def http_listeners(bind):
     ctx = tls_context("ecdsa", alpn=["http/1.1"])
     ctx_h2 = tls_context("ecdsa", alpn=["h2", "http/1.1"])
@@ -1427,7 +1737,8 @@ def http_listeners(bind):
     # mutual TLS, client certificate optional: /who shows who connected
     mtls = serve(bind, 4442, http_handler(mtls_context("ecdsa", required=False), Counter()))
     h2 = serve(bind, 4445, h2_or_h1_handler(ctx_h2, Counter()))
-    return tls + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler),
+    mux = [serve(bind, 4449, h2mux_handler(ctx_h2, Counter(), 100)), serve(bind, 4450, h2mux_handler(ctx_h2, Counter(), 2))]
+    return tls + mux + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler),
             serve(bind, 4446, lambda c: proxy_handler(c, True)),
             serve(bind, 4447, lambda c: socks5_handler(c, False)),
             serve(bind, 4448, lambda c: socks5_handler(c, True))]

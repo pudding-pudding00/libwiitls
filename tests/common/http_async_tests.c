@@ -648,6 +648,431 @@ static void test_async_unsupported_and_bad_arguments(void) {
     if (r) wtls_http_close(r);
 }
 
+
+/* ---- HTTP/2 (WTLS_HTTP2): one session, several streams ---------------------------------------------------- */
+
+#if WTLS_HTTP2
+#define P_H2 4445
+#define P_MUX 4449  /* concurrent server, 100 streams at once */
+#define P_MUX2 4450 /* concurrent server, 2 streams at once */
+
+static const char *h2url(uint16_t port, const char *path) { return url_of("https", port, path); }
+
+typedef struct {
+    wtls_http_request req;
+    wtls_http_response *r;
+    int st;       /* status of the last start/step */
+    bool head;
+    bool done;    /* the body has ended (or failed: see err) */
+    bool stall;   /* leave the body unread */
+    int err;
+    uint8_t *body;
+    size_t len, cap;
+    uint64_t t_head, t_done;
+} job;
+
+static void job_start(job *j, const char *url, size_t cap) {
+    memset(j, 0, sizeof *j);
+    j->req.url = url;
+    j->cap = cap;
+    j->body = malloc(cap ? cap : 1);
+    j->st = wtls_http_start(&j->r, &j->req);
+    CHECK(j->st == WTLS_OK || j->st == WTLS_WANT_READ || j->st == WTLS_WANT_WRITE);
+    if (j->st == WTLS_OK) j->head = true;
+    if (j->st != WTLS_OK && j->st != WTLS_WANT_READ && j->st != WTLS_WANT_WRITE) {
+        j->err = j->st;
+        j->done = true;
+    }
+}
+
+static void job_free(job *j) {
+    wtls_http_close(j->r);
+    free(j->body);
+    j->r = NULL;
+    j->body = NULL;
+}
+
+/* One round for one job: step to the head, then read what is there. */
+static void job_pump(job *j) {
+    if (!j->r || j->done) return;
+    if (!j->head) {
+        j->st = wtls_http_step(j->r);
+        if (j->st == WTLS_OK) {
+            j->head = true;
+            j->t_head = wtls_plat_now_ms();
+        } else if (j->st != WTLS_WANT_READ && j->st != WTLS_WANT_WRITE) {
+            j->err = j->st;
+            j->done = true;
+            return;
+        }
+    }
+    while (j->head && !j->stall && !j->done) {
+        if (j->len == j->cap) {
+            j->err = WTLS_ERR_HTTP_LIMIT;
+            j->done = true;
+            return;
+        }
+        int k = wtls_http_read(j->r, j->body + j->len, j->cap - j->len);
+        if (k > 0) {
+            j->len += (size_t)k;
+        } else if (k == 0) {
+            j->done = true;
+            j->t_done = wtls_plat_now_ms();
+        } else if (k == WTLS_WANT_READ || k == WTLS_WANT_WRITE) {
+            return;
+        } else {
+            j->err = k;
+            j->done = true;
+            return;
+        }
+    }
+}
+
+/* Runs the jobs until every one is done or stalled on purpose, or max_ms are over. stop(ctx) may end it early. */
+static bool jobs_run(job *js, size_t n, uint32_t max_ms, bool (*stop)(void *), void *ctx) {
+    uint64_t end = wtls_plat_now_ms() + max_ms;
+    while (wtls_plat_now_ms() < end) {
+        bool all = true;
+        wtls_http_response *live[16];
+        for (size_t i = 0; i < n; i++) {
+            live[i] = NULL;
+            if (js[i].r && !js[i].done && !(js[i].stall && js[i].head)) {
+                live[i] = js[i].r;
+                all = false;
+            }
+        }
+        if (all || (stop && stop(ctx))) return true;
+        wtls_http_wait(live, n, 50);
+        for (size_t i = 0; i < n; i++) job_pump(&js[i]);
+    }
+    return false;
+}
+
+static const char *conn_of(const job *j) { return wtls_http_get_header(j->r, "x-conn"); }
+
+static bool is_h2(const job *j) {
+    wtls_http_info info;
+    return wtls_http_get_info(j->r, &info) == WTLS_OK && info.http2 && info.tls.alpn && strcmp(info.tls.alpn, "h2") == 0;
+}
+
+static void test_async_h2_get_and_bodies(void) {
+    wtls_http_pool_flush();
+    job j;
+    job_start(&j, h2url(P_H2, "/hello"), 64);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK_EQ_INT(j.err, 0);
+    CHECK(j.r && is_h2(&j) && wtls_http_status(j.r) == 200);
+    CHECK(j.len == 5 && memcmp(j.body, "hello", 5) == 0);
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/len?n=300000"), 300001);
+    CHECK(jobs_run(&j, 1, 20000, NULL, NULL));
+    CHECK_EQ_INT(j.err, 0);
+    CHECK(j.len == 300000 && is_pattern(j.body, j.len));
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/hello?no_cl=1"), 64); /* body ended by END_STREAM only */
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 5 && j.err == 0);
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/redirect?to=/hello"), 64); /* a redirect stays on the session machinery */
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 5 && j.err == 0 && wtls_http_status(j.r) == 200);
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/cont"), 64); /* head split over HEADERS + CONTINUATION, dynamic table entry */
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 4 && memcmp(j.body, "cont", 4) == 0);
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/gzip?n=20000"), 20001);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 20000 && is_pattern(j.body, j.len));
+    job_free(&j);
+
+    job_start(&j, h2url(P_H2, "/status?code=404"), 64);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(wtls_http_status(j.r) == 404 && j.len == 0 && j.err == 0);
+    job_free(&j);
+}
+
+static void test_async_h2_uploads(void) {
+    wtls_http_pool_flush();
+    static uint8_t big[150000];
+    for (size_t i = 0; i < sizeof big; i++) big[i] = (uint8_t)(i % 251);
+    wtls_http_request tmpl = {0};
+    tmpl.method = "POST";
+    for (int variant = 0; variant < 4; variant++) {
+        gen g = {0, 70000, 1000};
+        gen g2 = {0, 70000, 3333};
+        size_t want = sizeof big;
+        tmpl.body = big;
+        tmpl.body_len = sizeof big; /* bigger than the 65535 byte windows: waits for WINDOW_UPDATEs */
+        tmpl.body_cb = NULL;
+        tmpl.body_chunked = false;
+        if (variant == 1) {
+            tmpl.body_len = 300;
+            want = 300;
+        } else if (variant == 2) {
+            tmpl.body = NULL;
+            tmpl.body_len = g.total;
+            tmpl.body_cb = gen_cb;
+            tmpl.body_ctx = &g;
+            want = g.total;
+        } else if (variant == 3) {
+            tmpl.body = NULL;
+            tmpl.body_len = 0;
+            tmpl.body_chunked = true;
+            tmpl.body_cb = gen_cb;
+            tmpl.body_ctx = &g2;
+            want = g2.total;
+        }
+        job j;
+        memset(&j, 0, sizeof j);
+        j.req = tmpl;
+        j.req.url = h2url(P_MUX, "/echo");
+        j.cap = want + 1;
+        j.body = malloc(j.cap);
+        j.st = wtls_http_start(&j.r, &j.req);
+        CHECK(j.st == WTLS_OK || j.st == WTLS_WANT_READ || j.st == WTLS_WANT_WRITE);
+        CHECK(jobs_run(&j, 1, 20000, NULL, NULL));
+        CHECK_EQ_INT(j.err, 0);
+        CHECK_EQ_INT((long)j.len, (long)want);
+        CHECK(is_pattern(j.body, j.len));
+        job_free(&j);
+    }
+}
+
+static bool all_heads(void *ctx) {
+    const job *js = ctx;
+    for (int i = 0; i < 4; i++)
+        if (!js[i].head) return false;
+    return true;
+}
+
+static void test_async_h2_streams_share_one_connection(void) {
+    wtls_http_pool_flush();
+    enum { N = 4 };
+    job js[N];
+    uint64_t t0 = wtls_plat_now_ms();
+    for (int i = 0; i < N; i++) job_start(&js[i], h2url(P_MUX, "/slow?n=30000&delay=300"), 30001);
+    CHECK(jobs_run(js, N, 20000, NULL, NULL));
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    int maxactive = 0;
+    for (int i = 0; i < N; i++) {
+        CHECK_EQ_INT(js[i].err, 0);
+        CHECK(js[i].len == 30000 && is_pattern(js[i].body, js[i].len));
+        CHECK(js[i].r && is_h2(&js[i]));
+        const char *c0 = conn_of(&js[0]), *ci = conn_of(&js[i]), *ma = wtls_http_get_header(js[i].r, "x-maxactive");
+        CHECK(c0 && ci && strcmp(c0, ci) == 0); /* one connection for all of them */
+        if (ma && atoi(ma) > maxactive) maxactive = atoi(ma);
+    }
+    CHECK(maxactive >= 3);        /* they really were open together */
+    CHECK(dt < 1000);             /* four 300 ms answers one after another would take 1200 ms */
+    (void)all_heads;
+    for (int i = 0; i < N; i++) job_free(&js[i]);
+
+    /* the session stays for the next request */
+    job j;
+    job_start(&j, h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 5 && j.r && conn_of(&j) && strcmp(conn_of(&j), "0") != 0);
+    wtls_http_info info;
+    CHECK(j.r && wtls_http_get_info(j.r, &info) == WTLS_OK && info.reused_connection);
+    job_free(&j);
+}
+
+static void test_async_h2_small_answers_pass_a_stalled_big_one(void) {
+    wtls_http_pool_flush();
+    job js[3];
+    job_start(&js[0], h2url(P_MUX, "/len?n=3000000"), 3000001);
+    js[0].stall = true; /* nobody reads it: its window fills up and the server must wait */
+    job_start(&js[1], h2url(P_MUX, "/hello"), 16);
+    job_start(&js[2], h2url(P_MUX, "/len?n=1000"), 1001);
+    CHECK(jobs_run(js, 3, 15000, NULL, NULL));
+    CHECK_EQ_INT(js[1].err, 0);
+    CHECK_EQ_INT(js[2].err, 0);
+    CHECK(js[1].len == 5 && js[2].len == 1000 && is_pattern(js[2].body, 1000));
+    CHECK(js[0].head && !js[0].done);
+    /* now read the big one; the others' answers did not disturb it */
+    js[0].stall = false;
+    CHECK(jobs_run(js, 1, 30000, NULL, NULL));
+    CHECK_EQ_INT(js[0].err, 0);
+    CHECK(js[0].len == 3000000 && is_pattern(js[0].body, js[0].len));
+    for (int i = 0; i < 3; i++) job_free(&js[i]);
+}
+
+static void test_async_h2_cancel_one_stream(void) {
+    wtls_http_pool_flush();
+    job js[3];
+    job_start(&js[0], h2url(P_MUX, "/trickle?n=200000&chunk=1000&gap=20"), 200001);
+    job_start(&js[1], h2url(P_MUX, "/slow?n=20000&delay=200"), 20001);
+    job_start(&js[2], h2url(P_MUX, "/len?n=5000"), 5001);
+    js[0].stall = false;
+    uint64_t end = wtls_plat_now_ms() + 10000;
+    while (!js[0].head && wtls_plat_now_ms() < end) {
+        wtls_http_response *live[3] = {js[0].r, js[1].r, js[2].r};
+        wtls_http_wait(live, 3, 50);
+        for (int i = 0; i < 3; i++) job_pump(&js[i]);
+    }
+    CHECK(js[0].head);
+    wtls_http_close(js[0].r); /* gives up on the trickle: RST_STREAM for it, the others go on */
+    js[0].r = NULL;
+    js[0].done = true;
+    CHECK(jobs_run(&js[1], 2, 15000, NULL, NULL));
+    CHECK_EQ_INT(js[1].err, 0);
+    CHECK_EQ_INT(js[2].err, 0);
+    CHECK(js[1].len == 20000 && js[2].len == 5000);
+    /* the server saw the reset */
+    job st;
+    job_start(&st, h2url(P_MUX, "/stats"), 256);
+    CHECK(jobs_run(&st, 1, 10000, NULL, NULL));
+    st.body[st.len < st.cap ? st.len : st.cap - 1] = 0;
+    CHECK(strstr((char *)st.body, "cancelled=") != NULL && strstr((char *)st.body, "cancelled=0") == NULL);
+    job_free(&st);
+    job_free(&js[1]);
+    job_free(&js[2]);
+    free(js[0].body);
+}
+
+static void test_async_h2_server_limit_of_two_streams(void) {
+    wtls_http_pool_flush();
+    enum { N = 6 };
+    job js[N];
+    for (int i = 0; i < N; i++) job_start(&js[i], h2url(P_MUX2, "/slow?n=10000&delay=100"), 10001);
+    CHECK(jobs_run(js, N, 30000, NULL, NULL));
+    for (int i = 0; i < N; i++) {
+        CHECK_EQ_INT(js[i].err, 0); /* the server answers a stream over its limit with GOAWAY: none of that may happen */
+        CHECK(js[i].len == 10000);
+        const char *ma = js[i].r ? wtls_http_get_header(js[i].r, "x-maxactive") : NULL;
+        CHECK(ma && atoi(ma) <= 2);
+    }
+    for (int i = 0; i < N; i++) job_free(&js[i]);
+}
+
+static char *unique_token(char *buf, size_t cap) {
+    static unsigned n;
+    snprintf(buf, cap, "t%llu_%u", (unsigned long long)wtls_plat_now_ms(), n++);
+    return buf;
+}
+
+static void test_async_h2_goaway_and_refused_stream_are_retried(void) {
+    wtls_http_pool_flush();
+    char token[64], path[160];
+    job j;
+    /* the server drops the stream and closes the session: the request goes to a new connection */
+    snprintf(path, sizeof path, "/goaway_once?token=%s", unique_token(token, sizeof token));
+    job_start(&j, h2url(P_MUX, path), 32);
+    CHECK(jobs_run(&j, 1, 15000, NULL, NULL));
+    CHECK_EQ_INT(j.err, 0);
+    CHECK(j.len == 5 && memcmp(j.body, "again", 5) == 0);
+    job_free(&j);
+    /* refused: the same session takes it again */
+    snprintf(path, sizeof path, "/refuse_once?token=%s", unique_token(token, sizeof token));
+    job_start(&j, h2url(P_MUX, path), 32);
+    CHECK(jobs_run(&j, 1, 15000, NULL, NULL));
+    CHECK_EQ_INT(j.err, 0);
+    CHECK(j.len == 5 && memcmp(j.body, "again", 5) == 0);
+    job_free(&j);
+    /* a POST is not repeated behind the caller's back */
+    snprintf(path, sizeof path, "/goaway_once?token=%s", unique_token(token, sizeof token));
+    memset(&j, 0, sizeof j);
+    j.req.url = h2url(P_MUX, path);
+    j.req.method = "POST";
+    j.req.body = "x";
+    j.req.body_len = 1;
+    j.cap = 32;
+    j.body = malloc(32);
+    j.st = wtls_http_start(&j.r, &j.req);
+    CHECK(jobs_run(&j, 1, 15000, NULL, NULL));
+    CHECK(j.err != 0);
+    job_free(&j);
+}
+
+static void test_async_h2_trailers_keep_the_header_table_in_step(void) {
+    wtls_http_pool_flush();
+    job js[3];
+    job_start(&js[0], h2url(P_MUX, "/trailers?n=3000"), 3001);
+    job_start(&js[1], h2url(P_MUX, "/trailers?n=100"), 101);
+    job_start(&js[2], h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(js, 3, 15000, NULL, NULL));
+    for (int i = 0; i < 3; i++) CHECK_EQ_INT(js[i].err, 0);
+    CHECK(js[0].len == 3000 && js[1].len == 100 && js[2].len == 5);
+    for (int i = 0; i < 3; i++) job_free(&js[i]);
+    job j; /* the session still works afterwards */
+    job_start(&j, h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    CHECK(j.len == 5 && j.err == 0);
+    job_free(&j);
+}
+
+static void test_async_h2_pool_flush_closes_sessions(void) {
+    wtls_http_pool_flush();
+    job a, b;
+    job_start(&a, h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(&a, 1, 10000, NULL, NULL));
+    char first[32] = "";
+    if (a.r && conn_of(&a)) snprintf(first, sizeof first, "%s", conn_of(&a));
+    job_free(&a);
+    wtls_http_pool_flush(); /* the idle session is closed */
+    job_start(&b, h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(&b, 1, 10000, NULL, NULL));
+    CHECK(b.r && conn_of(&b) && strcmp(conn_of(&b), first) != 0);
+    job_free(&b);
+    /* a busy session is retired: it finishes its stream, then goes */
+    job c, d;
+    job_start(&c, h2url(P_MUX, "/slow?n=1000&delay=300"), 1001);
+    CHECK(jobs_run(&c, 1, 100, NULL, NULL) == false); /* still waiting */
+    wtls_http_pool_flush();
+    CHECK(jobs_run(&c, 1, 10000, NULL, NULL));
+    CHECK(c.err == 0 && c.len == 1000);
+    char busy[32] = "";
+    if (c.r && conn_of(&c)) snprintf(busy, sizeof busy, "%s", conn_of(&c));
+    job_free(&c);
+    job_start(&d, h2url(P_MUX, "/hello"), 16);
+    CHECK(jobs_run(&d, 1, 10000, NULL, NULL));
+    CHECK(d.r && conn_of(&d) && strcmp(conn_of(&d), busy) != 0);
+    job_free(&d);
+}
+
+static void test_async_h2_many_requests_in_waves(void) {
+    wtls_http_pool_flush();
+    enum { N = 12 };
+    job js[N];
+    for (int i = 0; i < N; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "/len?n=%d", 1000 + i * 7919);
+        job_start(&js[i], h2url(P_MUX, path), (size_t)(1000 + i * 7919) + 1);
+    }
+    CHECK(jobs_run(js, N, 30000, NULL, NULL));
+    for (int i = 0; i < N; i++) {
+        CHECK_EQ_INT(js[i].err, 0);
+        CHECK_EQ_INT((long)js[i].len, 1000 + i * 7919);
+        CHECK(is_pattern(js[i].body, js[i].len));
+    }
+    for (int i = 0; i < N; i++) job_free(&js[i]);
+}
+
+static void test_async_h2_no_h2_option_uses_http11(void) {
+    wtls_http_pool_flush();
+    job j;
+    wtls_http_request req = {0};
+    req.url = h2url(P_H2, "/hello");
+    req.no_h2 = true;
+    memset(&j, 0, sizeof j);
+    j.req = req;
+    j.cap = 16;
+    j.body = malloc(16);
+    j.st = wtls_http_start(&j.r, &j.req);
+    CHECK(jobs_run(&j, 1, 10000, NULL, NULL));
+    wtls_http_info info;
+    CHECK(j.r && wtls_http_get_info(j.r, &info) == WTLS_OK && !info.http2);
+    CHECK(j.len == 5);
+    job_free(&j);
+}
+#endif
+
 void wtls_suite_http_async(void) {
     int rc = wtls_init();
     CHECK_EQ_INT(rc, WTLS_OK);
@@ -672,5 +1097,18 @@ void wtls_suite_http_async(void) {
     RUN(test_async_retry_with_backoff_does_not_block);
     RUN(test_async_start_returns_during_dns);
     RUN(test_async_unsupported_and_bad_arguments);
+#if WTLS_HTTP2
+    RUN(test_async_h2_get_and_bodies);
+    RUN(test_async_h2_uploads);
+    RUN(test_async_h2_streams_share_one_connection);
+    RUN(test_async_h2_small_answers_pass_a_stalled_big_one);
+    RUN(test_async_h2_cancel_one_stream);
+    RUN(test_async_h2_server_limit_of_two_streams);
+    RUN(test_async_h2_goaway_and_refused_stream_are_retried);
+    RUN(test_async_h2_trailers_keep_the_header_table_in_step);
+    RUN(test_async_h2_pool_flush_closes_sessions);
+    RUN(test_async_h2_many_requests_in_waves);
+    RUN(test_async_h2_no_h2_option_uses_http11);
+#endif
     wtls_shutdown();
 }
