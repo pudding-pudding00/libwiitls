@@ -204,11 +204,26 @@ int wtls_connect_tcp(const char *host, uint16_t port, uint32_t timeout_ms,
     return st;
 }
 
+int wtls_pins_collect(const wtls_options *opt, uint8_t out[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN], uint8_t *n) {
+    *n = 0;
+    if (!opt) return WTLS_OK;
+    if (opt->n_spki_pins > WTLS_SPKI_MAX_PINS || opt->n_spki_pins_ext > WTLS_SPKI_MAX_PINS_EXT ||
+        (opt->n_spki_pins_ext && !opt->spki_pins_ext))
+        return WTLS_ERR_ARG;
+    if (opt->n_spki_pins) memcpy(out, opt->spki_pins, (size_t)opt->n_spki_pins * WTLS_SPKI_SHA256_LEN);
+    if (opt->n_spki_pins_ext)
+        memcpy(out[opt->n_spki_pins], opt->spki_pins_ext, (size_t)opt->n_spki_pins_ext * WTLS_SPKI_SHA256_LEN);
+    *n = (uint8_t)(opt->n_spki_pins + opt->n_spki_pins_ext);
+    return WTLS_OK;
+}
+
 int wtls_conn_identity_fp(const wtls_options *opt, bool *has_id, uint8_t fp[32]) {
     *has_id = false;
     if (!opt) return WTLS_OK;
-    if (opt->n_spki_pins > WTLS_SPKI_MAX_PINS) return WTLS_ERR_ARG;
-    bool use_pins = !opt->insecure_skip_verify && opt->n_spki_pins > 0;
+    uint8_t pins[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN];
+    uint8_t n_pins = 0;
+    if (wtls_pins_collect(opt, pins, &n_pins) != WTLS_OK) return WTLS_ERR_ARG;
+    bool use_pins = !opt->insecure_skip_verify && n_pins > 0;
     if (!opt->client_cred && !use_pins) return WTLS_OK;
     if (opt->client_cred && !use_pins) {
         memcpy(fp, opt->client_cred->fp, 32);
@@ -217,13 +232,12 @@ int wtls_conn_identity_fp(const wtls_options *opt, bool *has_id, uint8_t fp[32])
     }
     psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
     if (psa_hash_setup(&op, PSA_ALG_SHA_256) != PSA_SUCCESS) return WTLS_ERR_INTERNAL;
-    uint8_t tag[2] = {opt->client_cred ? 1u : 0u, opt->n_spki_pins};
+    uint8_t tag[2] = {opt->client_cred ? 1u : 0u, n_pins};
     psa_status_t pst = psa_hash_update(&op, tag, sizeof tag);
     if (pst == PSA_SUCCESS && opt->client_cred)
         pst = psa_hash_update(&op, opt->client_cred->fp, sizeof opt->client_cred->fp);
     if (pst == PSA_SUCCESS)
-        pst = psa_hash_update(&op, (const uint8_t *)opt->spki_pins,
-                              (size_t)opt->n_spki_pins * WTLS_SPKI_SHA256_LEN);
+        pst = psa_hash_update(&op, (const uint8_t *)pins, (size_t)n_pins * WTLS_SPKI_SHA256_LEN);
     size_t hlen = 0;
     if (pst == PSA_SUCCESS) pst = psa_hash_finish(&op, fp, 32, &hlen);
     if (pst != PSA_SUCCESS || hlen != 32) {

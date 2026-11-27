@@ -8,6 +8,12 @@
 #include <mbedtls/ssl.h>
 #include <wiitls/wiitls.h>
 
+#define WTLS_PINS_TOTAL (WTLS_SPKI_MAX_PINS + WTLS_SPKI_MAX_PINS_EXT)
+
+/* Validates the pin fields of opt and flattens spki_pins + spki_pins_ext into out;
+ * *n = the total. WTLS_OK or WTLS_ERR_ARG. */
+int wtls_pins_collect(const wtls_options *opt, uint8_t out[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN], uint8_t *n);
+
 typedef enum {
     WTLS_CONN_TCP_CONNECT = 0,
     WTLS_CONN_TLS_HANDSHAKE,
@@ -43,7 +49,7 @@ struct wtls_conn {
     uint32_t ipv4_be;
     bool no_resumption;
     const wtls_client_cred *cred; /* NULL, or held for the connection's lifetime */
-    uint8_t spki_pins[WTLS_SPKI_MAX_PINS][WTLS_SPKI_SHA256_LEN];
+    uint8_t spki_pins[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN];
     uint8_t n_spki_pins;
     bool pin_matched;
     bool has_id;

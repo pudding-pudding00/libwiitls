@@ -347,7 +347,9 @@ static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t por
     if (!wtls_core_initialized()) return WTLS_ERR_STATE;
     static const wtls_options k_defaults;
     if (!opt) opt = &k_defaults;
-    if (opt->n_spki_pins > WTLS_SPKI_MAX_PINS) return WTLS_ERR_ARG;
+    uint8_t pins[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN];
+    uint8_t n_pins = 0;
+    if (wtls_pins_collect(opt, pins, &n_pins) != WTLS_OK) return WTLS_ERR_ARG;
 
     char name[256];
     if (!normalize_host(host, name)) return WTLS_ERR_ARG;
@@ -373,9 +375,9 @@ static wtls_status conn_init_tls(wtls_conn **out, const char *host, uint16_t por
     c->io_timeout_ms = opt->io_timeout_ms ? opt->io_timeout_ms : DEF_IO_MS;
     c->abort_cb = opt->abort_cb;
     c->abort_ctx = opt->abort_ctx;
-    if (!opt->insecure_skip_verify && opt->n_spki_pins > 0) {
-        c->n_spki_pins = opt->n_spki_pins;
-        memcpy(c->spki_pins, opt->spki_pins, (size_t)opt->n_spki_pins * WTLS_SPKI_SHA256_LEN);
+    if (!opt->insecure_skip_verify && n_pins > 0) {
+        c->n_spki_pins = n_pins;
+        memcpy(c->spki_pins, pins, (size_t)n_pins * WTLS_SPKI_SHA256_LEN);
     }
     int id_rc = wtls_conn_identity_fp(opt, &c->has_id, c->id_fp);
     if (id_rc != WTLS_OK) {

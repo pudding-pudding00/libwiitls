@@ -932,6 +932,97 @@ static void test_spki_pin_resumption_isolated(void) {
     }
 }
 
+/* ---- extended pin list (spki_pins_ext) ---------------------------------- */
+
+static void test_pin_ext_only_match(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa)) return;
+    wtls_options o = {0};
+    o.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ecdsa;
+    o.n_spki_pins_ext = 1;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_RSA, &o), WTLS_ERR_CERT); /* a different key: pinning is active */
+}
+
+static void test_pin_ext_sixth_of_six_matches(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa)) return;
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    memcpy(ext[WTLS_SPKI_MAX_PINS_EXT - 1], pin_ecdsa, sizeof pin_ecdsa); /* the sixth pin overall */
+    wtls_options o = {0};
+    memset(o.spki_pins, 0xAA, sizeof o.spki_pins);
+    o.n_spki_pins = WTLS_SPKI_MAX_PINS;
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+}
+
+static void test_pin_ext_none_match_cert_error(void) {
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    wtls_options o = {0};
+    memset(o.spki_pins, 0xAA, sizeof o.spki_pins);
+    o.n_spki_pins = WTLS_SPKI_MAX_PINS;
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CERT);
+    CHECK(c == NULL);
+    CHECK(wtls_last_verify_flags() & MBEDTLS_X509_BADCERT_OTHER);
+}
+
+static void test_pin_ext_bad_arguments(void) {
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT + 1][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    wtls_options o = {0};
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT + 1;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+    o.spki_pins_ext = NULL; /* a count without an array */
+    o.n_spki_pins_ext = 1;
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+}
+
+static void test_pin_ext_resumption_isolated(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa) || !fetch_spki("test-ca", pin_ca)) return;
+    wtls_scache_clear();
+    wtls_options o_ca = {0};
+    o_ca.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ca;
+    o_ca.n_spki_pins_ext = 1;
+    wtls_options o_leaf = {0};
+    o_leaf.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ecdsa;
+    o_leaf.n_spki_pins_ext = 1;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    wtls_conn *d = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_leaf);
+    if (d) {
+        wtls_conn_info info;
+        wtls_get_info(d, &info);
+        CHECK(!info.resumed); /* another extended pin set must not reuse the ticket */
+        wtls_close(d);
+    }
+    wtls_conn *e = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (e) {
+        wtls_conn_info info;
+        wtls_get_info(e, &info);
+        CHECK(info.resumed);
+        wtls_close(e);
+    }
+}
+
 static void test_reset_trusted_cas(void) {
     /* First confirm test_ca is currently trusted (even with cached tickets cleared). */
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
@@ -1048,6 +1139,11 @@ void wtls_suite_tls(void) {
     RUN(test_multi_ip_fallback_and_net_reset);
     RUN(test_spki_pin_leaf_and_ca);
     RUN(test_spki_pin_resumption_isolated);
+    RUN(test_pin_ext_only_match);
+    RUN(test_pin_ext_sixth_of_six_matches);
+    RUN(test_pin_ext_none_match_cert_error);
+    RUN(test_pin_ext_bad_arguments);
+    RUN(test_pin_ext_resumption_isolated);
     RUN(test_reset_trusted_cas);
     RUN(test_nonblocking_connect_start_step);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */

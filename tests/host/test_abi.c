@@ -31,6 +31,8 @@ OFF(wtls_options, abort_cb,            40,  24);
 OFF(wtls_options, abort_ctx,           48,  28);
 OFF(wtls_options, spki_pins,           56,  32);
 OFF(wtls_options, n_spki_pins,        120,  96);
+/* 1.1 fields are appended after the 1.0 ones */
+_Static_assert(offsetof(wtls_options, spki_pins_ext) > offsetof(wtls_options, n_spki_pins), "new fields go last");
 
 OFF(wtls_http_request, method,            0,   0);
 OFF(wtls_http_request, url,               8,   4);

@@ -441,7 +441,7 @@ the client certificate is stripped when a redirect leaves the origin.
 ### Public-key (SPKI) pinning
 
 In addition to normal chain + date + hostname verification, you can pin up to
-`WTLS_SPKI_MAX_PINS` (2: primary + backup) SHA-256 digests of ASN.1 DER
+`WTLS_SPKI_MAX_PINS` (2: primary + backup; more in `spki_pins_ext`, below) SHA-256 digests of ASN.1 DER
 `SubjectPublicKeyInfo`:
 
 ```c
@@ -458,6 +458,16 @@ Matches if any verified chain certificate (leaf, intermediate, or trusted root)
 matches a configured pin; mismatches fail with `WTLS_ERR_CERT`
 (`MBEDTLS_X509_BADCERT_OTHER` set in `wtls_last_verify_flags()`). Pin sets are
 isolated in both TLS session tickets and the HTTP keep-alive pool.
+
+For key rotation with more backups, `spki_pins_ext` (added in 1.1; the 1.0 array
+layout is unchanged) takes up to `WTLS_SPKI_MAX_PINS_EXT` (4) further digests,
+so six pins are possible in total. Any match across both lists suffices:
+
+```c
+static const uint8_t k_more[3][WTLS_SPKI_SHA256_LEN] = { /* ... */ };
+opt.spki_pins_ext = k_more;       /* copied at connect */
+opt.n_spki_pins_ext = 3;
+```
 
 ## 9. What to do with each error
 

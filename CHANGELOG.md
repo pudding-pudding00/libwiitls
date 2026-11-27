@@ -35,6 +35,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- `wtls_options::spki_pins_ext` / `n_spki_pins_ext` (up to
+  `WTLS_SPKI_MAX_PINS_EXT` = 4 further SPKI pins, six in total); the 1.0
+  `spki_pins` array is unchanged. Pin sets stay isolated in the session-ticket
+  cache and the HTTP pool.
 - `wtls_load_ca_bundle_file()` / `wtls_load_ca_bundle_file_signed()`: load a
   `cacert.pem` from SD/USB at run time (streamed, kept as DER and parsed lazily),
   optionally only when an ECDSA P-256 signature over the file verifies.

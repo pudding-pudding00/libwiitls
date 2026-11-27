@@ -1064,7 +1064,9 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
         }
     }
     if (req->tls) x.opt = *req->tls;
-    if (u.secure && x.opt.n_spki_pins > WTLS_SPKI_MAX_PINS) {
+    uint8_t pin_check[WTLS_PINS_TOTAL][WTLS_SPKI_SHA256_LEN];
+    uint8_t n_pin_check = 0;
+    if (u.secure && wtls_pins_collect(&x.opt, pin_check, &n_pin_check) != WTLS_OK) {
         response_free(r);
         return WTLS_ERR_ARG;
     }

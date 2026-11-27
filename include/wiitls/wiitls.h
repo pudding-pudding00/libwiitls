@@ -43,8 +43,10 @@ const char *wtls_version(void);
 
 /** Raw SHA-256 SubjectPublicKeyInfo (SPKI) pin length in bytes. */
 #define WTLS_SPKI_SHA256_LEN 32u
-/** Maximum number of SPKI pins per connection (primary + backup). */
+/** Maximum number of SPKI pins in wtls_options::spki_pins (primary + backup). */
 #define WTLS_SPKI_MAX_PINS 2u
+/** Maximum number of additional pins in wtls_options::spki_pins_ext. */
+#define WTLS_SPKI_MAX_PINS_EXT 4u
 
 /** Status codes. Every error is negative; WTLS_OK is 0. */
 typedef enum {
@@ -117,6 +119,12 @@ typedef struct {
     uint8_t n_spki_pins;            /**< 0 => disabled; 1..WTLS_SPKI_MAX_PINS => at least one cert in
                                          the verified chain must match a pin (ignored when
                                          insecure_skip_verify is set; > WTLS_SPKI_MAX_PINS => WTLS_ERR_ARG) */
+    const uint8_t (*spki_pins_ext)[WTLS_SPKI_SHA256_LEN]; /**< (1.1) more pins for key rotation with several
+                                         backups: an array of n_spki_pins_ext digests, copied at connect. A
+                                         match against any pin of spki_pins and spki_pins_ext suffices;
+                                         pinning is active when the two counts add up to more than 0 */
+    uint8_t n_spki_pins_ext;        /**< (1.1) 0..WTLS_SPKI_MAX_PINS_EXT; larger, or non-zero with a NULL
+                                         spki_pins_ext => WTLS_ERR_ARG */
 } wtls_options;
 
 /** Facts about an established connection (see wtls_get_info()). */
