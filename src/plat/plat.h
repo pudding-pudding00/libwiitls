@@ -51,6 +51,9 @@ int      wtls_plat_connect_check(int fd, uint32_t ipv4_be, uint16_t port); /* OK
 int      wtls_plat_send(int fd, const uint8_t *buf, size_t len);       /* >0 | WANT_WRITE | ERR_IO */
 int      wtls_plat_recv(int fd, uint8_t *buf, size_t len);             /* >0 | 0 (EOF) | WANT_READ | ERR_IO */
 int      wtls_plat_poll(int fd, bool rd, bool wr, uint32_t timeout_ms);/* 1 ready | 0 timeout | ERR_IO */
+/* Waits for any of n descriptors (want[i]: bit 0 read, bit 1 write; fds[i] < 0 is ignored) for at most timeout_ms.
+ * ready[i] = 1 for every one that is ready or failed. Returns how many, 0 on timeout. */
+int      wtls_plat_poll_many(const int *fds, const uint8_t *want, size_t n, uint32_t timeout_ms, uint8_t *ready);
 void     wtls_plat_close(int fd);
 int      wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, size_t req_len,
                                 uint8_t *resp, size_t resp_cap,

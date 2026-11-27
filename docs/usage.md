@@ -357,6 +357,41 @@ RFC 9659); a larger window ends the read with `WTLS_ERR_HTTP_LIMIT`. Brotli
 and zstd symbols are not prefixed: do not enable the options in an application
 that links its own libbrotli or libzstd.
 
+### Requests without blocking
+
+`wtls_http_open()` waits for the connect, the handshake and the response head.
+For a UI thread, or to run several requests at once, use the stepping API:
+
+```c
+wtls_http_response *r;
+wtls_status st = wtls_http_start(&r, &req);          /* returns at once */
+while (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) {
+    wtls_http_wait(&r, 1, 50);                        /* or net_poll() on wtls_http_get_fd(r) */
+    st = wtls_http_step(r);
+}
+if (st != WTLS_OK) { if (r) wtls_http_close(r); return; }   /* start() leaves r NULL when it fails at once */
+
+char buf[1024];
+for (;;) {                                           /* the body: reads never wait */
+    int n = wtls_http_read(r, buf, sizeof buf);
+    if (n > 0) { consume(buf, n); continue; }
+    if (n == WTLS_WANT_READ) { wtls_http_wait(&r, 1, 50); continue; }
+    break;                                           /* 0 = end, < 0 = error */
+}
+wtls_http_close(r);                                  /* at any time: cancels, never leaks, never pools a half-used connection */
+```
+
+Several responses can be waited on together with `wtls_http_wait(responses, n, ms)`;
+step or read all of them afterwards (it tells how many can progress, not which).
+A descriptor of -1 from `wtls_http_get_fd()` means "nothing to poll": a host name
+is being resolved or a retry waits for its backoff; just step again after a few
+milliseconds. Everything the blocking call does applies (redirects, cookies,
+`total_timeout_ms`, retries, gzip, the keep-alive pool). The request structure and what it
+points to must stay valid until the head is complete; `body_cb` is called from
+`wtls_http_step()` and must not block. Not supported: proxies, `expect_100_continue`,
+`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). HTTP/2 is not used by this call: it speaks
+HTTP/1.1. On the Wii the host name lookup still happens inside the call.
+
 ### Deadlines and retries
 
 ```c

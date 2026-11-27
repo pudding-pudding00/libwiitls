@@ -263,8 +263,12 @@ static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t por
 
 /* ---- open ------------------------------------------------------------------- */
 
+static void async_free(struct async_state *as); /* wtls_http_async.inc */
+
 static void response_free(wtls_http_response *r) {
     if (!r) return;
+    async_free(r->as);
+    r->as = NULL;
     if (r->conn) wtls_http_tr_close(r->conn);
 #if WTLS_CODECS
     wtls_gzip_free(r->gz);
@@ -1693,6 +1697,7 @@ static int gz_read(wtls_http_response *r, uint8_t *buf, size_t len) {
 int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     if (!r || (!buf && len)) return WTLS_ERR_ARG;
     if (!WTLS_THREAD_GUARD("wtls_http_read")) return WTLS_ERR_STATE;
+    if (r->as) return WTLS_ERR_STATE; /* wtls_http_step() has not finished the head yet */
     if (r->err) return r->err;
     if (r->abort_cb && r->abort_cb(r->abort_ctx)) {
         tr_mark_aborted(r->conn);
@@ -1859,3 +1864,5 @@ void wtls_http_result_free(wtls_http_result *res) {
     res->body = NULL;
     res->body_len = 0;
 }
+
+#include "http/wtls_http_async.inc"

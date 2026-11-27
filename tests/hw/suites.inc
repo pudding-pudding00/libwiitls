@@ -10,6 +10,7 @@
 {"alloc", wtls_suite_alloc},
 {"sig", wtls_suite_sig},
 {"ws", wtls_suite_ws},
+{"httpasync", wtls_suite_http_async},
 {"realworld", wtls_suite_realworld},
 {"http", wtls_suite_http},
 {"soak", wtls_suite_soak},
