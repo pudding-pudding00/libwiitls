@@ -131,7 +131,7 @@ int wtls_http_build_head(const char *method, const wtls_url *u, const wtls_http_
     if (!wtls_http_headers_have(h, n, "User-Agent")) add_field(&b, "User-Agent", "libwiitls/" WTLS_VERSION);
     if (!wtls_http_headers_have(h, n, "Accept")) add_field(&b, "Accept", "*/*");
     if (want_gzip && !wtls_http_headers_have(h, n, "Accept-Encoding"))
-        add_field(&b, "Accept-Encoding", "gzip, deflate");
+        add_field(&b, "Accept-Encoding", WTLS_ACCEPT_ENCODING);
     if (allow_upgrade) {
         if (wtls_http_headers_have(h, n, "Upgrade") && !wtls_http_headers_have(h, n, "Connection"))
             add_field(&b, "Connection", "Upgrade");

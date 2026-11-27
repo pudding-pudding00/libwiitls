@@ -76,6 +76,7 @@ ignored, so a test can tag its requests and count them with /count.
                                   response (default), mode 503 = 503 with Retry-After S (default 1);
                                   later ones 200 "ok"
   GET /flaky-count?id=K           how many /flaky requests carried this id
+  GET /fixture?f=NAME[&enc=E]     the file tests/host/fixtures/NAME, Content-Encoding E if given
   GET /setcookie?c=V[&c2=V][&c3=V] 200 "ok" with one Set-Cookie field per given value
   GET /cookie-redirect?c=V&to=URL 302 to URL with Set-Cookie V
   GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
@@ -741,6 +742,18 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             tcp_abort(sock)
             return False
         send(body)
+    elif path == "/fixture":
+        name = query.get("f", "")
+        full = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", name)
+        if not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in name) \
+                or not os.path.isfile(full):
+            send(http_response(404, [("Content-Length", 0)]))
+        else:
+            data = open(full, "rb").read()
+            hdrs = [("Content-Length", len(data))]
+            if "enc" in query:
+                hdrs.append(("Content-Encoding", query["enc"]))
+            send(http_response(200, hdrs, data))
     elif path == "/flaky":
         key = query.get("id", "x")
         with HTTP_LOG_LOCK:

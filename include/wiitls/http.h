@@ -133,6 +133,8 @@ typedef struct {
     wtls_conn_info tls;     /**< as wtls_get_info(); all zero when !secure */
     bool deflate;           /**< the body is being decompressed from deflate */
     bool http2;             /**< response arrived over HTTP/2 (ALPN "h2") */
+    bool br;                /**< (1.1) the body is being decompressed from Brotli (WTLS_BROTLI builds) */
+    bool zstd;              /**< (1.1) the body is being decompressed from zstd (WTLS_ZSTD builds) */
 } wtls_http_info;
 
 /**

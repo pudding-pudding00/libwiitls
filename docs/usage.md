@@ -344,6 +344,19 @@ Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
 push, cookies (send your own `Cookie` header), authentication schemes (send
 your own `Authorization`), caching, and `br` encoding.
 
+### Brotli and zstd bodies
+
+gzip and deflate bodies are decoded by default. `-DWTLS_BROTLI=ON` and
+`-DWTLS_ZSTD=ON` add `Content-Encoding: br` and `zstd` (off by default: about
+130 KiB and 60 KiB of code, the Brotli dictionary included). The request then
+advertises them in `Accept-Encoding`, `wtls_http_info::br` / `::zstd` tell
+which one was used, and `req.no_gzip` turns all decoding off as before. The
+decoders only accept windows up to `WTLS_BROTLI_MAX_LGWIN` (22 = 4 MiB, the
+encoders' default) and `WTLS_ZSTD_MAX_WINDOW_LOG` (23 = 8 MiB, the limit of
+RFC 9659); a larger window ends the read with `WTLS_ERR_HTTP_LIMIT`. Brotli
+and zstd symbols are not prefixed: do not enable the options in an application
+that links its own libbrotli or libzstd.
+
 ### Deadlines and retries
 
 ```c

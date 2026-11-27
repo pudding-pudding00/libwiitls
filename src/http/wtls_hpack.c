@@ -501,7 +501,11 @@ int wtls_hpack_encode_request(const char *method, const wtls_url *u, const wtls_
     if (!wtls_http_headers_have(h, n, "accept"))
         emit_literal(&b, "accept", "*/*", false, false);
     if (want_gzip && !wtls_http_headers_have(h, n, "accept-encoding"))
+#if WTLS_GZIP && !WTLS_BROTLI && !WTLS_ZSTD
         hbuf_int(&b, 0x80u, 7, 16); /* static 16: accept-encoding: gzip, deflate */
+#else
+        emit_literal(&b, "accept-encoding", WTLS_ACCEPT_ENCODING, false, false);
+#endif
     if (has_content_length) {
         char num[32];
         snprintf(num, sizeof num, "%llu", (unsigned long long)body_len);

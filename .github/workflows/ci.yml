@@ -62,6 +62,11 @@ jobs:
           cmake -S . -B build-small -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DWTLS_SSL_OUT_CONTENT_LEN=2048
           cmake --build build-small
           ctest --test-dir build-small --output-on-failure
+      - name: Build and test (Brotli + zstd decoders)
+        run: |
+          cmake -S . -B build-codec -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DWTLS_BROTLI=ON -DWTLS_ZSTD=ON
+          cmake --build build-codec
+          ctest --test-dir build-codec --output-on-failure
       - name: Build and test (Debug + Thread Guard)
         run: |
           cmake -S . -B build-debug -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Debug
@@ -119,7 +124,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1
         run: |
-          cmake -S . -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DWTLS_BUILD_FUZZ=ON -DWTLS_BUILD_TESTS=OFF
+          cmake -S . -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DWTLS_BUILD_FUZZ=ON -DWTLS_BUILD_TESTS=OFF -DWTLS_BROTLI=ON -DWTLS_ZSTD=ON
           cmake --build build-fuzz
           ./build-fuzz/fuzz_http_parse    tests/fuzz/corpus/http_parse    -max_total_time=10
           ./build-fuzz/fuzz_http_chunked  tests/fuzz/corpus/http_chunked  -max_total_time=10
@@ -127,6 +132,8 @@ jobs:
           ./build-fuzz/fuzz_content_range tests/fuzz/corpus/content_range -max_total_time=10
           ./build-fuzz/fuzz_http_gzip     tests/fuzz/corpus/http_gzip     -max_total_time=10
           ./build-fuzz/fuzz_client_cred   tests/fuzz/corpus/client_cred   -max_total_time=10
+          ./build-fuzz/fuzz_http_br         tests/fuzz/corpus/http_br         -max_total_time=20
+          ./build-fuzz/fuzz_http_zstd       tests/fuzz/corpus/http_zstd       -max_total_time=20
           ./build-fuzz/fuzz_set_cookie      tests/fuzz/corpus/set_cookie      -max_total_time=20
           ./build-fuzz/fuzz_ws_frame        tests/fuzz/corpus/ws_frame        -max_total_time=20
           ./build-fuzz/fuzz_hpack           tests/fuzz/corpus/hpack           -max_total_time=30

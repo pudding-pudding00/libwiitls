@@ -1,6 +1,6 @@
 /* HTTP/1.1 client: request, response head, body streaming (RFC 9112),
  * keep-alive pool reuse with a liveness check and one idempotent retry,
- * redirects, gzip Content-Encoding (WTLS_GZIP), over TLS (https) or plain
+ * redirects, gzip/deflate (WTLS_GZIP), br (WTLS_BROTLI) and zstd (WTLS_ZSTD) Content-Encoding, over TLS (https) or plain
  * TCP (http).
  *
  * The response keeps the connection and one buffer: the head (parsed in
@@ -16,7 +16,7 @@
 #include "wtls_mem.h"
 #include "http/wtls_cookie.h"
 #include "http/wtls_http_chunked.h"
-#if WTLS_GZIP
+#if WTLS_CODECS
 #include "http/wtls_http_gzip.h"
 #endif
 #if WTLS_HTTP2
@@ -84,9 +84,10 @@ struct wtls_http_response {
     void *progress_ctx;
     size_t progress_done;
     int64_t progress_total;
-#if WTLS_GZIP
+#if WTLS_CODECS
     wtls_gzip *gz;       /* decoding Content-Encoding: gzip or deflate */
     bool is_deflate;
+    int enc_kind; /* 0 none, 1 gzip, 2 deflate, 3 br, 4 zstd */
     uint8_t *gz_in;      /* raw body bytes waiting for the decoder */
     size_t gz_off, gz_end;
     bool gz_raw_end;     /* the raw body has ended */
@@ -248,7 +249,7 @@ static int tr_connect(http_tr **out, bool secure, const char *host, uint16_t por
 static void response_free(wtls_http_response *r) {
     if (!r) return;
     if (r->conn) wtls_http_tr_close(r->conn);
-#if WTLS_GZIP
+#if WTLS_CODECS
     wtls_gzip_free(r->gz);
     wtls_free(r->gz_in);
 #endif
@@ -258,7 +259,7 @@ static void response_free(wtls_http_response *r) {
 }
 
 static bool decoding(const wtls_http_response *r) {
-#if WTLS_GZIP
+#if WTLS_CODECS
     return r->gz != NULL;
 #else
     (void)r;
@@ -1181,16 +1182,31 @@ static int follow(wtls_http_response *r, request_ctx *x, wtls_url *u, const char
  * else is an error. Redirect bodies are drained raw, so only the final
  * response gets here. */
 static int setup_encoding(wtls_http_response *r, bool want_gzip) {
-#if WTLS_GZIP
+#if WTLS_CODECS
     if (!want_gzip || r->fr.kind == WTLS_BODY_NONE) return WTLS_OK;
     const char *ce = wtls_http_head_get(&r->head, "content-encoding");
     if (!ce || !*ce || wtls_http_ieq(ce, "identity")) return WTLS_OK;
-    if (wtls_http_ieq(ce, "gzip") || wtls_http_ieq(ce, "x-gzip")) {
+    if (false) {
+#if WTLS_GZIP
+    } else if (wtls_http_ieq(ce, "gzip") || wtls_http_ieq(ce, "x-gzip")) {
         r->gz = wtls_gzip_new();
         r->is_deflate = false;
+        r->enc_kind = 1;
     } else if (wtls_http_ieq(ce, "deflate")) {
         r->gz = wtls_deflate_new();
         r->is_deflate = true;
+        r->enc_kind = 2;
+#endif
+#if WTLS_BROTLI
+    } else if (wtls_http_ieq(ce, "br")) {
+        r->gz = wtls_br_new();
+        r->enc_kind = 3;
+#endif
+#if WTLS_ZSTD
+    } else if (wtls_http_ieq(ce, "zstd")) {
+        r->gz = wtls_zstd_new();
+        r->enc_kind = 4;
+#endif
     } else {
         return WTLS_ERR_HTTP;
     }
@@ -1247,7 +1263,7 @@ static wtls_status open_attempt(wtls_http_response **out, const wtls_http_reques
                      .allow_upgrade = req->allow_upgrade,
                      .expect_100 = req->expect_100_continue &&
                                    (req->body_cb != NULL || (req->body != NULL && req->body_len > 0))};
-#if WTLS_GZIP
+#if WTLS_CODECS
     /* An application that sets Accept-Encoding itself gets the body as sent. */
     x.want_gzip = !req->allow_upgrade && !req->no_gzip &&
                   !wtls_http_headers_have(req->headers, req->n_headers, "Accept-Encoding");
@@ -1475,9 +1491,11 @@ wtls_status wtls_http_get_info(const wtls_http_response *r, wtls_http_info *out)
     out->redirects = r->redirects;
     out->reused_connection = r->reused;
     out->secure = r->secure;
-#if WTLS_GZIP
-    out->gzip = r->gz != NULL && !r->is_deflate;
-    out->deflate = r->gz != NULL && r->is_deflate;
+#if WTLS_CODECS
+    out->gzip = r->enc_kind == 1;
+    out->deflate = r->enc_kind == 2;
+    out->br = r->enc_kind == 3;
+    out->zstd = r->enc_kind == 4;
 #endif
     out->http2 = r->is_http2;
     out->tls = r->info;
@@ -1559,7 +1577,7 @@ static int raw_read(wtls_http_response *r, void *buf, size_t len) {
     }
 }
 
-#if WTLS_GZIP
+#if WTLS_CODECS
 /* The decoded body: raw bytes go through gz_in into the decoder. */
 static int gz_read(wtls_http_response *r, uint8_t *buf, size_t len) {
     for (;;) {
@@ -1605,7 +1623,7 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
         }
     }
     int k;
-#if WTLS_GZIP
+#if WTLS_CODECS
     k = r->gz ? gz_read(r, buf, len) : raw_read(r, buf, len);
 #else
     k = raw_read(r, buf, len);

@@ -157,6 +157,49 @@ if(WTLS_GZIP)
     target_compile_definitions(wtls_zlib PUBLIC Z_PREFIX)
     target_compile_options(wtls_zlib PRIVATE -w)
 endif()
+# Optional Content-Encoding decoders, off by default (code size, extra symbols: Brotli*/ZSTD_* are
+# not prefixed, so do not enable them if your application links libbrotli / libzstd itself).
+# Sources only, like zlib. Brotli comes from the PyPI sdist of the Brotli package (an immutable file
+# with a published hash; the upstream tag archive has no stable checksum); zstd from its release.
+option(WTLS_BROTLI "Content-Encoding: br in the HTTP client (Brotli decoder, adds about 130 KiB with its dictionary)" OFF)
+option(WTLS_ZSTD "Content-Encoding: zstd in the HTTP client (zstd decoder, about 60 KiB)" OFF)
+set(WTLS_BROTLI_MAX_LGWIN 22 CACHE STRING "Largest Brotli window the decoder accepts, as log2 of bytes (10..24); the decoder may allocate that much")
+set(WTLS_ZSTD_MAX_WINDOW_LOG 23 CACHE STRING "Largest zstd window the decoder accepts, as log2 of bytes (10..27); RFC 9659 caps HTTP at 23 (8 MiB)")
+if(WTLS_BROTLI)
+    FetchContent_Declare(brotli
+        URL https://files.pythonhosted.org/packages/2f/c2/f9e977608bdf958650638c3f1e28f85a1b075f075ebbe77db8555463787b/Brotli-1.1.0.tar.gz
+        URL_HASH SHA256=81de08ac11bcb85841e440c13611c00b67d3bf82698314928d0b676362546724
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR _wtls_no_cmake
+    )
+    FetchContent_MakeAvailable(brotli)
+    add_library(wtls_brotli OBJECT
+        ${brotli_SOURCE_DIR}/c/dec/bit_reader.c ${brotli_SOURCE_DIR}/c/dec/decode.c
+        ${brotli_SOURCE_DIR}/c/dec/huffman.c ${brotli_SOURCE_DIR}/c/dec/state.c
+        ${brotli_SOURCE_DIR}/c/common/constants.c ${brotli_SOURCE_DIR}/c/common/context.c
+        ${brotli_SOURCE_DIR}/c/common/dictionary.c ${brotli_SOURCE_DIR}/c/common/platform.c
+        ${brotli_SOURCE_DIR}/c/common/shared_dictionary.c ${brotli_SOURCE_DIR}/c/common/transform.c)
+    target_include_directories(wtls_brotli PUBLIC ${brotli_SOURCE_DIR}/c/include)
+    target_compile_options(wtls_brotli PRIVATE -w)
+endif()
+if(WTLS_ZSTD)
+    FetchContent_Declare(zstd
+        URL https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
+        URL_HASH SHA256=8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR _wtls_no_cmake
+    )
+    FetchContent_MakeAvailable(zstd)
+    add_library(wtls_zstd OBJECT
+        ${zstd_SOURCE_DIR}/lib/common/entropy_common.c ${zstd_SOURCE_DIR}/lib/common/error_private.c
+        ${zstd_SOURCE_DIR}/lib/common/fse_decompress.c ${zstd_SOURCE_DIR}/lib/common/zstd_common.c
+        ${zstd_SOURCE_DIR}/lib/common/xxhash.c
+        ${zstd_SOURCE_DIR}/lib/decompress/huf_decompress.c ${zstd_SOURCE_DIR}/lib/decompress/zstd_ddict.c
+        ${zstd_SOURCE_DIR}/lib/decompress/zstd_decompress.c ${zstd_SOURCE_DIR}/lib/decompress/zstd_decompress_block.c)
+    target_include_directories(wtls_zstd PUBLIC ${zstd_SOURCE_DIR}/lib)
+    target_compile_definitions(wtls_zstd PUBLIC ZSTD_STATIC_LINKING_ONLY PRIVATE ZSTD_DISABLE_ASM=1 ZSTD_LEGACY_SUPPORT=0 DYNAMIC_BMI2=0)
+    target_compile_options(wtls_zstd PRIVATE -w)
+endif()
 # Mbed TLS adds its own $<$<CONFIG:Release>:-O2> per target, after the global
 # options: repeat WTLS_OPT on each target so it comes last and wins.
 foreach(t mbedtls mbedx509 tfpsacrypto builtin everest p256-m platform utilities extras pqcp)
@@ -408,6 +451,20 @@ if(WTLS_ACCEL_P256)
     # tfpsacrypto -> wiitls link edge resolves it.
     target_sources(wiitls PRIVATE src/accel/p256_verify.c)
 endif()
+if(WTLS_GZIP OR WTLS_BROTLI OR WTLS_ZSTD)
+    target_sources(wiitls PRIVATE src/http/wtls_http_codec.c)
+    target_compile_definitions(wiitls PRIVATE WTLS_CODECS=1)
+endif()
+if(WTLS_BROTLI)
+    target_sources(wiitls PRIVATE src/http/wtls_http_br.c $<TARGET_OBJECTS:wtls_brotli>)
+    target_include_directories(wiitls PRIVATE ${brotli_SOURCE_DIR}/c/include)
+    target_compile_definitions(wiitls PRIVATE WTLS_BROTLI=1 WTLS_BROTLI_MAX_LGWIN=${WTLS_BROTLI_MAX_LGWIN})
+endif()
+if(WTLS_ZSTD)
+    target_sources(wiitls PRIVATE src/http/wtls_http_zstd.c $<TARGET_OBJECTS:wtls_zstd>)
+    target_include_directories(wiitls PRIVATE ${zstd_SOURCE_DIR}/lib)
+    target_compile_definitions(wiitls PRIVATE WTLS_ZSTD=1 ZSTD_STATIC_LINKING_ONLY WTLS_ZSTD_MAX_WINDOW_LOG=${WTLS_ZSTD_MAX_WINDOW_LOG})
+endif()
 if(WTLS_GZIP)
     target_sources(wiitls PRIVATE src/http/wtls_http_gzip.c $<TARGET_OBJECTS:wtls_zlib>)
     target_include_directories(wiitls PRIVATE ${zlib_SOURCE_DIR})
@@ -593,6 +650,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         wtls_fuzz_corpus_test(fuzz_http_gzip http_gzip)
     endif()
     wtls_fuzz_corpus_test(fuzz_client_cred client_cred)
+    if(WTLS_BROTLI)
+        wtls_fuzz_corpus_test(fuzz_http_br http_br)
+    endif()
+    if(WTLS_ZSTD)
+        wtls_fuzz_corpus_test(fuzz_http_zstd http_zstd)
+    endif()
     if(WTLS_HTTP2)
         wtls_fuzz_corpus_test(fuzz_hpack hpack)
         wtls_fuzz_corpus_test(fuzz_h2_frames h2_frames)
@@ -633,6 +696,12 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     add_dependencies(test_http wtls_test_certs)
     if(WTLS_GZIP)
         target_compile_definitions(test_http PRIVATE WTLS_GZIP=1)
+    endif()
+    if(WTLS_BROTLI)
+        target_compile_definitions(test_http PRIVATE WTLS_BROTLI=1)
+    endif()
+    if(WTLS_ZSTD)
+        target_compile_definitions(test_http PRIVATE WTLS_ZSTD=1)
     endif()
     target_compile_definitions(test_http PRIVATE WTLS_HTTP2=$<BOOL:${WTLS_HTTP2}>)
     set_tests_properties(test_http PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
@@ -700,6 +769,12 @@ if(WTLS_BUILD_FUZZ)
     list(APPEND _wtls_fuzz_targets fuzz_x25519_diff fuzz_p256_verify_diff fuzz_ws_frame fuzz_set_cookie)
     if(WTLS_HTTP2)
         list(APPEND _wtls_fuzz_targets fuzz_hpack fuzz_h2_frames)
+    endif()
+    if(WTLS_BROTLI)
+        list(APPEND _wtls_fuzz_targets fuzz_http_br)
+    endif()
+    if(WTLS_ZSTD)
+        list(APPEND _wtls_fuzz_targets fuzz_http_zstd)
     endif()
     foreach(ft ${_wtls_fuzz_targets})
         add_executable(${ft} tests/fuzz/${ft}.c)

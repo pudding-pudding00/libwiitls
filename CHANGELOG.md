@@ -35,6 +35,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- Optional `Content-Encoding: br` (`WTLS_BROTLI`) and `zstd` (`WTLS_ZSTD`) decoders, off by default, with window caps (`WTLS_BROTLI_MAX_LGWIN`, `WTLS_ZSTD_MAX_WINDOW_LOG`), `wtls_http_info::br` / `::zstd`, fuzz harnesses; the decoders sit behind a common codec interface.
 - `wtls_http_request::total_timeout_ms` (one deadline for connect, redirects, retries and body), `max_retries` / `retry_backoff_ms` / `retry_on_503` (exponential backoff with jitter, Retry-After), idempotent requests only; defaults keep the 1.0 behaviour.
 - Proxies: `user:pass@` in `proxy_url` (HTTP Basic Proxy-Authorization for CONNECT and forwarded requests) and `socks5://` / `socks5h://` proxies with optional username/password.
 - Cookie jar: `wtls_cookie_jar_new/free/clear/count` and `wtls_http_request::cookie_jar` (RFC 6265 subset, per redirect hop, in memory); `fuzz_set_cookie`.

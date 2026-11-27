@@ -965,7 +965,7 @@ static void http_gzip_offered(void) {
     wtls_http_response *r = get("/headers");
     if (!r) return;
     int last = 1;
-    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip, deflate\r\n") != NULL);
+    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip, deflate") != NULL);
     wtls_http_close(r);
     r = gz_open("/headers", true, NULL, 0);
     if (!r) return;
@@ -1001,13 +1001,13 @@ static void http_gzip_own_accept_encoding_raw(void) {
 
 static void http_gzip_unknown_encoding(void) {
     wtls_http_pool_flush();
-    expect_open_err("/encoding?name=br", WTLS_ERR_HTTP);
+    expect_open_err("/encoding?name=compress", WTLS_ERR_HTTP); /* br and zstd are known with their build options */
     wtls_http_response *r = get("/encoding?name=identity");
     if (!r) return;
     int last = 1;
     CHECK(strcmp(body_str(r, &last), "raw") == 0);
     wtls_http_close(r);
-    r = gz_open("/encoding?name=br", true, NULL, 0); /* not offered: passed through */
+    r = gz_open("/encoding?name=compress", true, NULL, 0); /* not offered: passed through */
     if (!r) return;
     CHECK(strcmp(body_str(r, &last), "raw") == 0);
     wtls_http_close(r);
@@ -2122,6 +2122,106 @@ static void http_proxy_plain_and_connect(void) {
     CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_ARG);
 }
 
+/* ---- br / zstd Content-Encoding ------------------------------------------ */
+
+#if WTLS_BROTLI || WTLS_ZSTD
+static int read_pattern(const char *file, const char *enc, size_t repeat_len, size_t want_len, wtls_http_info *info,
+                        bool *pattern_ok) {
+    char path[160];
+    snprintf(path, sizeof path, "/fixture?f=%s&enc=%s", file, enc);
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, path);
+    req.no_keepalive = true;
+    wtls_http_response *r = NULL;
+    int st = wtls_http_open(&r, &req);
+    *pattern_ok = false;
+    if (st != WTLS_OK) return st;
+    wtls_http_get_info(r, info);
+    size_t total = 0;
+    bool ok = true;
+    uint8_t buf[3000];
+    int k;
+    while ((k = wtls_http_read(r, buf, sizeof buf)) > 0) {
+        for (int i = 0; i < k; i++) ok &= buf[i] == (uint8_t)((total + (size_t)i) % repeat_len % 251);
+        total += (size_t)k;
+    }
+    wtls_http_close(r);
+    *pattern_ok = ok && total == want_len;
+    return k;
+}
+#endif
+
+#if WTLS_BROTLI
+static void http_brotli_decodes(void) {
+    wtls_http_pool_flush();
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000.br", "br", 1000000, 1000, &info, &ok), 0);
+    CHECK(ok && info.br && !info.gzip && !info.zstd);
+    CHECK_EQ_INT(read_pattern("pattern100000.br", "br", 1000000, 100000, &info, &ok), 0);
+    CHECK(ok);
+}
+
+static void http_brotli_window_too_big_limit(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern100000_bigwindow.br", "br", 1000000, 100000, &info, &ok), WTLS_ERR_HTTP_LIMIT);
+}
+
+static void http_brotli_truncated_is_io_error(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000_cut.br", "br", 1000000, 1000, &info, &ok), WTLS_ERR_IO);
+}
+#endif
+
+#if WTLS_ZSTD
+static void http_zstd_decodes(void) {
+    wtls_http_pool_flush();
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000.zst", "zstd", 1000000, 1000, &info, &ok), 0);
+    CHECK(ok && info.zstd && !info.gzip && !info.br);
+    CHECK_EQ_INT(read_pattern("pattern100000.zst", "zstd", 1000000, 100000, &info, &ok), 0);
+    CHECK(ok);
+    /* two frames back to back are one body */
+    CHECK_EQ_INT(read_pattern("pattern2x1000.zst", "zstd", 1000, 2000, &info, &ok), 0);
+    CHECK(ok);
+}
+
+static void http_zstd_window_too_big_limit(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern100000_bigwindow.zst", "zstd", 1000000, 100000, &info, &ok), WTLS_ERR_HTTP_LIMIT);
+}
+
+static void http_zstd_truncated_and_corrupt(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000_cut.zst", "zstd", 1000000, 1000, &info, &ok), WTLS_ERR_IO);
+    int rc = read_pattern("pattern1000_corrupt.zst", "zstd", 1000000, 1000, &info, &ok);
+    CHECK(rc != 0 || !ok); /* damaged data never passes as the original */
+}
+#endif
+
+#if WTLS_BROTLI || WTLS_ZSTD
+static void http_accept_encoding_lists_codecs(void) {
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/headers");
+    req.no_keepalive = true;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 4096, &res), WTLS_OK);
+    CHECK(res.body && contains_ci(res.body, "accept-encoding: gzip, deflate"));
+#if WTLS_BROTLI
+    CHECK(res.body && contains_ci(res.body, ", br"));
+#endif
+#if WTLS_ZSTD
+    CHECK(res.body && contains_ci(res.body, "zstd"));
+#endif
+    wtls_http_result_free(&res);
+}
+#endif
+
 /* ---- total deadline and retries ------------------------------------------- */
 
 static int flaky_count(const char *id) {
@@ -2691,6 +2791,19 @@ void wtls_suite_http(void) {
     RUN(http_open_streaming_progress);
     RUN(http_expect_100_continue);
     RUN(http_proxy_plain_and_connect);
+#if WTLS_BROTLI
+    RUN(http_brotli_decodes);
+    RUN(http_brotli_window_too_big_limit);
+    RUN(http_brotli_truncated_is_io_error);
+#endif
+#if WTLS_ZSTD
+    RUN(http_zstd_decodes);
+    RUN(http_zstd_window_too_big_limit);
+    RUN(http_zstd_truncated_and_corrupt);
+#endif
+#if WTLS_BROTLI || WTLS_ZSTD
+    RUN(http_accept_encoding_lists_codecs);
+#endif
     RUN(http_retry_io_error_then_ok);
     RUN(http_retry_never_post);
     RUN(http_retry_connect_refused_backs_off);
