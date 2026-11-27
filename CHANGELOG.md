@@ -4,6 +4,16 @@ All notable changes to libwiitls are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
+## [Unreleased]
+
+### Added
+
+- Status codes `WTLS_ERR_UNSUPPORTED` (-14), `WTLS_ERR_WS` (-53),
+  `WTLS_ERR_FILE` (-60) and `WTLS_ERR_INTEGRITY` (-61), used by the 1.1
+  features; `wtls_strerror()` describes them.
+- `test_abi`: compile-time guard that the 1.0 layout of `wtls_options`,
+  `wtls_http_request` and `wtls_http_info` stays unchanged.
+
 ## [1.0.1] - 2026-11-27
 
 ### Changed

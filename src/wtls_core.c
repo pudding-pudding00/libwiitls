@@ -14,6 +14,7 @@ const char *wtls_strerror(int status) {
     case WTLS_ERR_STATE:     return "invalid state";
     case WTLS_ERR_NOMEM:     return "out of memory";
     case WTLS_ERR_CANCELLED: return "operation cancelled";
+    case WTLS_ERR_UNSUPPORTED: return "feature not compiled in";
     case WTLS_ERR_ENTROPY:   return "entropy source failed";
     case WTLS_ERR_CLOCK:     return "system clock is not plausible (set the Wii clock or sync via SNTP)";
     case WTLS_ERR_NET:       return "network not initialised";
@@ -27,6 +28,9 @@ const char *wtls_strerror(int status) {
     case WTLS_ERR_HTTP:      return "malformed HTTP response";
     case WTLS_ERR_HTTP_LIMIT: return "HTTP limit exceeded";
     case WTLS_ERR_HTTP_REDIRECT: return "HTTP redirect refused or too many redirects";
+    case WTLS_ERR_WS:        return "WebSocket protocol error";
+    case WTLS_ERR_FILE:      return "file I/O error";
+    case WTLS_ERR_INTEGRITY: return "integrity check failed (digest or signature)";
     case WTLS_ERR_INTERNAL:  return "internal error";
     default:                 return "unknown error";
     }

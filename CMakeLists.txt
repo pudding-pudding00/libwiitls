@@ -486,6 +486,7 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     endfunction()
 
     wtls_host_test(test_smoke)
+    wtls_host_test(test_abi)
     wtls_host_test(test_jitter)
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)

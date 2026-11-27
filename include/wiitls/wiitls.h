@@ -55,6 +55,7 @@ typedef enum {
     WTLS_ERR_STATE     = -11,  /**< wtls_init() has not been called */
     WTLS_ERR_NOMEM     = -12,  /**< out of memory */
     WTLS_ERR_CANCELLED = -13,  /**< operation cancelled by abort_cb */
+    WTLS_ERR_UNSUPPORTED = -14, /**< feature not compiled into this build (CMake option off) */
     WTLS_ERR_ENTROPY   = -20,  /**< the random generator could not be seeded */
     WTLS_ERR_CLOCK     = -21,  /**< system clock implausible; call wtls_time_sync_sntp() */
     WTLS_ERR_NET       = -30,  /**< network not initialised */
@@ -68,6 +69,9 @@ typedef enum {
     WTLS_ERR_HTTP          = -50,  /**< malformed or unsupported HTTP response (<wiitls/http.h>) */
     WTLS_ERR_HTTP_LIMIT    = -51,  /**< response head, field count or fetch body over its limit */
     WTLS_ERR_HTTP_REDIRECT = -52,  /**< too many redirects, bad Location, or redirect https -> http */
+    WTLS_ERR_WS        = -53,  /**< WebSocket protocol error (<wiitls/websocket.h>) */
+    WTLS_ERR_FILE      = -60,  /**< file I/O error (download helper, CA bundle files) */
+    WTLS_ERR_INTEGRITY = -61,  /**< digest or signature mismatch */
     WTLS_ERR_INTERNAL  = -99,  /**< unexpected library error */
 } wtls_status;
 
