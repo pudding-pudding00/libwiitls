@@ -52,13 +52,36 @@ static int set_nonblocking(sock_t s) {
 /* QueryPerformanceCounter: GetTickCount64 only advances every ~16 ms. */
 void wtls_plat_sleep_ms(uint32_t ms) { Sleep(ms); }
 
-int wtls_plat_async_run(void (*fn)(void *), void *arg) {
-    (void)fn;
-    (void)arg;
-    return WTLS_ERR_UNSUPPORTED; /* the lookup then runs inline */
+static SRWLOCK s_async_lock = SRWLOCK_INIT;
+
+void wtls_plat_async_lock(void) { AcquireSRWLockExclusive(&s_async_lock); }
+void wtls_plat_async_unlock(void) { ReleaseSRWLockExclusive(&s_async_lock); }
+
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+} async_call;
+
+static DWORD WINAPI async_main(LPVOID p) {
+    async_call c = *(async_call *)p;
+    free(p);
+    c.fn(c.arg);
+    return 0;
 }
-void wtls_plat_async_lock(void) {}
-void wtls_plat_async_unlock(void) {}
+
+int wtls_plat_async_run(void (*fn)(void *), void *arg) {
+    async_call *c = malloc(sizeof *c);
+    if (!c) return WTLS_ERR_NOMEM;
+    c->fn = fn;
+    c->arg = arg;
+    HANDLE h = CreateThread(NULL, 256u * 1024u, async_main, c, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (!h) {
+        free(c);
+        return WTLS_ERR_UNSUPPORTED; /* the lookup then runs inline */
+    }
+    CloseHandle(h); /* detached */
+    return WTLS_OK;
+}
 
 uint64_t wtls_plat_now_ms(void) {
     static LARGE_INTEGER freq;

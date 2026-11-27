@@ -389,7 +389,11 @@ milliseconds. Everything the blocking call does applies (redirects, cookies,
 `total_timeout_ms`, retries, gzip, the keep-alive pool). The request structure and what it
 points to must stay valid until the head is complete; `body_cb` is called from
 `wtls_http_step()` and must not block. Not supported: proxies, `expect_100_continue`,
-`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii the host name lookup still happens inside the call.
+`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii two calls can still wait briefly: the host name lookup runs inside the call, and
+a send that is larger than the free space of IOS's ~4 KB socket buffer blocks until IOS has room
+(measured: up to 650 ms while the server stopped reading; see `docs/ios-socket-behaviour.md`). So
+"never waits" holds on the host, and on the Wii for everything but those two cases; keep the UI
+loop tolerant of an occasional stall of that size.
 
 #### HTTP/2 and several requests at once
 

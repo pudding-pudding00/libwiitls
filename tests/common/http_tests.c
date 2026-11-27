@@ -2278,6 +2278,13 @@ static void http_retry_never_post(void) {
     CHECK_EQ_INT(flaky_count("p1"), 1); /* a POST is not repeated */
 }
 
+/* Winsock retries the SYN to a closed port for about a second before it reports the refusal. */
+#if defined(_WIN32)
+#define REFUSED_ONE_MS 3000
+#else
+#define REFUSED_ONE_MS 150
+#endif
+
 static void http_retry_connect_refused_backs_off(void) {
     wtls_http_pool_flush();
     wtls_http_request req = {0};
@@ -2288,11 +2295,11 @@ static void http_retry_connect_refused_backs_off(void) {
     uint64_t t0 = wtls_plat_now_ms();
     CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
     uint64_t dt = wtls_plat_now_ms() - t0;
-    CHECK(dt >= 200 && dt < 2000);
+    CHECK(dt >= 200 && dt < 2000 + 3 * REFUSED_ONE_MS);
     req.max_retries = 0;
     t0 = wtls_plat_now_ms();
     CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
-    CHECK(wtls_plat_now_ms() - t0 < 150);
+    CHECK(wtls_plat_now_ms() - t0 < REFUSED_ONE_MS);
 }
 
 static void http_retry_503_retry_after(void) {

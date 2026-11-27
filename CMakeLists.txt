@@ -831,7 +831,7 @@ if(WTLS_INSTALL)
     include(CMakePackageConfigHelpers)
 
     set(_wtls_need_threads FALSE)
-    if(WTLS_PLATFORM STREQUAL "host" AND NOT WIN32 AND (WTLS_THREAD_CHECK OR CMAKE_BUILD_TYPE STREQUAL "Debug"))
+    if(WTLS_PLATFORM STREQUAL "host" AND NOT WIN32) # asynchronous DNS helper thread (and the thread check in Debug)
         set(_wtls_need_threads TRUE)
     endif()
 

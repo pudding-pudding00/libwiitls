@@ -167,7 +167,8 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
  * @p req and everything it points to (URL, headers, body, callbacks, tls) must
  * stay valid until the head is complete or the call failed; body_cb is called
  * from within wtls_http_step() and must not block. Not supported (WTLS_ERR_UNSUPPORTED):
- * proxy_url, expect_100_continue and allow_upgrade. https:// requests negotiate HTTP/2: the connection
+ * proxy_url, expect_100_continue and allow_upgrade. On the Wii the host name lookup and a send larger than IOS's
+ * socket buffer space can still block briefly (docs/usage.md). https:// requests negotiate HTTP/2: the connection
  * is shared with other requests started this way to the same host, each on a stream of its own (see
  * docs/usage.md); wtls_http_pool_flush() closes the idle sessions and retires the busy ones.
  * Redirects, cookies, total_timeout_ms, retries (without sleeping: the wait
