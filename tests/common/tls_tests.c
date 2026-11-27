@@ -461,10 +461,12 @@ static void test_nonblocking_write_retry_after_read(void) {
     }
     CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
     size_t off = 0, waits = 0;
-    uint64_t end = wtls_plat_now_ms() + 30000;
+    uint64_t end = wtls_plat_now_ms() + 30000, longest = 0;
     while (off < total && wtls_plat_now_ms() < end) {
         size_t n = total - off < piece ? total - off : piece;
+        uint64_t w0 = wtls_plat_now_ms();
         int k = wtls_write(c, pat + off % 251, n);
+        if (wtls_plat_now_ms() - w0 > longest) longest = wtls_plat_now_ms() - w0;
         if (k < 0 && k != WTLS_WANT_WRITE && k != WTLS_WANT_READ) {
             CHECK_EQ_INT(k, 0);
             break;
@@ -479,7 +481,10 @@ static void test_nonblocking_write_retry_after_read(void) {
             }
         }
     }
-    CHECK(waits > 0); /* otherwise the test did not exercise anything */
+    TLOG("  incomplete writes: %lu, longest non-blocking write: %lu ms\n", (unsigned long)waits, (unsigned long)longest);
+    /* IOS decides whether the send buffer ever looks full; on the host a run without that proves nothing. */
+    if (waits == 0 && g_env.is_hw) SKIP("the socket never refused data: the retry path did not run");
+    else CHECK(waits > 0);
     CHECK_EQ_INT((long)off, (long)total);
     CHECK_EQ_INT(wtls_set_nonblocking(c, false), WTLS_OK);
     char line[64], want[48];

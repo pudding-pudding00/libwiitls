@@ -2436,7 +2436,8 @@ static void http_socks5_connect(void) {
     CHECK_EQ_INT(rc, WTLS_OK);
     CHECK_EQ_INT(status, 200);
     CHECK(strcmp(body, "hello") == 0);
-    CHECK_EQ_INT(socks_atyp(), 3); /* socks5h: the proxy gets the name */
+    uint32_t ip; /* socks5h: the proxy gets the name; an address (the Wii runner) still goes as IPv4 */
+    CHECK_EQ_INT(socks_atyp(), wtls_plat_parse_ipv4(g_env.server_host, &ip) ? 1 : 3);
     fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
     CHECK_EQ_INT(rc, WTLS_OK); /* https through the tunnel, verified against the target name */
     CHECK(strcmp(body, "hello") == 0);
