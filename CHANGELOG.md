@@ -4,7 +4,7 @@ All notable changes to libwiitls are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
-## [Unreleased]
+## [1.0.1] - 2026-11-27
 
 ### Changed
 
@@ -111,4 +111,5 @@ zlib 1.3.1.
 - HTTP/2: following a redirect no longer leaks the previous response's header
   buffer.
 
+[1.0.1]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0
