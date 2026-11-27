@@ -452,6 +452,9 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     if(NOT Python3_Interpreter_FOUND)
         message(FATAL_ERROR "Host tests need Python 3 (test servers, certificate generation)")
     endif()
+    # The release check behind .github/workflows/maintenance.yml.
+    add_test(NAME update_dep_tool
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_update_dep.py)
     # Test PKI (tests/host/make_certs.py, OpenSSL CLI) in ${CMAKE_BINARY_DIR}/certs.
     find_program(WTLS_OPENSSL openssl REQUIRED)
     set(WTLS_TEST_CERT_DIR ${CMAKE_BINARY_DIR}/certs)
