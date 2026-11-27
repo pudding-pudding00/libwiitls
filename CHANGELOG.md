@@ -35,6 +35,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- CMake options `WTLS_SSL_OUT_CONTENT_LEN` and `WTLS_SSL_IN_CONTENT_LEN` to
+  shrink the per-connection record buffers (default 16384: unchanged). A
+  smaller receive buffer enables the `record_size_limit` / `max_fragment_length`
+  extensions and needs servers that honour them.
 - `wtls_options::spki_pins_ext` / `n_spki_pins_ext` (up to
   `WTLS_SPKI_MAX_PINS_EXT` = 4 further SPKI pins, six in total); the 1.0
   `spki_pins` array is unchanged. Pin sets stay isolated in the session-ticket

@@ -57,6 +57,11 @@ jobs:
           cmake -S . -B build-host -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release
           cmake --build build-host
           ctest --test-dir build-host --output-on-failure
+      - name: Build and test (small send buffer)
+        run: |
+          cmake -S . -B build-small -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DWTLS_SSL_OUT_CONTENT_LEN=2048
+          cmake --build build-small
+          ctest --test-dir build-small --output-on-failure
       - name: Build and test (Debug + Thread Guard)
         run: |
           cmake -S . -B build-debug -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Debug

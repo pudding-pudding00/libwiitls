@@ -619,8 +619,17 @@ called again afterwards.
   hardware, but has not been evaluated independently. Keep this in mind
   before protecting high-value secrets.
 - **Single thread**, see 3.
-- **Memory:** each connection holds Mbed TLS's record buffers (two 16 KiB
-  buffers plus overhead), allocated from the normal heap.
+- **Memory:** each connection holds Mbed TLS's record buffers (a 16 KiB receive
+  and a 16 KiB send buffer plus overhead), allocated from the normal heap (or
+  your allocator, 9b). Build options `-DWTLS_SSL_OUT_CONTENT_LEN=<n>` and
+  `-DWTLS_SSL_IN_CONTENT_LEN=<n>` (512..16384) shrink them. A smaller **send**
+  buffer is always safe (the library just writes smaller records; the handshake
+  needs about 2 KiB or more with long certificate chains): `4096` saves 12 KiB per
+  connection. A smaller **receive** buffer works only if the server honours the
+  `record_size_limit` (TLS 1.3, RFC 8449) or `max_fragment_length` (TLS 1.2, sizes
+  512-4096) extension the client then sends; otherwise connections to that
+  server fail with large records. Many servers (including OpenSSL-based ones)
+  ignore them, so test your targets before shipping a small receive buffer.
 
 ## 12. Versioning and compatibility
 

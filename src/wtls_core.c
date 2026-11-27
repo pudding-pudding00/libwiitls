@@ -265,5 +265,17 @@ int wtls_conf_setup(mbedtls_ssl_config *conf, const wtls_options *opt) {
         r = mbedtls_ssl_conf_alpn_protocols(conf, (const char **)opt->alpn);
         if (r != 0) return r;
     }
+#if WTLS_SSL_IN_CONTENT_LEN < 16384
+    /* TLS 1.3 gets the record_size_limit extension from the build option; TLS 1.2 has
+     * max_fragment_length, which only knows 512, 1024, 2048 and 4096. */
+    {
+        unsigned char mfl = WTLS_SSL_IN_CONTENT_LEN >= 4096   ? MBEDTLS_SSL_MAX_FRAG_LEN_4096
+                            : WTLS_SSL_IN_CONTENT_LEN >= 2048 ? MBEDTLS_SSL_MAX_FRAG_LEN_2048
+                            : WTLS_SSL_IN_CONTENT_LEN >= 1024 ? MBEDTLS_SSL_MAX_FRAG_LEN_1024
+                                                              : MBEDTLS_SSL_MAX_FRAG_LEN_512;
+        r = mbedtls_ssl_conf_max_frag_len(conf, mfl);
+        if (r != 0) return r;
+    }
+#endif
     return 0;
 }
