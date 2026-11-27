@@ -566,6 +566,24 @@ FAT cannot rename over an existing file, so the old file is moved to `.old`
 first: call `wtls_http_download_recover(path)` at start-up (the download
 function does it too) to repair a power loss in that moment.
 
+## 9e. Refreshing the CA bundle from SD/USB
+
+The embedded bundle is a snapshot. Ship a fresh `cacert.pem` next to your app
+and load it at start-up:
+
+```c
+size_t n;
+if (wtls_load_ca_bundle_file("sd:/apps/myapp/cacert.pem", true, &n) != WTLS_OK) {
+    /* nothing changed: the embedded bundle stays in use */
+}
+```
+
+`replace_builtin = true` trusts only the file; `false` adds it to the embedded
+roots. To make sure nobody swapped the file, sign it and use
+`wtls_load_ca_bundle_file_signed()` with a public key built into the app (see
+9c). The file is streamed and kept as DER (about 150 KiB), parsed lazily.
+Needs `wtls_init()`. Cached session tickets and idle connections are dropped.
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets

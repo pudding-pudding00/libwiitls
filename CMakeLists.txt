@@ -340,6 +340,7 @@ add_library(wiitls STATIC
     src/wtls_log.c
     src/wtls_mem.c
     src/wtls_sig.c
+    src/wtls_castore_file.c
     src/wtls_keylog.c
     src/http/wtls_url.c
     src/http/wtls_http_req.c
@@ -503,6 +504,11 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
     wtls_host_test(test_time)
     wtls_host_server_test(test_plat tests/common/plat_tests.c)
     wtls_host_test(test_castore)
+    wtls_host_test(test_castore_file)
+    target_compile_definitions(test_castore_file PRIVATE
+        WTLS_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/host/fixtures"
+        WTLS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+        WTLS_EMBED_CA=$<BOOL:${WTLS_EMBED_CA}>)
     wtls_host_test(test_scache)
     wtls_host_test(test_dns)
     wtls_host_test(test_crypto tests/common/crypto_tests.c)

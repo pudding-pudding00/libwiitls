@@ -182,6 +182,39 @@ wtls_status wtls_add_trusted_ca(const uint8_t *buf, size_t len);
 void        wtls_reset_trusted_cas(bool keep_builtin);
 
 /**
+ * Loads CA certificates from a PEM file such as cacert.pem (SD card or USB),
+ * so trust anchors can be refreshed without a new build. Every
+ * "BEGIN CERTIFICATE" block that parses is used; other blocks, broken
+ * certificates and text around them are ignored. The file is streamed; the
+ * certificates stay in memory as DER (about 150 KiB for the Mozilla list) and
+ * are parsed lazily like the embedded bundle. A bundle loaded earlier from a
+ * file is replaced.
+ *
+ * @p replace_builtin true: afterwards only the file's CAs are trusted (like
+ * wtls_reset_trusted_cas(false), so CAs added with wtls_add_trusted_ca() are
+ * dropped too). false: the file's CAs are added to the built-in ones. Either
+ * way cached session tickets and idle pooled connections are dropped. On any
+ * error the trust store is unchanged.
+ *
+ * @param n_loaded may be NULL; receives the number of certificates taken.
+ * @return WTLS_OK; WTLS_ERR_FILE (cannot open or read); WTLS_ERR_ARG (no usable
+ *         certificate in the file); WTLS_ERR_NOMEM; WTLS_ERR_STATE.
+ */
+wtls_status wtls_load_ca_bundle_file(const char *path, bool replace_builtin, size_t *n_loaded);
+
+/**
+ * Like wtls_load_ca_bundle_file(), but only if @p sig_path holds a valid ECDSA
+ * P-256 / SHA-256 signature (DER, as written by `tools/sign_payload.py sign`)
+ * over the exact bytes of the file, made with the key matching @p pubkey (65-byte
+ * point or SPKI, see <wiitls/sig.h>). Otherwise WTLS_ERR_INTEGRITY and the trust
+ * store stays as it was. Link against the library as usual: this pulls in the
+ * signature code.
+ */
+wtls_status wtls_load_ca_bundle_file_signed(const char *path, const char *sig_path,
+                                            const uint8_t *pubkey, size_t pubkey_len,
+                                            bool replace_builtin, size_t *n_loaded);
+
+/**
  * Loads a client certificate chain and the matching private key for mutual
  * TLS (set wtls_options::client_cred to present it).
  *
