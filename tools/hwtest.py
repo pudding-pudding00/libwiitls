@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Run a libwiitls hardware test suite on a real Wii.
+"""Run a libwiitls hardware test suite on a real Wii or in Dolphin.
 
 Starts a TCP log listener and tests/host/tls_test_server.py (bound to 0.0.0.0),
-sends the DOL with wiiload and prints the log. Exit code 0 only if the runner
-reports "WTLS-HWTEST DONE pass=P fail=0".
+sends the DOL with wiiload (or boots it in Dolphin, arguments via meta.xml)
+and prints the log. Exit code 0 only if the runner reports
+"WTLS-HWTEST DONE pass=P fail=0".
 
   python tools/hwtest.py --wii <wii-ip> --dol build-wii/tests/hw/wtls_hwtest.dol --suite selftest
+  python tools/hwtest.py --dolphin <path>/Dolphin.exe --dol ... --suite entropy \
+      [--dolphin-config Core.CPUCore=0 ...]
 """
 import argparse
 import os
@@ -16,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from xml.sax.saxutils import escape
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DONE_RE = re.compile(r"WTLS-HWTEST DONE pass=(\d+) fail=(\d+)")
@@ -44,9 +48,31 @@ def find_wiiload():
     sys.exit("wiiload not found (install devkitPro tools)")
 
 
+def start_dolphin(dolphin, dol, runner_args, config, work):
+    """Boots dol in Dolphin with runner_args as homebrew arguments: Dolphin
+    reads them from a meta.xml next to the DOL, as the Homebrew Channel does."""
+    app = os.path.join(work, "wtls_hwtest")
+    os.makedirs(app)
+    shutil.copy(dol, os.path.join(app, "boot.dol"))
+    args_xml = "".join(f"<arg>{escape(a)}</arg>" for a in runner_args)
+    with open(os.path.join(app, "meta.xml"), "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                f"<app version=\"1\"><name>wtls_hwtest</name><arguments>{args_xml}</arguments></app>\n")
+    cmd = [dolphin, "-b"]
+    for c in config:
+        cmd += ["-C", c if c.split("=", 1)[0].count(".") >= 2 else "Dolphin." + c]
+    cmd += ["-e", os.path.join(app, "boot.dol")]
+    print("hwtest: " + " ".join(cmd), file=sys.stderr)
+    return subprocess.Popen(cmd)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wii", required=True, help="IP address of the Wii (Homebrew Channel running)")
+    target = ap.add_mutually_exclusive_group(required=True)
+    target.add_argument("--wii", help="IP address of the Wii (Homebrew Channel running)")
+    target.add_argument("--dolphin", help="path to Dolphin.exe / dolphin-emu: run in the emulator instead")
+    ap.add_argument("--dolphin-config", nargs="*", default=[],
+                    help="Dolphin config overrides, e.g. Core.CPUCore=0 (interpreter) Core.SyncGPU=True")
     ap.add_argument("--dol", required=True)
     ap.add_argument("--suite", required=True)
     ap.add_argument("--timeout", type=int, default=120)
@@ -54,28 +80,35 @@ def main():
     ap.add_argument("--extra", nargs="*", default=[], help="extra key=value runner args")
     args = ap.parse_args()
 
-    my_ip = local_ip_towards(args.wii)
+    # Dolphin's emulated sockets are host sockets: the PC is reachable as itself.
+    my_ip = local_ip_towards(args.wii) if args.wii else local_ip_towards("192.0.2.1")
     ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ls.bind(("0.0.0.0", args.logport))
     ls.listen(1)
-    ls.settimeout(args.timeout)
+    # Dolphin needs a while to boot (and much longer with the interpreter).
+    ls.settimeout(args.timeout if args.wii else max(args.timeout, 300))
 
     # Test PKI whose leaf certificates also carry this PC's IP as iPAddress SAN.
-    cert_dir = tempfile.mkdtemp(prefix="wtls-hwcerts-")
+    work = tempfile.mkdtemp(prefix="wtls-hw-")
+    cert_dir = os.path.join(work, "certs")
     subprocess.run([sys.executable, os.path.join(ROOT, "tests", "host", "make_certs.py"),
                     "--out", cert_dir, "--extra-ip", my_ip], check=True)
     server = subprocess.Popen(
         [sys.executable, os.path.join(ROOT, "tests", "host", "tls_test_server.py"), "--bind", "0.0.0.0",
          "--certs", cert_dir],
         stdout=subprocess.PIPE, text=True)
+    emu = None
     try:
         if server.stdout.readline().strip() != "READY":
             sys.exit("test server failed to start")
-        env = dict(os.environ, WIILOAD=f"tcp:{args.wii}")
         runner_args = [f"logip={my_ip}", f"logport={args.logport}", f"suite={args.suite}",
                        f"server={my_ip}", f"pctime={int(time.time())}"] + args.extra
-        subprocess.run([find_wiiload(), args.dol] + runner_args, env=env, check=True)
+        if args.wii:
+            env = dict(os.environ, WIILOAD=f"tcp:{args.wii}")
+            subprocess.run([find_wiiload(), args.dol] + runner_args, env=env, check=True)
+        else:
+            emu = start_dolphin(args.dolphin, args.dol, runner_args, args.dolphin_config, work)
 
         conn, _ = ls.accept()
         conn.settimeout(args.timeout)
@@ -101,9 +134,15 @@ def main():
             return 2
         return 0 if int(result.group(2)) == 0 else 1
     finally:
+        if emu:
+            emu.terminate()
+            try:
+                emu.wait(10)
+            except subprocess.TimeoutExpired:
+                emu.kill()
         server.terminate()
-        shutil.rmtree(cert_dir, ignore_errors=True)
         ls.close()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":
