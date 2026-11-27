@@ -53,3 +53,17 @@ Unit tests drive the session with scripted server bytes (SETTINGS changes, GOAWA
 CONTINUATION, trailers, flow control, cancelled streams); a concurrent test server
 (`tests/host/tls_test_server.py`, ports 4449 and 4450) checks interleaving, fairness, cancel, the stream
 limit and retry after GOAWAY end to end; a libFuzzer harness feeds the session arbitrary server bytes.
+
+## As built (differences from the plan above)
+
+- Until the server's first SETTINGS frame is processed the session opens one stream only (the server's
+  `MAX_CONCURRENT_STREAMS` may be lower than "unlimited"). Requests to a host whose session is in that state wait
+  like requests behind a negotiating connection.
+- A session with all its streams busy: waiting requests give it `H2_SLOT_WAIT_MS` (1 s), then connect
+  on their own. A handshake is expensive on a Wii; a second connection is the fallback, not the default.
+- Stream ids are assigned when the request headers are queued, not when the stream is opened: ids must appear
+  on the wire in increasing order.
+- A stream that finished completely is detached at its end (its slot frees at once); the response keeps working.
+- `h2s_pump()` processes at most 64 frames per call and says so with `h2s_pending()`.
+- The blocking engine now decodes trailer blocks as well (`wtls_hpack_decode_trailers`); before that a trailer
+  that added a table entry desynchronised the connection.

@@ -389,8 +389,34 @@ milliseconds. Everything the blocking call does applies (redirects, cookies,
 `total_timeout_ms`, retries, gzip, the keep-alive pool). The request structure and what it
 points to must stay valid until the head is complete; `body_cb` is called from
 `wtls_http_step()` and must not block. Not supported: proxies, `expect_100_continue`,
-`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). HTTP/2 is not used by this call: it speaks
-HTTP/1.1. On the Wii the host name lookup still happens inside the call.
+`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii the host name lookup still happens inside the call.
+
+#### HTTP/2 and several requests at once
+
+Over `https://` the stepping API negotiates HTTP/2 (unless `no_h2` is set). Requests started this way
+to the same host share **one connection**: each one gets a stream of its own, so a slow
+download does not hold up a small request, and a connection that cost a handshake on a Wii is
+used for all of them. Details worth knowing:
+
+- At most `WTLS_H2_MAX_STREAMS` streams (CMake, default 4) are open at once, fewer if the server
+  advertises a lower `SETTINGS_MAX_CONCURRENT_STREAMS`. Until the server's first SETTINGS have
+  arrived only one stream is opened. A request that does not fit waits for a free stream for up to a
+  second, then opens a connection of its own.
+- Memory per connection is `streams x WTLS_H2_STREAM_WINDOW` (default 4 x 32 KiB) plus the TLS
+  record buffers. The window is also the flow-control window of each stream: the library
+  announces more credit only for bytes you have **read**, so a response you do not read stops the
+  server for that stream, and nothing else is held up.
+- `wtls_http_close()` on an unfinished response cancels its stream (`RST_STREAM`) and leaves the
+  connection to the others.
+- If the server sends `GOAWAY` or refuses a stream, or the connection was gone when the request went out,
+  an idempotent request without a streaming body is repeated on a new connection by itself (at most
+  three times); anything else fails with `WTLS_ERR_IO`.
+- `wtls_http_get_fd()` of responses on one connection is the same descriptor; step every response that
+  `wtls_http_wait()` reports as possibly ready (it tells how many, not which).
+- `wtls_http_pool_flush()` closes idle sessions and closes busy ones with their last response; idle
+  ones go after 60 s anyway.
+- Blocking `wtls_http_open()` keeps its own pooled HTTP/2 connection (one stream at a time); the two do
+  not share connections.
 
 ### Deadlines and retries
 

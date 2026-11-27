@@ -8,6 +8,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- **HTTP/2 trailers (blocking engine):** trailers of a response were skipped without HPACK decoding, so a trailer that added a dynamic table entry left the client's table out of step with the server's for the next request on that connection (decoding error or wrong header). They are decoded and dropped now.
 - **HPACK heap use-after-free (HTTP/2):** a response header block with a
   literal-with-indexing field whose name referred to a dynamic table entry,
   and whose insertion evicted that very entry, copied the name out of freed
@@ -17,6 +18,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Added
 
+- **Non-blocking HTTP requests:** `wtls_http_start()`, `wtls_http_step()`, `wtls_http_get_fd()`, `wtls_http_pending()` and `wtls_http_wait()` run a request (redirects, cookies, retries, deadlines, gzip, keep-alive pool) as a state machine that never waits; `wtls_http_read()` on such a response returns `WTLS_WANT_READ` instead of waiting. Not supported (`WTLS_ERR_UNSUPPORTED`): proxies, `expect_100_continue`, `allow_upgrade`.
+- **HTTP/2 multiplexing in the non-blocking API:** requests started with `wtls_http_start()` to one `https://` host share a single HTTP/2 connection with one stream each (`WTLS_H2_MAX_STREAMS`, default 4, `WTLS_H2_STREAM_WINDOW`, default 32 KiB; both CMake options). Per-stream flow control credits only what the application has read, a closed response cancels just its stream, `GOAWAY`/`REFUSED_STREAM` repeat idempotent requests on a new connection. New engine `wtls_h2s`, new `fuzz_h2s_frames` harness, concurrent HTTP/2 test server (ports 4449/4450).
 - HPACK and HTTP/2 frame fuzz harnesses (`fuzz_hpack`, `fuzz_h2_frames`); the
   frame engine now runs over an internal transport interface so it can be
   fuzzed without a socket.
