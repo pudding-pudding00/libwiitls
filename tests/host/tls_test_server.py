@@ -68,6 +68,14 @@ ignored, so a test can tag its requests and count them with /count.
                                   half of the gzip stream (framing complete);
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+  GET /file?n=N[&etag=E][&etag2=E2][&cut=K][&once=ID][&ranges=0]
+                                  N pattern bytes (pattern(N)) with ETag "E" (default v1) and
+                                  Accept-Ranges. "Range: bytes=S-" is honoured (206, or 416 with
+                                  "Content-Range: bytes */N" when S >= N) unless ranges=0 or an
+                                  If-Range does not match the ETag (then 200, whole file).
+                                  cut=K: after K body bytes the TCP connection is dropped
+                                  once=ID: cut and etag=E apply to the first request carrying this
+                                  ID only; later ones are served whole, with ETag E2 if given
 
 Prints "READY" on stdout once every listener is bound.
 """
@@ -83,6 +91,7 @@ import urllib.parse
 import zlib
 
 PLAIN_PORT = 4430
+FILE_SEEN = set()  # ids of /file requests seen with once=ID
 CERT_DIR = None
 
 
@@ -566,6 +575,39 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             send(b"0\r\n\r\n")
         else:
             send(http_response(200, [enc, ("Content-Length", len(z))], z))
+    elif path == "/file":
+        etag = '"%s"' % query.get("etag", "v1")
+        cut = int(query.get("cut", "-1"))
+        once = query.get("once")
+        if once is not None:
+            with HTTP_LOG_LOCK:
+                first = once not in FILE_SEEN
+                FILE_SEEN.add(once)
+            if not first:
+                cut = -1
+                etag = '"%s"' % query.get("etag2", query.get("etag", "v1"))
+        fields = {}
+        for line in head.replace(b"\r\n", b"\n").split(b"\n")[1:]:
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                fields[k.strip().lower().decode()] = v.strip().decode()
+        start = 0
+        rng = fields.get("range", "")
+        if query.get("ranges", "1") != "0" and rng.startswith("bytes=") and fields.get("if-range", etag) == etag:
+            start = int(rng[6:].split("-")[0])
+            if start >= n:
+                send(http_response(416, [("Content-Range", "bytes */%d" % n), ("Content-Length", 0), ("ETag", etag)]))
+                return True
+        body = pattern(n - start, start)
+        hdrs = [("ETag", etag), ("Accept-Ranges", "bytes"), ("Content-Length", len(body))]
+        if start:
+            hdrs.append(("Content-Range", "bytes %d-%d/%d" % (start, n - 1, n)))
+        send(http_response(206 if start else 200, hdrs))
+        if 0 <= cut < len(body):
+            send(body[:cut])
+            tcp_abort(sock)
+            return False
+        send(body)
     elif path == "/encoding":
         send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
     elif path == "/who":

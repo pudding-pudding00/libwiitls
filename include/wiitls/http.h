@@ -297,6 +297,58 @@ wtls_status wtls_http_format_range(uint64_t start, uint64_t end, bool has_end,
 wtls_status wtls_http_check_resume(const wtls_http_response *r, uint64_t resume_from,
                                    uint64_t *append_offset, int64_t *total_len);
 
+/** Options of wtls_http_download(). Zero-initialise; new fields are appended. */
+typedef struct {
+    const uint8_t *sha256;      /**< optional expected SHA-256 of the whole file (32 bytes) */
+    const uint8_t *sig;         /**< optional ECDSA P-256 signature over the file (see <wiitls/sig.h>) */
+    size_t sig_len;
+    int sig_format;             /**< a wtls_sig_format value (0 = raw r||s, 1 = DER) */
+    const uint8_t *sig_pubkey;  /**< required with sig: 65-byte point or SPKI */
+    size_t sig_pubkey_len;
+    bool no_resume;             /**< discard a leftover <path>.part and start over */
+    uint32_t sync_every_bytes;  /**< 0 => 262144: flush + fsync the .part file at this spacing */
+    uint64_t max_size;          /**< 0 => unlimited; a larger file is WTLS_ERR_HTTP_LIMIT */
+} wtls_http_download_opts;
+
+/** Result of wtls_http_download(). */
+typedef struct {
+    int status;            /**< last HTTP status */
+    uint64_t size;         /**< size of the finished file */
+    uint64_t resumed_from; /**< bytes taken over from an earlier attempt (0 = from the start) */
+    uint8_t sha256[32];    /**< SHA-256 of the finished file */
+} wtls_http_download_result;
+
+/**
+ * Downloads req->url to @p path through "<path>.part" (and a small
+ * "<path>.part.meta" with the validators), resuming an interrupted attempt with
+ * Range / If-Range, and replaces @p path only when the file is complete and
+ * verified. Needs wtls_init(); includes the HTTP client's rules otherwise.
+ *
+ * - Only plain GET requests: method must be NULL or "GET", no body. gzip is
+ *   never requested, and req->progress_cb is called with the total progress
+ *   including the resumed part.
+ * - A resume is only attempted when the server gave a validator (strong ETag
+ *   or Last-Modified); if the file changed, the server ignores Range, or the
+ *   .part file does not fit, the download restarts from byte 0.
+ * - On errors the .part file stays for a later resume, except WTLS_ERR_INTEGRITY
+ *   (digest or signature wrong): both temporary files are deleted and @p path
+ *   is untouched.
+ * - Power loss during the final replacement: call wtls_http_download_recover().
+ *   (wtls_http_download() calls it first as well.)
+ *
+ * @return WTLS_OK, WTLS_ERR_FILE, WTLS_ERR_INTEGRITY, WTLS_ERR_HTTP (status
+ *         not 2xx), WTLS_ERR_HTTP_LIMIT, WTLS_ERR_IO (truncated body), WTLS_ERR_ARG,
+ *         or any error of wtls_http_open().
+ */
+wtls_status wtls_http_download(const wtls_http_request *req, const char *path,
+                               const wtls_http_download_opts *opt, wtls_http_download_result *out);
+
+/**
+ * Repairs an interrupted replacement: if "<path>.old" exists and @p path does
+ * not, the old file comes back; if both exist, "<path>.old" is deleted.
+ */
+wtls_status wtls_http_download_recover(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

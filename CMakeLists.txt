@@ -348,6 +348,7 @@ add_library(wiitls STATIC
     src/http/wtls_http_util.c
     src/http/wtls_http.c
     src/http/wtls_http_pool.c
+    src/http/wtls_http_download.c
     ${WTLS_CA_BUNDLE_C}
     src/plat/plat_common.c
     src/plat/plat_${WTLS_PLATFORM}.c
@@ -574,6 +575,9 @@ if(WTLS_BUILD_TESTS AND WTLS_PLATFORM STREQUAL "host")
         target_compile_definitions(test_alloc PRIVATE WTLS_GZIP=1)
     endif()
     set_tests_properties(test_alloc PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
+    wtls_host_server_test(test_download tests/common/download_tests.c)
+    add_dependencies(test_download wtls_test_certs)
+    set_tests_properties(test_download PROPERTIES ENVIRONMENT "WTLS_TEST_CERT_DIR=${WTLS_TEST_CERT_DIR}")
     wtls_host_server_test(test_http tests/common/http_tests.c)
     add_dependencies(test_http wtls_test_certs)
     if(WTLS_GZIP)

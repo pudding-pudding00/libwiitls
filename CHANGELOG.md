@@ -35,6 +35,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
   (accelerators against Everest and the builtin ECDSA), run in CI.
 - Project Wycheproof X25519 and ECDSA P-256 vectors in the `crypto` suite
   (`tools/gen_wycheproof.py` regenerates `tests/common/wycheproof_*.inc`).
+- `wtls_http_download()` / `wtls_http_download_recover()`: download to a file
+  through `<path>.part` with resume (`Range` / `If-Range`), size limit, SHA-256
+  and signature check, progress including the resumed part, and a replacement
+  that survives power loss on FAT.
 - `<wiitls/sig.h>`: `wtls_sig_verify_p256()` (ECDSA P-256 / SHA-256, raw or
   canonical DER signatures, raw point or SPKI keys), a digest variant and
   incremental `wtls_sha256_*`; `tools/sign_payload.py` creates keys and

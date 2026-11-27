@@ -546,6 +546,26 @@ For files too big for memory, hash while downloading (`wtls_sha256_init/update/f
 and call `wtls_sig_verify_p256_digest()`. ECDSA P-256 with SHA-256 only; the
 signature format is passed explicitly (`WTLS_SIG_RAW` or canonical `WTLS_SIG_DER`).
 
+## 9d. Downloading a file (with resume)
+
+```c
+wtls_http_request req = {0};
+req.url = "https://example.com/app.bin";
+wtls_http_download_opts opt = {0};
+opt.sha256 = expected_digest;                 /* and/or a signature, see 9c */
+wtls_http_download_result res;
+wtls_status st = wtls_http_download(&req, "sd:/apps/app.bin", &opt, &res);
+```
+
+The data goes to `sd:/apps/app.bin.part` first; `.part.meta` records the URL and
+the server's validator (strong `ETag` or `Last-Modified`). After a dropped
+connection, a crash or a power loss, the same call resumes with `Range` /
+`If-Range`; if the file changed or the server ignores ranges, it starts over.
+The final file is replaced only after the digest and signature checks pass.
+FAT cannot rename over an existing file, so the old file is moved to `.old`
+first: call `wtls_http_download_recover(path)` at start-up (the download
+function does it too) to repair a power loss in that moment.
+
 ## 10. Shutting down
 
 Close every connection, then `wtls_shutdown()`. It wipes the session tickets
