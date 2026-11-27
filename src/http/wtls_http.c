@@ -64,6 +64,7 @@ struct wtls_http_response {
     uint64_t remaining;  /* WTLS_BODY_LENGTH */
     wtls_chunked chunked;
     int err;             /* sticky read error */
+    uint64_t deadline_ms; /* total_timeout_ms: absolute, 0 = none */
     bool eof;            /* body read to its end */
     bool head_request;
     bool is_http2;
@@ -96,6 +97,7 @@ struct wtls_http_response {
 
 #define DEF_CONNECT_MS 5000u
 #define DEF_IO_MS 15000u
+#define DEF_HANDSHAKE_MS 10000u
 
 static int plain_poll_wait(http_tr *t, bool rd, bool wr, uint64_t deadline) {
     for (;;) {
@@ -295,6 +297,7 @@ typedef struct {
     const char *head;
     size_t head_len;
     wtls_options opt;
+    uint32_t header_timeout; /* request sent -> head complete, after the total budget */
 } request_ctx;
 
 /* Streams the request body from the callback after the head: exactly
@@ -688,8 +691,7 @@ static int connect_proxy_tunnel(wtls_http_response *r, request_ctx *x) {
         if (st == WTLS_OK) {
             bool got = false;
             size_t cap = 0, fill = 0;
-            uint32_t hdr_t = x->req->header_timeout_ms ? x->req->header_timeout_ms
-                                                       : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+            uint32_t hdr_t = x->header_timeout;
             st = read_head_ex(r, hdr_t, hdr_t, false, false, &cap, &fill, &got);
             if (st == WTLS_OK && (r->head.status < 200 || r->head.status >= 300 || r->extra_end > r->extra_off))
                 st = WTLS_ERR_CONNECT;
@@ -812,7 +814,7 @@ static int exchange_h2(wtls_http_response *r, request_ctx *x, bool *got) {
     r->buf = NULL;
     memset(&r->head, 0, sizeof r->head); /* its fields pointed into r->buf */
     uint32_t io_timeout = tr_timeout(r->conn);
-    uint32_t t = x->req->header_timeout_ms ? x->req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+    uint32_t t = x->header_timeout;
     int st = wtls_h2_begin_stream(h2);
     if (st != WTLS_OK) return st;
     if (x->opt.abort_cb && x->opt.abort_cb(x->opt.abort_ctx)) {
@@ -858,7 +860,7 @@ static int exchange(wtls_http_response *r, request_ctx *x, bool *got) {
     if (r->conn->h2) return exchange_h2(r, x, got);
 #endif
     uint32_t io_timeout = tr_timeout(r->conn);
-    uint32_t t = x->req->header_timeout_ms ? x->req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+    uint32_t t = x->header_timeout;
     size_t cap = 0, fill = 0;
     int st;
     if (x->expect_100) {
@@ -1201,7 +1203,7 @@ static int setup_encoding(wtls_http_response *r, bool want_gzip) {
     return WTLS_OK;
 }
 
-wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *req) {
+static wtls_status open_attempt(wtls_http_response **out, const wtls_http_request *req, uint64_t deadline_ms) {
     if (!out) return WTLS_ERR_ARG;
     *out = NULL;
     if (!req || !req->url) return WTLS_ERR_ARG;
@@ -1283,6 +1285,12 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
         return WTLS_ERR_CANCELLED;
     }
 
+    x.header_timeout = req->header_timeout_ms ? req->header_timeout_ms : WTLS_HTTP_DEFAULT_HEADER_TIMEOUT_MS;
+    const uint32_t base_connect = x.opt.connect_timeout_ms ? x.opt.connect_timeout_ms : DEF_CONNECT_MS;
+    const uint32_t base_handshake = x.opt.handshake_timeout_ms ? x.opt.handshake_timeout_ms : DEF_HANDSHAKE_MS;
+    const uint32_t base_io = x.opt.io_timeout_ms ? x.opt.io_timeout_ms : DEF_IO_MS;
+    const uint32_t base_header = x.header_timeout;
+    r->deadline_ms = deadline_ms;
     wtls_http_header *filtered = NULL;
     for (;;) {
         char cpath[1025];
@@ -1304,6 +1312,20 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
                     }
                 }
             }
+        }
+        if (deadline_ms) {
+            uint64_t now = wtls_plat_now_ms();
+            if (now >= deadline_ms) {
+                wtls_free(with_cookie);
+                wtls_free(cookie_value);
+                st = WTLS_ERR_TIMEOUT;
+                break;
+            }
+            uint32_t left = deadline_ms - now > UINT32_MAX ? UINT32_MAX : (uint32_t)(deadline_ms - now);
+            x.opt.connect_timeout_ms = base_connect < left ? base_connect : left;
+            x.opt.handshake_timeout_ms = base_handshake < left ? base_handshake : left;
+            x.opt.io_timeout_ms = base_io < left ? base_io : left;
+            x.header_timeout = base_header < left ? base_header : left;
         }
         st = hop(r, &x, &u);
         x.headers = saved_h;
@@ -1334,6 +1356,76 @@ wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *re
     r->progress_total = wtls_http_content_length(r);
     *out = r;
     return WTLS_OK;
+}
+
+/* ---- retries and the total deadline --------------------------------------------- */
+
+static bool method_retryable(const char *m) { return wtls_http_method_idempotent(m ? m : "GET"); }
+
+/* Sleeps ms in slices so abort_cb stays responsive; WTLS_OK or WTLS_ERR_CANCELLED. */
+static int retry_sleep(uint32_t ms, const wtls_http_request *req) {
+    uint64_t end = wtls_plat_now_ms() + ms;
+    for (;;) {
+        if (req->tls && req->tls->abort_cb && req->tls->abort_cb(req->tls->abort_ctx)) return WTLS_ERR_CANCELLED;
+        uint64_t now = wtls_plat_now_ms();
+        if (now >= end) return WTLS_OK;
+        uint64_t left = end - now;
+        wtls_plat_sleep_ms(left > 50 ? 50u : (uint32_t)left);
+    }
+}
+
+static uint32_t backoff_for(uint32_t base, unsigned attempt) {
+    uint64_t v = (uint64_t)base << (attempt > 16 ? 16 : attempt);
+    if (v > 30000u) v = 30000u;
+    uint32_t jitter_permille = 750u + (uint32_t)(wtls_plat_now_us() % 501u); /* 75 % .. 125 % */
+    return (uint32_t)(v * jitter_permille / 1000u);
+}
+
+wtls_status wtls_http_open(wtls_http_response **out, const wtls_http_request *req) {
+    if (!out) return WTLS_ERR_ARG;
+    *out = NULL;
+    if (!req) return WTLS_ERR_ARG;
+    uint64_t deadline = req->total_timeout_ms ? wtls_plat_now_ms() + req->total_timeout_ms : 0;
+    if (req->total_timeout_ms == 0 && req->max_retries == 0) return open_attempt(out, req, 0); /* the 1.0 path */
+    const bool can_retry = req->max_retries > 0 && !req->body_cb && method_retryable(req->method);
+    const uint32_t base = req->retry_backoff_ms ? req->retry_backoff_ms : 500u;
+    for (unsigned attempt = 0;; attempt++) {
+        wtls_status st = open_attempt(out, req, deadline);
+        uint32_t wait = 0;
+        bool retry = false, on_status = false;
+        if (st == WTLS_OK) {
+            int code = wtls_http_status(*out);
+            if (can_retry && req->retry_on_503 && attempt < req->max_retries && (code == 429 || code == 503)) {
+                const char *ra = wtls_http_get_header(*out, "retry-after");
+                uint32_t secs = 0;
+                bool digits = ra && *ra;
+                for (const char *c = ra; digits && *c; c++) {
+                    if (*c < '0' || *c > '9' || secs > 60) digits = false;
+                    else secs = secs * 10 + (uint32_t)(*c - '0');
+                }
+                wait = digits ? (secs > 60 ? 60u : secs) * 1000u : backoff_for(base, attempt);
+                retry = on_status = true;
+            }
+        } else if (can_retry && attempt < req->max_retries &&
+                   (st == WTLS_ERR_DNS || st == WTLS_ERR_CONNECT || st == WTLS_ERR_TIMEOUT || st == WTLS_ERR_IO)) {
+            wait = backoff_for(base, attempt);
+            retry = true;
+        }
+        if (!retry) return st;
+        if (deadline) {
+            uint64_t now = wtls_plat_now_ms();
+            if (now >= deadline || deadline - now <= wait) {
+                if (on_status) return st; /* no time for another try: the answer we have is the result */
+                return WTLS_ERR_TIMEOUT;
+            }
+        }
+        if (on_status) {
+            wtls_http_close(*out);
+            *out = NULL;
+        }
+        int sl = retry_sleep(wait, req);
+        if (sl != WTLS_OK) return sl;
+    }
 }
 
 /* ---- accessors ---------------------------------------------------------------- */
@@ -1500,12 +1592,25 @@ int wtls_http_read(wtls_http_response *r, void *buf, size_t len) {
     }
     if (!len) return 0;
     if (len > INT_MAX) len = INT_MAX;
+    uint32_t saved_to = 0;
+    bool clamped = false;
+    if (r->deadline_ms && !r->eof && r->conn) { /* total_timeout_ms covers the body too */
+        uint64_t now = wtls_plat_now_ms();
+        if (now >= r->deadline_ms) return fail(r, WTLS_ERR_TIMEOUT);
+        uint64_t left = r->deadline_ms - now;
+        saved_to = tr_timeout(r->conn);
+        if (left < saved_to) {
+            tr_set_timeout(r->conn, (uint32_t)left);
+            clamped = true;
+        }
+    }
     int k;
 #if WTLS_GZIP
     k = r->gz ? gz_read(r, buf, len) : raw_read(r, buf, len);
 #else
     k = raw_read(r, buf, len);
 #endif
+    if (clamped && r->conn) tr_set_timeout(r->conn, saved_to);
     if (k > 0) {
         r->progress_done += (size_t)k;
         if (r->progress_cb) r->progress_cb(r->progress_ctx, r->progress_done, r->progress_total);

@@ -71,6 +71,11 @@ ignored, so a test can tag its requests and count them with /count.
   GET /socks-last                 what the last SOCKS5 request looked like (atyp 1 = IPv4, 3 = name, auth, host)
   port 4444 HTTP proxy, 4446 the same requiring Proxy-Authorization (proxyuser / "p@ss w0rd"),
   4447 SOCKS5, 4448 SOCKS5 requiring username/password (sockuser / "s0cks:pw")
+  GET /flaky?id=K&fails=N[&mode=drop|503][&ra=S]
+                                  the first N requests with this id: mode drop = TCP drop without a
+                                  response (default), mode 503 = 503 with Retry-After S (default 1);
+                                  later ones 200 "ok"
+  GET /flaky-count?id=K           how many /flaky requests carried this id
   GET /setcookie?c=V[&c2=V][&c3=V] 200 "ok" with one Set-Cookie field per given value
   GET /cookie-redirect?c=V&to=URL 302 to URL with Set-Cookie V
   GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
@@ -105,6 +110,7 @@ import zlib
 
 PLAIN_PORT = 4430
 FILE_SEEN = set()  # ids of /file requests seen with once=ID
+FLAKY = {}  # /flaky?id=K: requests seen
 CERT_DIR = None
 
 
@@ -735,6 +741,22 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             tcp_abort(sock)
             return False
         send(body)
+    elif path == "/flaky":
+        key = query.get("id", "x")
+        with HTTP_LOG_LOCK:
+            FLAKY[key] = FLAKY.get(key, 0) + 1
+            seen = FLAKY[key]
+        if seen <= int(query.get("fails", "1")):
+            if query.get("mode", "drop") == "503":
+                send(http_response(503, [("Retry-After", query.get("ra", "1")), ("Content-Length", 0)]))
+            else:
+                tcp_abort(sock)
+                return False
+        else:
+            send(http_response(200, [("Content-Length", 2)], b"ok"))
+    elif path == "/flaky-count":
+        body = str(FLAKY.get(query.get("id", "x"), 0)).encode()
+        send(http_response(200, [("Content-Length", len(body))], body))
     elif path == "/socks-last":
         send(http_response(200, [("Content-Length", len(repr(SOCKS_LAST)))], repr(SOCKS_LAST).encode()))
     elif path == "/setcookie":

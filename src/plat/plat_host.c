@@ -49,6 +49,8 @@ static int set_nonblocking(sock_t s) {
 }
 
 /* QueryPerformanceCounter: GetTickCount64 only advances every ~16 ms. */
+void wtls_plat_sleep_ms(uint32_t ms) { Sleep(ms); }
+
 uint64_t wtls_plat_now_ms(void) {
     static LARGE_INTEGER freq;
     LARGE_INTEGER now;
@@ -123,6 +125,11 @@ int wtls_plat_init(void) { return WTLS_OK; }
 static int set_nonblocking(sock_t s) {
     int fl = fcntl(s, F_GETFL, 0);
     return (fl < 0 || fcntl(s, F_SETFL, fl | O_NONBLOCK) < 0) ? -1 : 0;
+}
+
+void wtls_plat_sleep_ms(uint32_t ms) {
+    struct timespec ts = {(time_t)(ms / 1000u), (long)(ms % 1000u) * 1000000L};
+    nanosleep(&ts, NULL);
 }
 
 uint64_t wtls_plat_now_ms(void) {

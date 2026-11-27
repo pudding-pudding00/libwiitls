@@ -55,6 +55,7 @@ void     wtls_plat_close(int fd);
 int      wtls_plat_udp_exchange(uint32_t ipv4_be, uint16_t port, const uint8_t *req, size_t req_len,
                                 uint8_t *resp, size_t resp_cap,
                                 uint32_t timeout_ms);                  /* bytes | ERR_TIMEOUT | ERR_IO */
+void     wtls_plat_sleep_ms(uint32_t ms);                              /* blocks the calling thread */
 uint64_t wtls_plat_now_ms(void);                                       /* monotonic */
 uint64_t wtls_plat_now_us(void);                                       /* monotonic, microseconds */
 /* Total microseconds spent blocked inside wtls_plat_poll, and in the polls of a

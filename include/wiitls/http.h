@@ -106,6 +106,18 @@ typedef struct {
                                             @c headers wins: then the jar is not consulted for that request.
                                             Domain cookies need a dot in the domain; there is no public suffix
                                             list, so "co.uk" is accepted. Not shared between jars or threads. */
+    uint32_t total_timeout_ms;         /**< (1.1) 0 => none. One budget for the whole call: connect, handshake, request,
+                                            redirects, retries and every later wtls_http_read() until the body
+                                            ends. The per-stage timeouts are cut down to what is left; expiry is
+                                            WTLS_ERR_TIMEOUT. Host name resolution is not interruptible. */
+    uint8_t max_retries;               /**< (1.1) 0 => none (the one retry on a stale pooled socket stays). Up to this
+                                            many more attempts after WTLS_ERR_DNS / _CONNECT / _TIMEOUT / _IO before
+                                            the response head arrived, for idempotent methods without body_cb only */
+    uint32_t retry_backoff_ms;         /**< (1.1) 0 => 500. The wait before retry n is this << n, +/-25 %, within
+                                            total_timeout_ms (WTLS_ERR_TIMEOUT if it no longer fits) */
+    bool retry_on_503;                 /**< (1.1) with max_retries: also retry status 429 and 503, waiting the
+                                            Retry-After seconds (at most 60) if the server gave them; when the
+                                            attempts or the budget run out the last response is returned */
 } wtls_http_request;
 
 /** Opaque response handle. */

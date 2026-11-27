@@ -46,6 +46,8 @@ mbedtls_ms_time_t mbedtls_ms_time(void) {
     return (mbedtls_ms_time_t)ticks_to_millisecs(gettime());
 }
 
+void wtls_plat_sleep_ms(uint32_t ms) { usleep((useconds_t)ms * 1000u); }
+
 uint64_t wtls_plat_now_ms(void) { return (uint64_t)ticks_to_millisecs(gettime()); }
 uint64_t wtls_plat_now_us(void) { return (uint64_t)ticks_to_microsecs(gettime()); }
 

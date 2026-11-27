@@ -344,6 +344,23 @@ Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
 push, cookies (send your own `Cookie` header), authentication schemes (send
 your own `Authorization`), caching, and `br` encoding.
 
+### Deadlines and retries
+
+```c
+req.total_timeout_ms = 10000;   /* the whole call, redirects and body included */
+req.max_retries = 2;            /* after DNS / connect / timeout / reset errors, idempotent requests only */
+req.retry_backoff_ms = 500;     /* 0.5 s, 1 s, ... (+/-25 %) */
+req.retry_on_503 = true;        /* also retry 429/503, honouring Retry-After (max 60 s) */
+```
+
+`total_timeout_ms` is the one number a UI wants: every stage timeout is cut down
+to what is left, `wtls_http_read()` stops at the deadline with `WTLS_ERR_TIMEOUT`,
+and waits between retries count against it. Host name resolution cannot be
+interrupted (see the async DNS work on the roadmap). Retries cover the time up to
+the response head; once body bytes are delivered nothing is repeated, and requests
+with a streaming body (`body_cb`) or a method that is not idempotent (POST, PATCH)
+are never retried.
+
 ### Cookies
 
 ```c

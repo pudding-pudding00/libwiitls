@@ -55,6 +55,9 @@ OFF(wtls_http_request, expect_100_continue, 113, 61);
 OFF(wtls_http_request, proxy_url,       120,  64);
 OFF(wtls_http_request, no_h2,           128,  68);
 
+_Static_assert(offsetof(wtls_http_request, cookie_jar) > offsetof(wtls_http_request, no_h2), "new fields go last");
+_Static_assert(offsetof(wtls_http_request, total_timeout_ms) > offsetof(wtls_http_request, cookie_jar), "new fields go last");
+
 OFF(wtls_http_info, url,               0,  0);
 OFF(wtls_http_info, redirects,         8,  4);
 OFF(wtls_http_info, reused_connection, 9,  5);

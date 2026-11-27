@@ -2122,6 +2122,146 @@ static void http_proxy_plain_and_connect(void) {
     CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_ARG);
 }
 
+/* ---- total deadline and retries ------------------------------------------- */
+
+static int flaky_count(const char *id) {
+    char path[80];
+    snprintf(path, sizeof path, "/flaky-count?id=%s", id);
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, path);
+    req.no_keepalive = true;
+    wtls_http_result res;
+    int n = -1;
+    if (wtls_http_fetch(&req, 64, &res) == WTLS_OK) {
+        n = atoi(res.body);
+        wtls_http_result_free(&res);
+    }
+    return n;
+}
+
+static void http_retry_io_error_then_ok(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true; /* every attempt on a fresh connection: no stale-socket retry mixed in */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r1&fails=2");
+    req.max_retries = 2;
+    req.retry_backoff_ms = 20;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK(res.body && strcmp(res.body, "ok") == 0);
+    wtls_http_result_free(&res);
+    CHECK_EQ_INT(flaky_count("r1"), 3);
+    /* one retry is not enough for two failures */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r2&fails=2");
+    req.max_retries = 1;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_IO);
+    CHECK_EQ_INT(flaky_count("r2"), 2);
+    /* default: no retries */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r3&fails=1");
+    req.max_retries = 0;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_IO);
+    CHECK_EQ_INT(flaky_count("r3"), 1);
+}
+
+static void http_retry_never_post(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true;
+    req.method = "POST";
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=p1&fails=1");
+    req.body = "x";
+    req.body_len = 1;
+    req.max_retries = 3;
+    req.retry_backoff_ms = 10;
+    wtls_http_result res;
+    CHECK(wtls_http_fetch(&req, 64, &res) != WTLS_OK);
+    CHECK_EQ_INT(flaky_count("p1"), 1); /* a POST is not repeated */
+}
+
+static void http_retry_connect_refused_backs_off(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_CLOSED, "/hello");
+    req.max_retries = 2;
+    req.retry_backoff_ms = 100; /* 75-125 ms, then 150-250 ms */
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(dt >= 200 && dt < 2000);
+    req.max_retries = 0;
+    t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
+    CHECK(wtls_plat_now_ms() - t0 < 150);
+}
+
+static void http_retry_503_retry_after(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true; /* every attempt on a fresh connection: no stale-socket retry mixed in */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s1&fails=1&mode=503&ra=1");
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK); /* not asked to retry: the 503 is the answer */
+    CHECK_EQ_INT(res.status, 503);
+    wtls_http_result_free(&res);
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s2&fails=1&mode=503&ra=1");
+    req.max_retries = 1;
+    req.retry_on_503 = true;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK(wtls_plat_now_ms() - t0 >= 900); /* waited the Retry-After second */
+    wtls_http_result_free(&res);
+    /* no time left for the wait: the 503 is returned */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s3&fails=5&mode=503&ra=30");
+    req.total_timeout_ms = 2000;
+    t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 503);
+    CHECK(wtls_plat_now_ms() - t0 < 1500);
+    wtls_http_result_free(&res);
+}
+
+static void http_total_timeout_covers_retries(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_CLOSED, "/hello");
+    req.max_retries = 5;
+    req.retry_backoff_ms = 1000;
+    req.total_timeout_ms = 300;
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    CHECK(wtls_plat_now_ms() - t0 < 700);
+}
+
+static void http_total_timeout_slow_body(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/slowbody?ms=2500");
+    req.total_timeout_ms = 500;
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(dt >= 450 && dt < 1500);
+    /* the same budget is plenty for a fast body */
+    req.url = url_of("http", P_HTTP_PLAIN, "/hello");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    wtls_http_result_free(&res);
+}
+
+static void http_total_timeout_slow_head(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/slowhead");
+    req.total_timeout_ms = 400; /* the default header timeout is 15 s */
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    CHECK(wtls_plat_now_ms() - t0 < 1500);
+}
+
 /* ---- proxy authentication and SOCKS5 ------------------------------------ */
 
 static void fetch_via(const char *proxy, const char *target, int *status, int *rc, char *body, size_t cap) {
@@ -2551,6 +2691,13 @@ void wtls_suite_http(void) {
     RUN(http_open_streaming_progress);
     RUN(http_expect_100_continue);
     RUN(http_proxy_plain_and_connect);
+    RUN(http_retry_io_error_then_ok);
+    RUN(http_retry_never_post);
+    RUN(http_retry_connect_refused_backs_off);
+    RUN(http_retry_503_retry_after);
+    RUN(http_total_timeout_covers_retries);
+    RUN(http_total_timeout_slow_body);
+    RUN(http_total_timeout_slow_head);
     RUN(http_proxy_authentication);
     RUN(http_proxy_url_forms_rejected);
     RUN(http_socks5_connect);
