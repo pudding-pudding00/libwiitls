@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
+    branches: ['**'] # tags are tested by the release workflow, which calls this one
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -84,11 +84,14 @@ CI runs all of this except the hardware tests on every push.
    configure step checks that they match).
 2. Move the `[Unreleased]` entries in `CHANGELOG.md` to a new version section
    and update the compare links at the bottom.
-3. Run the hardware matrix (`--suite all`, `wtls_bench.dol`) on a Wii.
-4. Commit, tag `vX.Y.Z` and push the tag. The `release` workflow builds the
-   package with `tools/make_release.sh`, and creates a **draft** GitHub
-   release with the zip, `SHA256SUMS` and the changelog section as notes.
-5. Review the draft, add highlights and the hardware results, publish.
+3. Run the hardware matrix (`--suite all`, `wtls_bench.dol`) on a Wii. Do
+   this and check the changelog section **before** tagging: pushing the tag
+   publishes the release.
+4. Commit, tag `vX.Y.Z` and push the tag. The `release` workflow runs all CI
+   jobs on the tag, builds the package with `tools/make_release.sh`, and
+   publishes the GitHub release with the zip, `SHA256SUMS` and the changelog
+   section as notes. If any job fails, nothing is published.
+5. Add highlights and the hardware results to the published release notes.
 
 ## License
 
