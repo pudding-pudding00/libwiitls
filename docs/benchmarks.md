@@ -77,6 +77,28 @@ BENCH http_get_pooled_cpu 3.046 ms
 Streams are link-bound: the Wi-Fi delivered about 1 MB/s, so
 `wtls_read_vs_raw` shows that TLS adds no measurable cost at this link speed.
 
+### Read throughput against 1.0.1
+
+`wtls_read_4m` of the 1.1.0 development branch against the `v1.0.1` tag,
+same Wii and Wi-Fi, same build options. Seven pairs, each running 1.0.1
+first and then the branch, so drift in the link hits both sides of a pair:
+
+| Pair | 1.0.1 (MB/s) | branch (MB/s) | Δ |
+|---|---|---|---|
+| 1 | 1.017 | 1.028 | +1.1 % |
+| 2 | 1.025 | 1.031 | +0.6 % |
+| 3 | 1.025 | 1.032 | +0.7 % |
+| 4 | 1.032 | 1.030 | −0.2 % |
+| 5 | 1.030 | 1.030 | 0.0 % |
+| 6 | 1.036 | 1.030 | −0.6 % |
+| 7 | 1.030 | 1.025 | −0.5 % |
+
+The median Δ is 0.0 % and all pairs fall within −0.6 to +1.1 %, against a
+target of ±5 %. `net_recv_4m` was 0.997 to 1.014 MB/s in every run, so the
+link stayed stable. Every run passed 10/0/0. At this link speed the
+comparison can only show that the branch is not slower; differences in CPU
+cost stay below what the Wi-Fi can resolve.
+
 ## Build options
 
 All options apply to libwiitls and the fetched Mbed TLS / TF-PSA-Crypto.

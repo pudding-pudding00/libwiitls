@@ -37,6 +37,7 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 ### Added
 
 - **Non-blocking start-up:** `wtls_init_start()` and `wtls_init_step(budget_ms)` collect the jitter entropy in time slices of 16 samples, so the budget holds to ~1.3 ms on the Wii (also before `net_init()`, e.g. next to `net_init_async()`) and finish like `wtls_init()`; the credited entropy is unchanged. New host test `test_init_step` (the host runs the jitter path with a test sampler), Wii timing in the `entropy` suite.
+- Docs: `docs/benchmarks.md` compares `wtls_read_4m` with 1.0.1 on the Wii (seven alternating pairs, median Δ 0.0 %).
 - **Dolphin detection:** internal `wtls_plat_is_dolphin()` (`/dev/dolphin`); the `entropy` suite prints `emulator: yes/no`. In Dolphin its raw 64 KiB health-test check logs the outcome instead of requiring a pass (the RCT trips in 2609-324).
 - Tests: `tools/hwtest.py --dolphin <Dolphin.exe>` runs a hardware suite in the emulator (`--dolphin-config` for `-C`
   overrides such as the interpreter); the runner fetches its arguments over the log connection, since Dolphin boots a
