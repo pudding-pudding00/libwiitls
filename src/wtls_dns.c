@@ -190,6 +190,17 @@ int wtls_dns_lookup_begin(const char *host, int *job, uint32_t addrs[WTLS_DNS_MA
         return WTLS_OK;
     }
     wtls_plat_async_lock();
+    /* A retry after giving up on this host (an error, a timeout) takes its lookup back rather than starting another:
+     * otherwise every retry would hold one more slot until the resolver answers. */
+    for (int i = 0; i < WTLS_DNS_JOBS; i++) {
+        dns_job *j = &s_jobs[i];
+        if (j->state == JOB_ABANDONED && j->gen == s_gen && strcmp(j->host, key) == 0) {
+            j->state = JOB_RUNNING;
+            wtls_plat_async_unlock();
+            *job = i;
+            return WTLS_WANT_READ;
+        }
+    }
     int slot = -1;
     for (int i = 0; i < WTLS_DNS_JOBS; i++)
         if (s_jobs[i].state == JOB_FREE) {

@@ -259,6 +259,36 @@ static void test_dns_async_cancel_frees_the_slot(void) {
     CHECK_EQ_INT(wait_job(extra, a, &n), WTLS_OK);
 }
 
+/* A connect that gave up on a lookup (an error, a timeout) and is tried again must not take a new slot each time:
+ * it picks the abandoned lookup of the same host back up, so retries cannot use up the table. */
+static void test_dns_async_retry_adopts_abandoned_lookup(void) {
+    if (!have_threads()) {
+        SKIP("no helper threads on this platform");
+        return;
+    }
+    async_setup(150);
+    uint32_t a[WTLS_DNS_MAX_ADDRS];
+    size_t n = 0;
+    bool cached;
+    int job = -1;
+    for (int i = 0; i < WTLS_DNS_JOBS + 2; i++) {
+        CHECK_EQ_INT(wtls_dns_lookup_begin("Retry.test", &job, a, &n, &cached, 0), WTLS_WANT_READ);
+        wtls_dns_job_cancel(job);
+    }
+    CHECK_EQ_INT(wtls_dns_lookup_begin("retry.test", &job, a, &n, &cached, 0), WTLS_WANT_READ);
+    CHECK_EQ_INT(wait_job(job, a, &n), WTLS_OK);
+    CHECK_EQ_INT((long long)a[0], 0x0a000001);
+    CHECK_EQ_INT(slow_calls, 1); /* one lookup served every attempt */
+    /* An abandoned lookup from before a network reset is not picked up: its answer would be dropped anyway. */
+    CHECK_EQ_INT(wtls_dns_lookup_begin("reset.test", &job, a, &n, &cached, 0), WTLS_WANT_READ);
+    wtls_dns_job_cancel(job);
+    wtls_dns_clear();
+    CHECK_EQ_INT(wtls_dns_lookup_begin("reset.test", &job, a, &n, &cached, 0), WTLS_WANT_READ);
+    CHECK_EQ_INT(wait_job(job, a, &n), WTLS_OK);
+    CHECK_EQ_INT(slow_calls, 3);
+    nap(200); /* let the abandoned one finish before the next test */
+}
+
 static void test_dns_async_result_dropped_after_net_reset(void) {
     if (!have_threads()) {
         SKIP("no helper threads on this platform");
@@ -298,6 +328,7 @@ int main(void) {
     RUN(test_dns_async_cache_hit_and_literal_immediate);
     RUN(test_dns_async_failure_and_not_cached);
     RUN(test_dns_async_cancel_frees_the_slot);
+    RUN(test_dns_async_retry_adopts_abandoned_lookup);
     RUN(test_dns_async_result_dropped_after_net_reset);
     RUN(test_dns_async_bad_args);
     return CHECK_DONE();

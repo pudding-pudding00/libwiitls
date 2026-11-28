@@ -182,7 +182,7 @@ static void test_alloc_fail_nth_connect(void) {
         return;
     }
     int failures = 0;
-    bool completed = false;
+    bool completed = false, uninjected = false;
     for (long n = 1; n <= MAX_FAIL_ITERS; n++) {
         s_st.calls = 0;
         s_st.failed = false;
@@ -201,6 +201,12 @@ static void test_alloc_fail_nth_connect(void) {
         }
         CHECK(r < 0);
         CHECK(c == NULL);
+        if (!s_st.failed && !uninjected) { /* failed although no allocation was refused: state left behind */
+            uninjected = true;
+            CHECK(s_st.failed);
+            TLOG("  connect failed without an injected failure: n=%ld r=%d (%s), allocs=%ld\n", n, r,
+                 wtls_strerror(r), (long)s_st.calls);
+        }
         failures++;
     }
     CHECK(completed);
