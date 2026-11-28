@@ -127,6 +127,9 @@ def main():
                 break
             if not data:
                 break
+            # --timeout is how long the runner may stay silent, not the whole
+            # run: --suite all takes longer than the default 120 s.
+            deadline = time.time() + args.timeout
             sys.stdout.write(data.decode("utf-8", "replace"))
             sys.stdout.flush()
             log += data

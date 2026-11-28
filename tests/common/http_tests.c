@@ -2637,9 +2637,13 @@ static void http2_flow_upload_expect_gzip_cont(void) {
     req.body_cb = h2_up_cb;
     req.body_ctx = &up;
     req.body_len = up.total;
-    CHECK_EQ_INT(wtls_http_fetch(&req, 256u * 1024u, &res), WTLS_OK);
+    int up_rc = wtls_http_fetch(&req, 256u * 1024u, &res);
+    CHECK_EQ_INT(up_rc, WTLS_OK);
+    if (up_rc != WTLS_OK) TLOG("  200 KiB upload: %d after %u bytes from body_cb\n", up_rc, (unsigned)up.sent);
     CHECK_EQ_INT((int)res.body_len, (int)up.total);
-    CHECK(res.body[0] == 'A' && res.body[up.total - 1] == (char)('A' + ((up.total - 1) % 26)));
+    /* a failed fetch leaves no body: compare only what is there */
+    CHECK(res.body_len == up.total && res.body[0] == 'A' &&
+          res.body[up.total - 1] == (char)('A' + ((up.total - 1) % 26)));
     wtls_http_result_free(&res);
 
     /* Streaming unknown-length upload (body_chunked=true without Content-Length) */
