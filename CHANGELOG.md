@@ -44,6 +44,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Added
 
+- Tests: the fuzz corpus grew by 4,572 inputs from one hour of libFuzzer per harness (all 15, no crashes),
+  merged with `-merge=1` so each adds coverage; the corpus regression tests replay them on every host build.
 - **Non-blocking DNS on the Wii:** `async_dns` in `wtls_connect_start()`, `wtls_http_start()`, and the abort and
   `dns_timeout_ms` options of `wtls_connect()` now also work on the Wii. The lookups run on one resolver thread
   (priority 80, 16 KiB stack), started on first use; before, the Wii still resolved inside the call. The DNS tests

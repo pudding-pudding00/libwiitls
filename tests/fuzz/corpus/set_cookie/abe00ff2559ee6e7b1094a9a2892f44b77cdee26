@@ -1,0 +1,3 @@
+a=; Path=
+c=3;Path=/1; Path=/2; Path=?a
+c=>; Path=2; Path=; Path=4; Path=math
