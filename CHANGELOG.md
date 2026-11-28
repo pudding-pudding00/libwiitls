@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A non-blocking `wtls_write` could lose data:** when a record had gone out only in part (`WTLS_WANT_WRITE`)
+  and the retry passed more data than that record held, the call counted up to a full record as sent although
+  only the pending one went out. The peer then waited for bytes that never came. This made
+  `test_nonblocking_write_retry_after_read` fail now and then on macOS. Affects 1.0.0 to 1.1.0.
+
 ## [1.1.0] - 2026-11-28
 
 ### Changed

@@ -440,11 +440,20 @@ int wtls_plat_connect_check(int fd, uint32_t ipv4_be, uint16_t port) {
     return WTLS_OK;
 }
 
+long wtls_plat_test_send_block_after = -1;
+
 int wtls_plat_send(int fd, const uint8_t *buf, size_t len) {
     if (len == 0) return WTLS_ERR_ARG;
     if (len > WTLS_PLAT_MAX_CHUNK) len = WTLS_PLAT_MAX_CHUNK;
+    if (wtls_plat_test_send_block_after == 0) {
+        wtls_plat_test_send_block_after = -1;
+        return WTLS_WANT_WRITE; /* a full send buffer, once */
+    }
+    if (wtls_plat_test_send_block_after > 0 && (long)len > wtls_plat_test_send_block_after)
+        len = (size_t)wtls_plat_test_send_block_after;
     for (;;) {
         int r = (int)send((sock_t)fd, (const char *)buf, (int)len, SEND_FLAGS);
+        if (r > 0 && wtls_plat_test_send_block_after > 0) wtls_plat_test_send_block_after -= r;
         if (r > 0) return r;
         int e = sock_err();
         if (r < 0 && e == ERR_INTR) continue;

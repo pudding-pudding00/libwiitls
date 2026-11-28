@@ -39,6 +39,9 @@ extern bool wtls_plat_test_net_down;
 bool     wtls_plat_entropy_emulated(void);
 /* Host-only test hook (plat_host.c): makes wtls_plat_entropy_emulated() true. */
 extern bool wtls_plat_test_emulated;
+/* Host-only test hook (plat_host.c): >= 0 lets wtls_plat_send() pass this many more bytes, then answer
+ * WTLS_WANT_WRITE once (a full send buffer) and reset itself to -1. */
+extern long wtls_plat_test_send_block_after;
 int      wtls_plat_resolve(const char *host, uint32_t *ipv4_be);       /* OK | ERR_DNS */
 int      wtls_plat_resolve_all(const char *host, uint32_t *addrs,
                                size_t cap, size_t *count);             /* OK | ERR_DNS */
