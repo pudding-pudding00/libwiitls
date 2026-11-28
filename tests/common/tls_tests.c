@@ -1298,15 +1298,19 @@ static void test_connect_dns_timeout(void) {
     dns_test_teardown();
 }
 
-/* Lookups that timed out keep their job slots until the resolver returns. With every slot taken that way, the next
- * connect is a DNS failure, not WTLS_ERR_NOMEM: no memory is short. */
+/* Lookups that timed out keep their job slots until the resolver returns. With every slot taken that way by
+ * different hosts, the next connect to yet another host is a DNS failure, not WTLS_ERR_NOMEM: no memory is short.
+ * A retry to one of those hosts takes its lookup back instead (it times out again here). */
 static void test_connect_dns_slots_busy_is_dns_error(void) {
     if (!dns_test_setup(800)) return;
     wtls_options o = {0};
     o.dns_timeout_ms = 30;
     wtls_conn *c = (wtls_conn *)1;
-    for (int i = 0; i < 4; i++) CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
-    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_DNS);
+    static const char *const hosts[] = {"slot0.localhost", "slot1.localhost", "slot2.localhost", "slot3.localhost"};
+    for (int i = 0; i < 4; i++) CHECK_EQ_INT(wtls_connect(&c, hosts[i], P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
+    CHECK_EQ_INT(wtls_connect(&c, "slot4.localhost", P_TLS13_ECDSA, &o), WTLS_ERR_DNS);
+    CHECK(c == NULL);
+    CHECK_EQ_INT(wtls_connect(&c, hosts[0], P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
     CHECK(c == NULL);
     wtls_plat_sleep_ms(4 * 800 + 300); /* the Wii's one resolver thread runs the abandoned lookups one by one */
     dns_test_teardown();
