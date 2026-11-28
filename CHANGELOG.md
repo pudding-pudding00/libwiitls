@@ -20,6 +20,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- **A connect reported `WTLS_ERR_NOMEM` when all four DNS lookup slots were busy:** lookups that timed out or
+  were cancelled keep their slot until the resolver returns. A new lookup then fails with `WTLS_ERR_DNS`.
 - **`tools/hwtest.py --suite all` stopped after 120 s:** `--timeout` limited the whole run, which now takes
   longer. It is now how long the runner may stay silent.
 - **A failed 200 KiB HTTP/2 upload crashed the test runner** instead of failing the test: the check read the

@@ -204,7 +204,7 @@ int wtls_dns_lookup_begin(const char *host, int *job, uint32_t addrs[WTLS_DNS_MA
         memcpy(j->host, key, strlen(key) + 1);
     }
     wtls_plat_async_unlock();
-    if (slot < 0) return WTLS_ERR_NOMEM;
+    if (slot < 0) return WTLS_ERR_DNS; /* every slot held by a lookup still running, often abandoned ones */
     int rc = wtls_plat_async_run(job_worker, &s_jobs[slot]);
     if (rc == WTLS_OK) {
         *job = slot;

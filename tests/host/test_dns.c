@@ -251,9 +251,9 @@ static void test_dns_async_cancel_frees_the_slot(void) {
         CHECK_EQ_INT(wtls_dns_lookup_begin(name, &jobs[i], a, &n, &cached, 0), WTLS_WANT_READ);
     }
     int extra;
-    CHECK_EQ_INT(wtls_dns_lookup_begin("extra.test", &extra, a, &n, &cached, 0), WTLS_ERR_NOMEM); /* table full */
+    CHECK_EQ_INT(wtls_dns_lookup_begin("extra.test", &extra, a, &n, &cached, 0), WTLS_ERR_DNS); /* table full */
     for (int i = 0; i < WTLS_DNS_JOBS; i++) wtls_dns_job_cancel(jobs[i]);
-    CHECK_EQ_INT(wtls_dns_lookup_begin("extra.test", &extra, a, &n, &cached, 0), WTLS_ERR_NOMEM); /* still running in the background */
+    CHECK_EQ_INT(wtls_dns_lookup_begin("extra.test", &extra, a, &n, &cached, 0), WTLS_ERR_DNS); /* still running in the background */
     nap(400);
     CHECK_EQ_INT(wtls_dns_lookup_begin("extra.test", &extra, a, &n, &cached, 0), WTLS_WANT_READ); /* slots came back */
     CHECK_EQ_INT(wait_job(extra, a, &n), WTLS_OK);

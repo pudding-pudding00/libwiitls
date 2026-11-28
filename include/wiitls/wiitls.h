@@ -134,7 +134,9 @@ typedef struct {
                                          honour abort_cb and dns_timeout_ms during the lookup */
     uint32_t dns_timeout_ms;        /**< (1.1) 0 => wait as long as the resolver takes (as in 1.0); otherwise a
                                          lookup that is still running after this long fails with
-                                         WTLS_ERR_TIMEOUT (the answer is dropped when it arrives) */
+                                         WTLS_ERR_TIMEOUT (the answer is dropped when it arrives). Such a lookup
+                                         keeps one of 4 lookup slots until the resolver returns; with all of them
+                                         taken, a new lookup fails at once with WTLS_ERR_DNS */
 } wtls_options;
 
 /** Facts about an established connection (see wtls_get_info()). */
