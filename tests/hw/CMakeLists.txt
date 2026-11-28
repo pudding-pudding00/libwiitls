@@ -7,13 +7,19 @@ add_executable(wtls_hwtest
     ${PROJECT_SOURCE_DIR}/tests/common/plat_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/crypto_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/tls_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/log_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/alloc_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/sig_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/ws_tests.c
+    ${PROJECT_SOURCE_DIR}/tests/common/http_async_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/http_tests.c
     ${PROJECT_SOURCE_DIR}/tests/common/soak_tests.c
     realworld_tests.c
 )
 target_include_directories(wtls_hwtest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tests/common ${PROJECT_SOURCE_DIR}/src)
 # The suites call internal wiitls code (src/), compiled for the ogc platform.
-target_compile_definitions(wtls_hwtest PRIVATE WTLS_PLATFORM_OGC)
+target_compile_definitions(wtls_hwtest PRIVATE WTLS_PLATFORM_OGC WTLS_KEYLOG=$<BOOL:${WTLS_KEYLOG}>
+                           WTLS_DOLPHIN_DEV_ENTROPY=$<BOOL:${WTLS_DOLPHIN_DEV_ENTROPY}>)
 if(WTLS_GZIP)
     target_compile_definitions(wtls_hwtest PRIVATE WTLS_GZIP=1) # gzip cases in http_tests.c
 endif()

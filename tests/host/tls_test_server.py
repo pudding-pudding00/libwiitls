@@ -68,6 +68,34 @@ ignored, so a test can tag its requests and count them with /count.
                                   half of the gzip stream (framing complete);
                                   members=2: two gzip members back to back
   GET /encoding?name=E            Content-Encoding E, CL 3, body "raw"
+  GET /socks-last                 what the last SOCKS5 request looked like (atyp 1 = IPv4, 3 = name, auth, host)
+  4449/4450 concurrent HTTP/2 (100 / 2 streams at once; routes at h2mux_session),
+  port 4444 HTTP proxy, 4446 the same requiring Proxy-Authorization (proxyuser / "p@ss w0rd"),
+  4447 SOCKS5, 4448 SOCKS5 requiring username/password (sockuser / "s0cks:pw")
+  GET /flaky?id=K&fails=N[&mode=drop|503][&ra=S]
+                                  the first N requests with this id: mode drop = TCP drop without a
+                                  response (default), mode 503 = 503 with Retry-After S (default 1);
+                                  later ones 200 "ok"
+  GET /flaky-count?id=K           how many /flaky requests carried this id
+  GET /fixture?f=NAME[&enc=E]     the file tests/host/fixtures/NAME, Content-Encoding E if given
+  GET /setcookie?c=V[&c2=V][&c3=V] 200 "ok" with one Set-Cookie field per given value
+  GET /cookie-redirect?c=V&to=URL 302 to URL with Set-Cookie V
+  GET /ws[?proto=P][&early=1]     WebSocket (RFC 6455): 101 with the right Sec-WebSocket-Accept (and
+                                  subprotocol P when offered), then echoes text/binary messages; text
+                                  commands: "close" (server Close 1000), "ping" (Ping, then "pong-ok"
+                                  when the Pong came back), "frag" (the text "frag-mented-text" in
+                                  three frames with a Ping between), "big:N" (N pattern bytes, binary),
+                                  "badutf8", "masked" (a masked server frame); early=1: a greeting
+                                  frame in the same write as the 101
+  GET /ws-badaccept               101 with a wrong Sec-WebSocket-Accept
+  GET /file?n=N[&etag=E][&etag2=E2][&cut=K][&once=ID][&ranges=0]
+                                  N pattern bytes (pattern(N)) with ETag "E" (default v1) and
+                                  Accept-Ranges. "Range: bytes=S-" is honoured (206, or 416 with
+                                  "Content-Range: bytes */N" when S >= N) unless ranges=0 or an
+                                  If-Range does not match the ETag (then 200, whole file).
+                                  cut=K: after K body bytes the TCP connection is dropped
+                                  once=ID: cut and etag=E apply to the first request carrying this
+                                  ID only; later ones are served whole, with ETag E2 if given
 
 Prints "READY" on stdout once every listener is bound.
 """
@@ -83,6 +111,8 @@ import urllib.parse
 import zlib
 
 PLAIN_PORT = 4430
+FILE_SEEN = set()  # ids of /file requests seen with once=ID
+FLAKY = {}  # /flaky?id=K: requests seen
 CERT_DIR = None
 
 
@@ -302,6 +332,18 @@ def tls_handler(ctx, counter):
                     data = bytes(i & 0xFF for i in range(n))
                     for k in range(0, n, 16384):
                         sock.sendall(data[k:k + 16384])
+                elif cmd.startswith(b"SINK "):  # SINK n ms: after ms, read n pattern bytes (i % 251)
+                    n, ms = (int(v) for v in cmd.split()[1:3])
+                    time.sleep(ms / 1000.0)
+                    got, bad, ref = 0, None, pattern(65536 + 251)
+                    while got < n:
+                        data = conn.recv(min(65536, n - got))
+                        if not data:
+                            return
+                        if bad is None and data != ref[got % 251:got % 251 + len(data)]:
+                            bad = got + next(i for i, b in enumerate(data) if b != (got + i) % 251)
+                        got += len(data)
+                    sock.sendall(b"SUNK %d\n" % n if bad is None else b"BAD %d\n" % bad)
                 elif cmd == b"CLOSE":
                     sock.unwrap().close()
                     return
@@ -452,6 +494,120 @@ def clean_close(sock, secure):
         pass
 
 
+# ---- WebSocket (RFC 6455) test endpoint -------------------------------------------------
+
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_recv_exact(sock, n):
+    out = b""
+    while len(out) < n:
+        chunk = sock.recv(n - len(out))
+        if not chunk:
+            raise EOFError
+        out += chunk
+    return out
+
+
+def ws_read_frame(sock):
+    b0, b1 = _ws_recv_exact(sock, 2)
+    ln = b1 & 0x7F
+    if ln == 126:
+        ln = int.from_bytes(_ws_recv_exact(sock, 2), "big")
+    elif ln == 127:
+        ln = int.from_bytes(_ws_recv_exact(sock, 8), "big")
+    mask = _ws_recv_exact(sock, 4) if b1 & 0x80 else None
+    payload = _ws_recv_exact(sock, ln) if ln else b""
+    if mask:
+        payload = bytes(c ^ mask[i & 3] for i, c in enumerate(payload))
+    return bool(b0 & 0x80), b0 & 0x0F, payload
+
+
+def ws_frame(op, payload=b"", fin=True, mask=None):
+    out = bytes([(0x80 if fin else 0) | op])
+    mb = 0x80 if mask else 0
+    n = len(payload)
+    if n < 126:
+        out += bytes([mb | n])
+    elif n < 65536:
+        out += bytes([mb | 126]) + n.to_bytes(2, "big")
+    else:
+        out += bytes([mb | 127]) + n.to_bytes(8, "big")
+    if mask:
+        out += mask
+        payload = bytes(c ^ mask[i & 3] for i, c in enumerate(payload))
+    return out + payload
+
+
+def ws_serve(sock, path, query, head):
+    import base64
+    import hashlib
+    fields = {}
+    for line in head.replace(b"\r\n", b"\n").split(b"\n")[1:]:
+        if b":" in line:
+            k, v = line.split(b":", 1)
+            fields[k.strip().lower().decode()] = v.strip().decode()
+    key = fields.get("sec-websocket-key", "").encode()
+    accept = base64.b64encode(hashlib.sha1(key + WS_GUID).digest())
+    if path == "/ws-badaccept":
+        accept = base64.b64encode(hashlib.sha1(key + b"x").digest())
+    hdrs = [("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Accept", accept)]
+    want = query.get("proto")
+    offered = [p.strip() for p in fields.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    if want and want in offered:
+        hdrs.append(("Sec-WebSocket-Protocol", want))
+    resp = http_response(101, hdrs, b"", b"Switching Protocols")
+    if query.get("early") == "1":
+        resp += ws_frame(1, b"hi")
+    sock.sendall(resp)
+    try:
+        msg_op, msg = None, b""
+        while True:
+            fin, op, payload = ws_read_frame(sock)
+            if op == 8:
+                sock.sendall(ws_frame(8, payload[:2]))
+                return
+            if op == 9:
+                sock.sendall(ws_frame(10, payload))
+                continue
+            if op == 10:
+                continue
+            if op in (1, 2):
+                msg_op, msg = op, payload
+            else:
+                msg += payload
+            if not fin:
+                continue
+            if msg_op == 1 and msg == b"close":
+                sock.sendall(ws_frame(8, (1000).to_bytes(2, "big") + b"bye"))
+                try:
+                    ws_read_frame(sock)  # the client's Close
+                except (EOFError, OSError):
+                    pass
+                return
+            if msg_op == 1 and msg == b"ping":
+                sock.sendall(ws_frame(9, b"p1"))
+                while True:
+                    _, pop, ppl = ws_read_frame(sock)
+                    if pop == 10:
+                        break
+                sock.sendall(ws_frame(1, b"pong-ok" if ppl == b"p1" else b"pong-bad"))
+            elif msg_op == 1 and msg == b"frag":
+                sock.sendall(ws_frame(1, b"frag-", fin=False) + ws_frame(9, b"mid") + ws_frame(0, b"mented-", fin=False) +
+                             ws_frame(0, b"text"))
+            elif msg_op == 1 and msg.startswith(b"big:"):
+                sock.sendall(ws_frame(2, pattern(int(msg[4:]))))
+            elif msg_op == 1 and msg == b"badutf8":
+                sock.sendall(ws_frame(1, b"\xff\xfe"))
+            elif msg_op == 1 and msg == b"masked":
+                sock.sendall(ws_frame(1, b"oops", mask=b"\x01\x02\x03\x04"))
+            else:
+                sock.sendall(ws_frame(msg_op, msg))
+    except (EOFError, OSError, ssl.SSLError):
+        return
+
+
+
 def http_respond(sock, secure, method, path, query, head, body, state):
     """Answers one request. Returns False when the connection is finished."""
     send = sock.sendall
@@ -566,6 +722,78 @@ def http_respond(sock, secure, method, path, query, head, body, state):
             send(b"0\r\n\r\n")
         else:
             send(http_response(200, [enc, ("Content-Length", len(z))], z))
+    elif path == "/file":
+        etag = '"%s"' % query.get("etag", "v1")
+        cut = int(query.get("cut", "-1"))
+        once = query.get("once")
+        if once is not None:
+            with HTTP_LOG_LOCK:
+                first = once not in FILE_SEEN
+                FILE_SEEN.add(once)
+            if not first:
+                cut = -1
+                etag = '"%s"' % query.get("etag2", query.get("etag", "v1"))
+        fields = {}
+        for line in head.replace(b"\r\n", b"\n").split(b"\n")[1:]:
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                fields[k.strip().lower().decode()] = v.strip().decode()
+        start = 0
+        rng = fields.get("range", "")
+        if query.get("ranges", "1") != "0" and rng.startswith("bytes=") and fields.get("if-range", etag) == etag:
+            start = int(rng[6:].split("-")[0])
+            if start >= n:
+                send(http_response(416, [("Content-Range", "bytes */%d" % n), ("Content-Length", 0), ("ETag", etag)]))
+                return True
+        body = pattern(n - start, start)
+        hdrs = [("ETag", etag), ("Accept-Ranges", "bytes"), ("Content-Length", len(body))]
+        if start:
+            hdrs.append(("Content-Range", "bytes %d-%d/%d" % (start, n - 1, n)))
+        send(http_response(206 if start else 200, hdrs))
+        if 0 <= cut < len(body):
+            send(body[:cut])
+            tcp_abort(sock)
+            return False
+        send(body)
+    elif path == "/fixture":
+        name = query.get("f", "")
+        full = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", name)
+        if not name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in name) \
+                or not os.path.isfile(full):
+            send(http_response(404, [("Content-Length", 0)]))
+        else:
+            data = open(full, "rb").read()
+            hdrs = [("Content-Length", len(data))]
+            if "enc" in query:
+                hdrs.append(("Content-Encoding", query["enc"]))
+            send(http_response(200, hdrs, data))
+    elif path == "/flaky":
+        key = query.get("id", "x")
+        with HTTP_LOG_LOCK:
+            FLAKY[key] = FLAKY.get(key, 0) + 1
+            seen = FLAKY[key]
+        if seen <= int(query.get("fails", "1")):
+            if query.get("mode", "drop") == "503":
+                send(http_response(503, [("Retry-After", query.get("ra", "1")), ("Content-Length", 0)]))
+            else:
+                tcp_abort(sock)
+                return False
+        else:
+            send(http_response(200, [("Content-Length", 2)], b"ok"))
+    elif path == "/flaky-count":
+        body = str(FLAKY.get(query.get("id", "x"), 0)).encode()
+        send(http_response(200, [("Content-Length", len(body))], body))
+    elif path == "/socks-last":
+        send(http_response(200, [("Content-Length", len(repr(SOCKS_LAST)))], repr(SOCKS_LAST).encode()))
+    elif path == "/setcookie":
+        hdrs = [("Set-Cookie", query[k]) for k in ("c", "c2", "c3") if k in query]
+        send(http_response(200, hdrs + [("Content-Length", 2)], b"ok"))
+    elif path == "/cookie-redirect":
+        send(http_response(302, [("Set-Cookie", query.get("c", "x=1")), ("Location", query.get("to", "/hello")),
+                                 ("Content-Length", 0)]))
+    elif path in ("/ws", "/ws-badaccept"):
+        ws_serve(sock, path, query, head)
+        return False
     elif path == "/encoding":
         send(http_response(200, [("Content-Encoding", query.get("name", "br")), ("Content-Length", 3)], b"raw"))
     elif path == "/who":
@@ -678,8 +906,14 @@ def http_handler(ctx, counter):
     return handle
 
 
-def proxy_handler(raw):
-    """Minimal HTTP/1.1 forward + CONNECT tunnel proxy on port 4444."""
+PROXY_AUTH_USER, PROXY_AUTH_PASS = "proxyuser", "p@ss w0rd"
+SOCKS_AUTH_USER, SOCKS_AUTH_PASS = "sockuser", "s0cks:pw"
+SOCKS_LAST = {}  # what the last SOCKS5 request looked like: atyp, auth, host
+ALLOWED_PROXY_PORTS = (4438, 4439, 4440, 4442, 4445)
+
+
+def proxy_handler(raw, auth_required=False):
+    """Minimal HTTP/1.1 forward + CONNECT tunnel proxy on port 4444 (4446 requires Proxy-Authorization)."""
     rd = HttpReader(raw)
     up = None
     try:
@@ -688,6 +922,16 @@ def proxy_handler(raw):
             return
         lines = head.replace(b"\r\n", b"\n").split(b"\n")
         method, target, ver = lines[0].decode().split(" ", 2)
+        if auth_required:
+            import base64
+            want = "Basic " + base64.b64encode(("%s:%s" % (PROXY_AUTH_USER, PROXY_AUTH_PASS)).encode()).decode()
+            got = ""
+            for line in lines[1:]:
+                if line.lower().startswith(b"proxy-authorization:"):
+                    got = line.split(b":", 1)[1].strip().decode()
+            if got != want:
+                raw.sendall(http_response(407, [("Proxy-Authenticate", 'Basic realm="test"'), ("Content-Length", 0)]))
+                return
         if method == "CONNECT":
             host, port_s = target.rsplit(":", 1)
             port = int(port_s)
@@ -746,6 +990,82 @@ def proxy_handler(raw):
             if s:
                 try:
                     s.close()
+                except OSError:
+                    pass
+
+
+def socks5_handler(raw, need_auth):
+    """SOCKS5 (RFC 1928) CONNECT proxy; with need_auth the username/password method (RFC 1929) is required."""
+    up = None
+    try:
+        ver, n = _ws_recv_exact(raw, 2)
+        methods = _ws_recv_exact(raw, n)
+        if ver != 5:
+            return
+        authed = False
+        if need_auth:
+            if 2 not in methods:
+                raw.sendall(b"\x05\xff")
+                return
+            raw.sendall(b"\x05\x02")
+            _, ul = _ws_recv_exact(raw, 2)
+            user = _ws_recv_exact(raw, ul).decode()
+            pl = _ws_recv_exact(raw, 1)[0]
+            pw = _ws_recv_exact(raw, pl).decode()
+            if (user, pw) != (SOCKS_AUTH_USER, SOCKS_AUTH_PASS):
+                raw.sendall(b"\x01\x01")
+                return
+            raw.sendall(b"\x01\x00")
+            authed = True
+        else:
+            if 0 not in methods:
+                raw.sendall(b"\x05\xff")
+                return
+            raw.sendall(b"\x05\x00")
+        _, cmd, _, atyp = _ws_recv_exact(raw, 4)
+        if atyp == 1:
+            host = ".".join(str(b) for b in _ws_recv_exact(raw, 4))
+        elif atyp == 3:
+            host = _ws_recv_exact(raw, _ws_recv_exact(raw, 1)[0]).decode()
+        else:
+            raw.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+            return
+        port = int.from_bytes(_ws_recv_exact(raw, 2), "big")
+        SOCKS_LAST.update(atyp=atyp, auth=int(authed), host=host, port=port)
+        if cmd != 1 or port not in ALLOWED_PROXY_PORTS:
+            raw.sendall(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")
+            return
+        up = socket.create_connection((host, port), timeout=5)
+        up.settimeout(None)
+        raw.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+
+        def pipe(src, dst):
+            try:
+                while True:
+                    d = src.recv(16384)
+                    if not d:
+                        break
+                    dst.sendall(d)
+            except OSError:
+                pass
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+        t1 = threading.Thread(target=pipe, args=(raw, up), daemon=True)
+        t2 = threading.Thread(target=pipe, args=(up, raw), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    except (EOFError, OSError):
+        pass
+    finally:
+        for sk in (up, raw):
+            if sk:
+                try:
+                    sk.close()
                 except OSError:
                     pass
 
@@ -1014,6 +1334,16 @@ def h2_session(sock, state):
         elif path == "/goaway":
             send_resp(200, [("content-length", 3)], b"bye")
             sock.sendall(_h2_frame(7, 0, 0, sid.to_bytes(4, "big") + (0).to_bytes(4, "big")))
+        elif path == "/trailers":
+            # head, body, then a trailer block that adds "x-trailer: t1" to the client's dynamic table
+            sock.sendall(_h2_frame(1, 4, sid, _hpack_enc_headers(200, [])))
+            sock.sendall(_h2_frame(0, 0, sid, b"t" * n))
+            sock.sendall(_h2_frame(1, 4 | 1, sid, _hpack_enc_headers_raw([("x-trailer", "t1")], inc_dyn=True)))
+        elif path == "/dynref":
+            # refers to that entry by its index (62): decodes only if the trailers were decoded too
+            blk = bytes([0x88, 0xbe]) + _hpack_enc_int(0x00, 4, 0) + _hpack_enc_str("content-length") + _hpack_enc_str("2")
+            sock.sendall(_h2_frame(1, 4, sid, blk))
+            send_data_flow(sid, b"ok")
         elif path == "/cont":
             blk = _hpack_enc_headers(200, [("x-custom", "hpack-dyn"), ("content-length", 4)], inc_dyn=True)
             sock.sendall(_h2_frame(1, 0, sid, blk[:5]))
@@ -1113,6 +1443,315 @@ def h2_or_h1_handler(ctx, counter):
     return handle
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# A concurrent HTTP/2 server for the multiplexing tests (ports 4449: 100 concurrent streams, 4450: 2).
+#
+#   /hello                      "hello"
+#   /len?n=N                    N pattern bytes
+#   /slow?n=N&delay=MS          nothing for MS milliseconds, then N pattern bytes
+#   /trickle?n=N&chunk=C&gap=MS the body in pieces of C bytes, MS milliseconds apart (headers at once)
+#   /echo                       the request body (POST)
+#   /stats                      "conn=ID streams=N max_active=M cancelled=C"
+#   /goaway_once?token=T        first time per token: GOAWAY with last stream id below this one, no answer
+#   /refuse_once?token=T        first time per token: RST_STREAM(REFUSED_STREAM), then normal answers
+#   /trailers?n=N               headers, N bytes, then a trailer block
+# Every answer carries x-conn, x-sid and x-maxactive (the most streams this connection had open at once).
+# A client that opens more than the advertised number of streams gets GOAWAY(PROTOCOL_ERROR).
+# ---------------------------------------------------------------------------------------------------------------
+
+H2MUX_ONCE = set()
+H2MUX_ONCE_LOCK = threading.Lock()
+
+
+def _h2mux_once(kind, token):
+    with H2MUX_ONCE_LOCK:
+        key = (kind, token)
+        if key in H2MUX_ONCE:
+            return False
+        H2MUX_ONCE.add(key)
+        return True
+
+
+def h2mux_session(sock, state, max_conc):
+    import time
+    import select as _select
+
+    if _h2_recv_exact(sock, 24) != b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n":
+        return
+    sock.sendall(_h2_frame(4, 0, 0, b"\x00\x03" + max_conc.to_bytes(4, "big") + b"\x00\x05\x00\x00\x40\x00"))
+    sock.setblocking(False)
+    inbuf = bytearray()
+    dyn = []
+    client_init_win = 65535
+    conn_send_win = 65535
+    streams = {}
+    order = []
+    state.update(max_active=0, cancelled=0, total=0)
+    goaway_last = None
+    closing = False
+
+    def send(b):
+        view = memoryview(b)
+        while len(view):
+            try:
+                n = sock.send(view)
+                view = view[n:]
+            except (ssl.SSLWantWriteError, ssl.SSLWantReadError, BlockingIOError):
+                _select.select([], [sock], [], 1.0)
+
+    def fill(timeout):
+        if not sock.pending():
+            r, _, _ = _select.select([sock], [], [], timeout)
+            if not r:
+                return True
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except (ssl.SSLWantReadError, BlockingIOError):
+                return True
+            if not chunk:
+                return False
+            inbuf.extend(chunk)
+            if not sock.pending():
+                return True
+
+    def common_headers(sid, extra):
+        return [("x-conn", state["conn_id"]), ("x-sid", sid), ("x-maxactive", state["max_active"])] + extra
+
+    def plan_response(sid, status, hdrs, body=b"", delay=0.0, chunk=0, gap=0.0, trailers=None, end_on_hdrs=False):
+        streams[sid]["plan"] = dict(status=status, hdrs=hdrs, body=body, off=0, due=time.time() + delay,
+                                    chunk=chunk, gap=gap, next_t=0.0, hdr_sent=False, trailers=trailers,
+                                    end_on_hdrs=end_on_hdrs)
+
+    def finish_request(sid):
+        nonlocal goaway_last
+        st = streams[sid]
+        hmap = {}
+        for k, v in st["headers"]:
+            hmap.setdefault(k, []).append(v)
+        method = hmap.get(":method", ["GET"])[0]
+        parsed = urllib.parse.urlsplit(hmap.get(":path", ["/"])[0] if isinstance(hmap.get(":path"), list) else "/")
+        path = parsed.path
+        q = dict(urllib.parse.parse_qsl(parsed.query))
+        n = int(q.get("n", "0"))
+        if path == "/hello":
+            plan_response(sid, 200, common_headers(sid, [("content-length", 5)]), b"hello")
+        elif path == "/len":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n))
+        elif path == "/slow":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n),
+                          delay=int(q.get("delay", "0")) / 1000.0)
+        elif path == "/trickle":
+            plan_response(sid, 200, common_headers(sid, [("content-length", n)]), pattern(n),
+                          chunk=int(q.get("chunk", "1000")), gap=int(q.get("gap", "10")) / 1000.0)
+        elif path == "/echo":
+            body = bytes(st["body"])
+            plan_response(sid, 200, common_headers(sid, [("content-length", len(body))]), body)
+        elif path == "/stats":
+            out = ("conn=%d streams=%d max_active=%d cancelled=%d" %
+                   (state["conn_id"], state["total"], state["max_active"], state["cancelled"])).encode()
+            plan_response(sid, 200, common_headers(sid, [("content-length", len(out))]), out)
+        elif path == "/goaway_once" and _h2mux_once("goaway", q.get("token", "")):
+            goaway_last = max(sid - 2, 0)
+            send(_h2_frame(7, 0, 0, goaway_last.to_bytes(4, "big") + (0).to_bytes(4, "big")))
+            streams.pop(sid, None)
+        elif path == "/refuse_once" and _h2mux_once("refuse", q.get("token", "")):
+            send(_h2_frame(3, 0, sid, (7).to_bytes(4, "big")))
+            streams.pop(sid, None)
+        elif path in ("/goaway_once", "/refuse_once"):
+            plan_response(sid, 200, common_headers(sid, [("content-length", 5)]), b"again")
+        elif path == "/trailers":
+            plan_response(sid, 200, common_headers(sid, []), pattern(n), trailers=[("x-trailer", "t%d" % sid)])
+        else:
+            plan_response(sid, 404, common_headers(sid, [("content-length", 0)]), end_on_hdrs=True)
+
+    def serve_streams():
+        nonlocal conn_send_win
+        progressed = False
+        now = time.time()
+        for sid in list(order):
+            st = streams.get(sid)
+            if st is None:
+                order.remove(sid)
+                continue
+            plan = st.get("plan")
+            if not plan or now < plan["due"]:
+                continue
+            if not plan["hdr_sent"]:
+                blk = _hpack_enc_headers(plan["status"], plan["hdrs"])
+                done = plan["end_on_hdrs"]
+                send(_h2_frame(1, 4 | (1 if done else 0), sid, blk))
+                plan["hdr_sent"] = True
+                progressed = True
+                if done:
+                    streams.pop(sid, None)
+                    order.remove(sid)
+                continue
+            body = plan["body"]
+            left = len(body) - plan["off"]
+            if left > 0:
+                if plan["gap"] and now < plan["next_t"]:
+                    continue
+                chunk = min(left, 16384, conn_send_win, st["send_win"], plan["chunk"] or left)
+                if chunk <= 0:
+                    continue
+                last = plan["off"] + chunk == len(body) and not plan["trailers"]
+                send(_h2_frame(0, 1 if last else 0, sid, body[plan["off"]:plan["off"] + chunk]))
+                plan["off"] += chunk
+                conn_send_win -= chunk
+                st["send_win"] -= chunk
+                plan["next_t"] = now + plan["gap"]
+                progressed = True
+                if last:
+                    streams.pop(sid, None)
+                    order.remove(sid)
+                continue
+            if plan["trailers"]:
+                send(_h2_frame(1, 4 | 1, sid, _hpack_enc_headers_raw(plan["trailers"], inc_dyn=True)))
+                progressed = True
+            elif not body:
+                send(_h2_frame(0, 1, sid, b""))
+                progressed = True
+            streams.pop(sid, None)
+            order.remove(sid)
+        return progressed
+
+    def next_deadline():
+        ts = [st["plan"]["due"] for st in streams.values() if st.get("plan") and not st["plan"]["hdr_sent"]]
+        ts += [st["plan"]["next_t"] for st in streams.values()
+               if st.get("plan") and st["plan"]["hdr_sent"] and st["plan"]["gap"]]
+        return min(ts) if ts else None
+
+    def frames():
+        while len(inbuf) >= 9:
+            flen = int.from_bytes(inbuf[:3], "big")
+            if len(inbuf) < 9 + flen:
+                return
+            ftype, flags = inbuf[3], inbuf[4]
+            sid = int.from_bytes(inbuf[5:9], "big") & 0x7fffffff
+            pay = bytes(inbuf[9:9 + flen])
+            del inbuf[:9 + flen]
+            yield flen, ftype, flags, sid, pay
+
+    while True:
+        # anything the streams can do right now
+        while serve_streams():
+            pass
+        if closing or (goaway_last is not None and not streams):
+            return
+        dl = next_deadline()
+        timeout = 0.5 if dl is None else max(0.0, min(0.5, dl - time.time()))
+        # stream windows or the connection window may be what the streams wait for: the client answers by itself
+        if not fill(timeout):
+            return
+        for flen, ftype, flags, sid, pay in frames():
+            if ftype == 4:  # SETTINGS
+                if not (flags & 1):
+                    for off in range(0, len(pay), 6):
+                        pid = int.from_bytes(pay[off:off + 2], "big")
+                        pval = int.from_bytes(pay[off + 2:off + 6], "big")
+                        if pid == 4:
+                            for stt in streams.values():
+                                stt["send_win"] += pval - client_init_win
+                            client_init_win = pval
+                    send(_h2_frame(4, 1, 0))
+            elif ftype == 6:
+                if not (flags & 1):
+                    send(_h2_frame(6, 1, 0, pay))
+            elif ftype == 8:  # WINDOW_UPDATE
+                inc = int.from_bytes(pay, "big") & 0x7fffffff
+                if sid == 0:
+                    conn_send_win += inc
+                elif sid in streams:
+                    streams[sid]["send_win"] += inc
+            elif ftype == 3:  # RST_STREAM
+                if streams.pop(sid, None) is not None:
+                    state["cancelled"] += 1
+            elif ftype == 7:
+                return
+            elif ftype in (1, 9):  # HEADERS, CONTINUATION
+                if ftype == 1:
+                    if goaway_last is not None and sid > goaway_last:
+                        continue
+                    off = 0
+                    pad = 0
+                    if flags & 0x08:
+                        pad = pay[0]
+                        off += 1
+                    if flags & 0x20:
+                        off += 5
+                    frag = pay[off:len(pay) - pad]
+                    if sid not in streams:
+                        if len(streams) >= max_conc:
+                            send(_h2_frame(7, 0, 0, sid.to_bytes(4, "big") + (1).to_bytes(4, "big")))
+                            return
+                        streams[sid] = {"hdr_blk": bytearray(), "headers": [], "body": bytearray(),
+                                        "send_win": client_init_win, "end_recv": False}
+                        order.append(sid)
+                        state["total"] += 1
+                        state["max_active"] = max(state["max_active"], len(streams))
+                    st = streams[sid]
+                    if flags & 0x01:
+                        st["end_recv"] = True
+                else:
+                    if sid not in streams:
+                        continue
+                    st = streams[sid]
+                    frag = pay
+                st["hdr_blk"] += frag
+                if flags & 0x04:
+                    st["headers"] = _hpack_dec_block(bytes(st["hdr_blk"]), dyn)
+                    st["hdr_blk"] = bytearray()
+                    if st["end_recv"]:
+                        finish_request(sid)
+            elif ftype == 0 and sid in streams:  # DATA
+                st = streams[sid]
+                off = 0
+                pad = 0
+                if flags & 0x08:
+                    pad = pay[0]
+                    off += 1
+                st["body"] += pay[off:len(pay) - pad]
+                if flen > 0:
+                    upd = flen.to_bytes(4, "big")
+                    send(_h2_frame(8, 0, 0, upd) + (_h2_frame(8, 0, sid, upd) if not (flags & 1) else b""))
+                if flags & 0x01:
+                    st["end_recv"] = True
+                    finish_request(sid)
+
+
+def _hpack_enc_headers_raw(hdrs, inc_dyn=False):
+    """A header block without :status (trailers)."""
+    out = bytearray()
+    for k, v in hdrs:
+        mask = 0x40 if inc_dyn else 0x00
+        bits = 6 if inc_dyn else 4
+        out += _hpack_enc_int(mask, bits, 0) + _hpack_enc_str(k.lower()) + _hpack_enc_str(str(v))
+    return bytes(out)
+
+
+def h2mux_handler(ctx, counter, max_conc):
+    def handle(raw):
+        counter.inc()
+        state = {"conn_id": counter.n}
+        try:
+            sock = ctx.wrap_socket(raw, server_side=True)
+        except (OSError, ssl.SSLError):
+            raw.close()
+            return
+        try:
+            if sock.selected_alpn_protocol() == "h2":
+                h2mux_session(sock, state, max_conc)
+        except (OSError, ssl.SSLError, ValueError):
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return handle
+
+
 def http_listeners(bind):
     ctx = tls_context("ecdsa", alpn=["http/1.1"])
     ctx_h2 = tls_context("ecdsa", alpn=["h2", "http/1.1"])
@@ -1120,7 +1759,11 @@ def http_listeners(bind):
     # mutual TLS, client certificate optional: /who shows who connected
     mtls = serve(bind, 4442, http_handler(mtls_context("ecdsa", required=False), Counter()))
     h2 = serve(bind, 4445, h2_or_h1_handler(ctx_h2, Counter()))
-    return tls + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler)]
+    mux = [serve(bind, 4449, h2mux_handler(ctx_h2, Counter(), 100)), serve(bind, 4450, h2mux_handler(ctx_h2, Counter(), 2))]
+    return tls + mux + [mtls, h2, serve(bind, 4440, http_handler(None, Counter())), serve(bind, 4444, proxy_handler),
+            serve(bind, 4446, lambda c: proxy_handler(c, True)),
+            serve(bind, 4447, lambda c: socks5_handler(c, False)),
+            serve(bind, 4448, lambda c: socks5_handler(c, True))]
 
 
 def serve(bind, port, handler):

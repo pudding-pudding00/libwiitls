@@ -45,25 +45,36 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum "libwiitls-${{ steps.ver.outputs.version }}-wii.zip" > SHA256SUMS
+          sha256sum "libwiitls-${{ steps.ver.outputs.version }}-wii.zip" "libwiitls-${{ steps.ver.outputs.version }}-wii.sbom.spdx.json" > SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
           name: libwiitls-${{ steps.ver.outputs.version }}-wii
           path: |
             dist/libwiitls-${{ steps.ver.outputs.version }}-wii.zip
+            dist/libwiitls-${{ steps.ver.outputs.version }}-wii.sbom.spdx.json
             dist/SHA256SUMS
           if-no-files-found: error
 
   release:
     needs: [ci, package]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write      # build provenance attestation
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: libwiitls-${{ needs.package.outputs.version }}-wii
           path: dist
+      - name: Attest build provenance of the package
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/libwiitls-${{ needs.package.outputs.version }}-wii.zip
+            dist/libwiitls-${{ needs.package.outputs.version }}-wii.sbom.spdx.json
       - name: Release notes from CHANGELOG.md
         run: |
           VER="${{ needs.package.outputs.version }}"

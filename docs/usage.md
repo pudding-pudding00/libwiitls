@@ -70,6 +70,31 @@ wtls_time_sync_sntp(NULL, 3000);   /* recommended once; see "The clock" */
 It runs health tests on that data and fails with `WTLS_ERR_ENTROPY` rather
 than run with weak randomness; treat that as fatal for networking.
 
+**Starting without waiting (1.1).** `wtls_init_start()` and
+`wtls_init_step(budget_ms)` split that wait into slices, for example while
+libogc's `net_init_async()` brings the network up and your UI keeps drawing:
+
+```c
+wtls_init_start();                         /* allowed before net_init() */
+net_init_async(net_done_cb, NULL);
+for (;;) {                                 /* your frame loop */
+    int r = wtls_init_step(2);             /* ~2 ms of collecting per frame */
+    if (r == WTLS_OK) break;               /* initialised, as after wtls_init() */
+    if (r == WTLS_ERR_NET) { /* entropy ready, network not yet: try next frame */ }
+    else if (r != WTLS_WANT_READ) { /* WTLS_ERR_ENTROPY: no TLS possible */ }
+    draw_frame();
+}
+```
+
+The samples, health tests and credited entropy are the same as in
+`wtls_init()`; only the collection runs ahead of `psa_crypto_init()` into a
+256-byte pool that the final step uses up. `WTLS_ERR_NET` keeps the pool, so
+call again once `net_init()` has finished. Measured on a Wii (IOS 58, after
+the one-time warm-up): `wtls_init()` 329 ms in one piece; `wtls_init_step(5)`
+64 calls of at most 5.1 ms, the last one (`psa_crypto_init()` from the pool)
+8.2 ms. The first call of a process also runs a 1024-sample warm-up, sliced
+the same way (about 80 ms in total).
+
 **The clock.** Certificates can only be checked with a correct date, and the
 Wii's clock is often wrong (dead clock battery, never set). Two strategies:
 
@@ -80,6 +105,12 @@ Wii's clock is often wrong (dead clock battery, never set). Two strategies:
   clock that is off by less shows up as `WTLS_ERR_CERT` with the
   `MBEDTLS_X509_BADCERT_EXPIRED` or `_FUTURE` flag. In both cases: sync, retry
   once.
+- Or remember the result: after a successful sync call
+  `wtls_time_save("sd:/apps/myapp/clock.bin")`; at the next start
+  `wtls_time_load(path, 7 * 86400)` applies it without network traffic. It is
+  only a hint (rejected if the file is damaged, older than the age you pass, or
+  the console clock went backwards); if a certificate still looks expired,
+  sync once and retry as above.
 
 **Network / Wi-Fi changes.** After `net_deinit()` / `net_init()` or switching
 access points, `wtls_net_reset()` flushes the DNS cache and pooled HTTP
@@ -305,9 +336,12 @@ Points that trip people up:
   (with your `Upgrade` header) and call `wtls_http_detach()` on a `101`
   response to take over the underlying `wtls_conn *` (`wss://`) or socket fd
   (`ws://`), preserving any early bytes received with the `101` head.
-- **HTTP proxy.** Set `req.proxy_url = "http://host[:port]"` for `http://`
-  forwarding and `https://` `CONNECT` tunneling (bypasses the keep-alive
-  pool).
+- **Proxies.** Set `req.proxy_url`: `"http://host[:port]"` for `http://`
+  forwarding and `https://` `CONNECT` tunneling, `"socks5h://host[:1080]"`
+  (the proxy resolves names) or `"socks5://host[:1080]"` (resolved locally,
+  IPv4). Add `user:pass@` (percent-encode special characters) for HTTP Basic
+  proxy authentication or SOCKS5 username/password. Proxied requests bypass
+  the keep-alive pool; `https://` is still verified against the target name.
 - **`http://`** works too, without TLS: only for servers you trust on a
   network you trust. `wtls_http_get_info` → `secure` tells you which one a
   response came over.
@@ -334,6 +368,134 @@ header fields; 64 request headers; `wtls_http_fetch` body 1 MiB by default
 Not supported: HTTP/3, concurrent HTTP/2 streams (multiplexing) and server
 push, cookies (send your own `Cookie` header), authentication schemes (send
 your own `Authorization`), caching, and `br` encoding.
+
+### Brotli and zstd bodies
+
+gzip and deflate bodies are decoded by default. `-DWTLS_BROTLI=ON` and
+`-DWTLS_ZSTD=ON` add `Content-Encoding: br` and `zstd` (off by default: about
+130 KiB and 60 KiB of code, the Brotli dictionary included). The request then
+advertises them in `Accept-Encoding`, `wtls_http_info::br` / `::zstd` tell
+which one was used, and `req.no_gzip` turns all decoding off as before. The
+decoders only accept windows up to `WTLS_BROTLI_MAX_LGWIN` (22 = 4 MiB, the
+encoders' default) and `WTLS_ZSTD_MAX_WINDOW_LOG` (23 = 8 MiB, the limit of
+RFC 9659); a larger window ends the read with `WTLS_ERR_HTTP_LIMIT`. Brotli
+and zstd symbols are not prefixed: do not enable the options in an application
+that links its own libbrotli or libzstd.
+
+### Requests without blocking
+
+`wtls_http_open()` waits for the connect, the handshake and the response head.
+For a UI thread, or to run several requests at once, use the stepping API:
+
+```c
+wtls_http_response *r;
+wtls_status st = wtls_http_start(&r, &req);          /* returns at once */
+while (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) {
+    wtls_http_wait(&r, 1, 50);                        /* or net_poll() on wtls_http_get_fd(r) */
+    st = wtls_http_step(r);
+}
+if (st != WTLS_OK) { if (r) wtls_http_close(r); return; }   /* start() leaves r NULL when it fails at once */
+
+char buf[1024];
+for (;;) {                                           /* the body: reads never wait */
+    int n = wtls_http_read(r, buf, sizeof buf);
+    if (n > 0) { consume(buf, n); continue; }
+    if (n == WTLS_WANT_READ) { wtls_http_wait(&r, 1, 50); continue; }
+    break;                                           /* 0 = end, < 0 = error */
+}
+wtls_http_close(r);                                  /* at any time: cancels, never leaks, never pools a half-used connection */
+```
+
+Several responses can be waited on together with `wtls_http_wait(responses, n, ms)`;
+step or read all of them afterwards (it tells how many can progress, not which).
+A descriptor of -1 from `wtls_http_get_fd()` means "nothing to poll": a host name
+is being resolved or a retry waits for its backoff; just step again after a few
+milliseconds. Everything the blocking call does applies (redirects, cookies,
+`total_timeout_ms`, retries, gzip, the keep-alive pool). The request structure and what it
+points to must stay valid until the head is complete; `body_cb` is called from
+`wtls_http_step()` and must not block. Not supported: proxies, `expect_100_continue`,
+`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii one call can still wait briefly: a send that is larger than the free space of IOS's ~4 KB socket buffer blocks until IOS has room
+(measured: up to 650 ms while the server stopped reading; see `docs/ios-socket-behaviour.md`). So
+"never waits" holds on the host, and on the Wii for everything but that case; keep the UI
+loop tolerant of an occasional stall of that size.
+
+#### HTTP/2 and several requests at once
+
+Over `https://` the stepping API negotiates HTTP/2 (unless `no_h2` is set). Requests started this way
+to the same host share **one connection**: each one gets a stream of its own, so a slow
+download does not hold up a small request, and a connection that cost a handshake on a Wii is
+used for all of them. Details worth knowing:
+
+- At most `WTLS_H2_MAX_STREAMS` streams (CMake, default 4) are open at once, fewer if the server
+  advertises a lower `SETTINGS_MAX_CONCURRENT_STREAMS`. Until the server's first SETTINGS have
+  arrived only one stream is opened. A request that does not fit waits for a free stream for up to a
+  second, then opens a connection of its own.
+- Memory per connection is `streams x WTLS_H2_STREAM_WINDOW` (default 4 x 32 KiB) plus the TLS
+  record buffers. The window is also the flow-control window of each stream: the library
+  announces more credit only for bytes you have **read**, so a response you do not read stops the
+  server for that stream, and nothing else is held up.
+- `wtls_http_close()` on an unfinished response cancels its stream (`RST_STREAM`) and leaves the
+  connection to the others.
+- If the server sends `GOAWAY` or refuses a stream, or the connection was gone when the request went out,
+  an idempotent request without a streaming body is repeated on a new connection by itself (at most
+  three times); anything else fails with `WTLS_ERR_IO`.
+- `wtls_http_get_fd()` of responses on one connection is the same descriptor; step every response that
+  `wtls_http_wait()` reports as possibly ready (it tells how many, not which).
+- `wtls_http_pool_flush()` closes idle sessions and closes busy ones with their last response; idle
+  ones go after 60 s anyway.
+- Blocking `wtls_http_open()` keeps its own pooled HTTP/2 connection (one stream at a time); the two do
+  not share connections.
+
+### Deadlines and retries
+
+```c
+req.total_timeout_ms = 10000;   /* the whole call, redirects and body included */
+req.max_retries = 2;            /* after DNS / connect / timeout / reset errors, idempotent requests only */
+req.retry_backoff_ms = 500;     /* 0.5 s, 1 s, ... (+/-25 %) */
+req.retry_on_503 = true;        /* also retry 429/503, honouring Retry-After (max 60 s) */
+```
+
+`total_timeout_ms` is the one number a UI wants: every stage timeout is cut down
+to what is left, `wtls_http_read()` stops at the deadline with `WTLS_ERR_TIMEOUT`,
+and waits between retries count against it. Host name resolution cannot be
+interrupted (see the async DNS work on the roadmap). Retries cover the time up to
+the response head; once body bytes are delivered nothing is repeated, and requests
+with a streaming body (`body_cb`) or a method that is not idempotent (POST, PATCH)
+are never retried.
+
+### Cookies
+
+```c
+wtls_cookie_jar *jar = wtls_cookie_jar_new(0);       /* 0 => up to 64 cookies */
+wtls_http_request req = {0};
+req.cookie_jar = jar;                                /* reuse the same jar for every request */
+req.url = "https://example.com/login";
+/* ... fetch ...; later requests send the matching cookies automatically */
+wtls_cookie_jar_free(jar);
+```
+
+The jar lives in memory only (persist what you need yourself). It follows
+RFC 6265: `Domain` (host-only without it), `Path`, `Secure` (never sent in clear
+and not accepted from plain http), `Expires` / `Max-Age` (deletion included),
+and it decides per redirect hop, so cookies set by a redirect are sent to its
+target. A `Cookie` header you pass yourself wins. Limits: there is no public
+suffix list (a `Domain=co.uk` cookie is accepted; a bare `com` is not), no
+`SameSite` handling (the library is not a browser), and cookies ignore ports as
+in browsers.
+
+### Authorization headers
+
+```c
+char auth[160];
+wtls_http_basic_auth("user", "secret", auth, sizeof auth, NULL);   /* or wtls_http_bearer_auth(token, ...) */
+wtls_http_header h[] = {{"Authorization", auth}};
+req.headers = h;
+req.n_headers = 1;
+```
+
+The helpers only build the header value (RFC 7617 / RFC 6750). `Authorization`
+is dropped automatically when a redirect leaves the origin. Digest
+authentication is not supported.
 
 ## 6. Faster second connections
 
@@ -382,6 +544,25 @@ for (;;) {
 
 After `WTLS_WANT_WRITE` from `wtls_write`, call it again with **the same
 buffer and length**.
+
+**Host name lookups.** By default `wtls_connect_start()` still resolves a name
+that is not cached inside the call (as in 1.0), so even the non-blocking path can
+wait for the DNS timeout. Set `opt.async_dns = true` to avoid that: the lookup
+then runs on a helper thread, the call returns `WTLS_WANT_READ` with
+`wtls_get_fd(c) == -1` (nothing to poll yet: call `wtls_connect_step()` again
+after a few milliseconds), and the connect continues once the address is in.
+Addresses are cached after the first successful connect as before. The blocking
+`wtls_connect()` uses the same mechanism, so `abort_cb` now also cancels a
+connect that is stuck in DNS (a change from 1.0, where the lookup could not be
+interrupted), and `opt.dns_timeout_ms` bounds the lookup (`WTLS_ERR_TIMEOUT`;
+0 keeps the old unlimited wait). `wtls_net_reset()` discards the answer of a
+lookup that was running during the reset. **On the Wii** the lookups run on
+one resolver thread (priority 80, 16 KiB stack from the heap), started on the
+first lookup that misses the cache and kept for the life of the program, since a
+libogc thread cannot be detached. Lookups go through it one after another (the
+IOS resolver is not reentrant anyway): a name that hangs in IOS holds up the
+names queued behind it, but every caller still gets its own `dns_timeout_ms` or
+abort.
 
 ## 8. Your own server / self-signed certificates
 
@@ -441,7 +622,7 @@ the client certificate is stripped when a redirect leaves the origin.
 ### Public-key (SPKI) pinning
 
 In addition to normal chain + date + hostname verification, you can pin up to
-`WTLS_SPKI_MAX_PINS` (2: primary + backup) SHA-256 digests of ASN.1 DER
+`WTLS_SPKI_MAX_PINS` (2: primary + backup; more in `spki_pins_ext`, below) SHA-256 digests of ASN.1 DER
 `SubjectPublicKeyInfo`:
 
 ```c
@@ -458,6 +639,16 @@ Matches if any verified chain certificate (leaf, intermediate, or trusted root)
 matches a configured pin; mismatches fail with `WTLS_ERR_CERT`
 (`MBEDTLS_X509_BADCERT_OTHER` set in `wtls_last_verify_flags()`). Pin sets are
 isolated in both TLS session tickets and the HTTP keep-alive pool.
+
+For key rotation with more backups, `spki_pins_ext` (added in 1.1; the 1.0 array
+layout is unchanged) takes up to `WTLS_SPKI_MAX_PINS_EXT` (4) further digests,
+so six pins are possible in total. Any match across both lists suffices:
+
+```c
+static const uint8_t k_more[3][WTLS_SPKI_SHA256_LEN] = { /* ... */ };
+opt.spki_pins_ext = k_more;       /* copied at connect */
+opt.n_spki_pins_ext = 3;
+```
 
 ## 9. What to do with each error
 
@@ -481,6 +672,134 @@ isolated in both TLS session tickets and the HTTP keep-alive pool.
 | `WTLS_ERR_HTTP` | malformed or unsupported HTTP response, corrupt gzip/deflate body, or HTTP/2 protocol error | report; the server is broken or sent invalid framing |
 | `WTLS_ERR_HTTP_LIMIT` | response head over 16 KiB / 100 fields, or `wtls_http_fetch` body over its limit | stream with `wtls_http_read`, or raise `max_body` |
 | `WTLS_ERR_HTTP_REDIRECT` | more than `max_redirects`, bad `Location`, or `https` → `http` | report; do not follow the downgrade yourself |
+
+## 9a. Logging and key log
+
+Install a callback to see what the library does (handshakes, certificate
+failures, redirects, connection reuse, network resets):
+
+```c
+static void on_log(void *ctx, wtls_log_level level, uint32_t category, const char *msg) {
+    printf("[%d/%02x] %s\n", level, (unsigned)category, msg);
+}
+wtls_set_log_cb(on_log, NULL, WTLS_LOG_INFO, WTLS_LOG_CAT_ALL);
+```
+
+The callback runs on the thread that called the library function, and may be
+installed before `wtls_init()`. Messages above the level or outside the
+category mask are dropped before formatting. Request and response bodies,
+header values, query strings and key material are never logged; request log
+lines show only the method, host and port.
+
+`wtls_set_keylog_cb()` delivers TLS secrets in the NSS `SSLKEYLOGFILE` format
+(for Wireshark). It exists only when the library is built with
+`-DWTLS_KEYLOG=ON`, the default for `Debug` builds; in release builds it
+returns `WTLS_ERR_UNSUPPORTED` and the export code is not linked in. Never
+ship an application that writes these lines anywhere.
+
+## 9b. Custom allocator (e.g. MEM2)
+
+By default the library uses the C library's `malloc`/`free`. To place its
+memory elsewhere, install an allocator before `wtls_init()`; it also serves
+Mbed TLS and zlib:
+
+```c
+static void *my_calloc(void *ctx, size_t n, size_t size) { return mem2_calloc(n, size); }
+static void  my_free(void *ctx, void *p)                 { mem2_free(p); }
+
+wtls_allocator a = { my_calloc, NULL, my_free, NULL };   /* realloc_fn is optional */
+wtls_set_allocator(&a);
+wtls_init();
+```
+
+`wtls_set_allocator()` returns `WTLS_ERR_STATE` while the library is
+initialised. Close all connections and free all results before switching
+allocators (after `wtls_shutdown()`). Each block carries a 16-byte header, so
+return 16-byte aligned memory from `calloc_fn`.
+
+## 9c. Verifying downloaded payloads
+
+TLS protects the connection, not the file (a compromised mirror serves a valid
+TLS session too). For updates, sign the payload offline and embed the public key:
+
+```sh
+python3 tools/sign_payload.py genkey update-key.pem          # once; keep it offline
+python3 tools/sign_payload.py pubkey-c update-key.pem        # paste the C array into your app
+python3 tools/sign_payload.py sign update-key.pem app.dol    # writes app.dol.sig (DER)
+```
+
+```c
+if (wtls_sig_verify_p256(k_update_pubkey, 65, data, len, sig, sig_len, WTLS_SIG_DER) != WTLS_OK)
+    /* WTLS_ERR_INTEGRITY: reject the file */;
+```
+
+For files too big for memory, hash while downloading (`wtls_sha256_init/update/finish`)
+and call `wtls_sig_verify_p256_digest()`. ECDSA P-256 with SHA-256 only; the
+signature format is passed explicitly (`WTLS_SIG_RAW` or canonical `WTLS_SIG_DER`).
+
+## 9d. Downloading a file (with resume)
+
+```c
+wtls_http_request req = {0};
+req.url = "https://example.com/app.bin";
+wtls_http_download_opts opt = {0};
+opt.sha256 = expected_digest;                 /* and/or a signature, see 9c */
+wtls_http_download_result res;
+wtls_status st = wtls_http_download(&req, "sd:/apps/app.bin", &opt, &res);
+```
+
+The data goes to `sd:/apps/app.bin.part` first; `.part.meta` records the URL and
+the server's validator (strong `ETag` or `Last-Modified`). After a dropped
+connection, a crash or a power loss, the same call resumes with `Range` /
+`If-Range`; if the file changed or the server ignores ranges, it starts over.
+The final file is replaced only after the digest and signature checks pass.
+FAT cannot rename over an existing file, so the old file is moved to `.old`
+first: call `wtls_http_download_recover(path)` at start-up (the download
+function does it too) to repair a power loss in that moment.
+
+## 9e. Refreshing the CA bundle from SD/USB
+
+The embedded bundle is a snapshot. Ship a fresh `cacert.pem` next to your app
+and load it at start-up:
+
+```c
+size_t n;
+if (wtls_load_ca_bundle_file("sd:/apps/myapp/cacert.pem", true, &n) != WTLS_OK) {
+    /* nothing changed: the embedded bundle stays in use */
+}
+```
+
+`replace_builtin = true` trusts only the file; `false` adds it to the embedded
+roots. To make sure nobody swapped the file, sign it and use
+`wtls_load_ca_bundle_file_signed()` with a public key built into the app (see
+9c). The file is streamed and kept as DER (about 150 KiB), parsed lazily.
+Needs `wtls_init()`. Cached session tickets and idle connections are dropped.
+
+## 9f. WebSockets
+
+```c
+#include <wiitls/websocket.h>
+
+wtls_ws_options o = {0};
+o.url = "wss://example.com/live";
+wtls_ws *ws;
+if (wtls_ws_connect(&ws, &o) == WTLS_OK) {
+    wtls_ws_send(ws, WTLS_WS_TEXT, "hello", 5);
+    char buf[1024];
+    int type, n = wtls_ws_recv(ws, &type, buf, sizeof buf);   /* one complete message */
+    wtls_ws_close(ws, 1000, "bye");
+}
+```
+
+Messages arrive whole (fragments are reassembled), Ping is answered, and a
+peer's Close ends `wtls_ws_recv()` with `WTLS_ERR_CLOSED` (code in
+`wtls_ws_close_code()`). Protocol violations (masked server frames, bad UTF-8
+in text, oversize messages) are answered with the proper Close code and
+reported as `WTLS_ERR_WS`. For a game loop use `wtls_ws_set_nonblocking(ws, true)`
+and poll `wtls_ws_get_fd()` (check `wtls_ws_pending()` first). `max_message`
+(default 1 MiB) bounds memory; `ping_interval_ms` keeps idle links alive.
+No extensions (no `permessage-deflate`). Build with `-DWTLS_WEBSOCKET=OFF` to
+leave it out (the functions then return `WTLS_ERR_UNSUPPORTED`).
 
 ## 10. Shutting down
 
@@ -507,8 +826,17 @@ called again afterwards.
   hardware, but has not been evaluated independently. Keep this in mind
   before protecting high-value secrets.
 - **Single thread**, see 3.
-- **Memory:** each connection holds Mbed TLS's record buffers (two 16 KiB
-  buffers plus overhead), allocated from the normal heap.
+- **Memory:** each connection holds Mbed TLS's record buffers (a 16 KiB receive
+  and a 16 KiB send buffer plus overhead), allocated from the normal heap (or
+  your allocator, 9b). Build options `-DWTLS_SSL_OUT_CONTENT_LEN=<n>` and
+  `-DWTLS_SSL_IN_CONTENT_LEN=<n>` (512..16384) shrink them. A smaller **send**
+  buffer is always safe (the library just writes smaller records; the handshake
+  needs about 2 KiB or more with long certificate chains): `4096` saves 12 KiB per
+  connection. A smaller **receive** buffer works only if the server honours the
+  `record_size_limit` (TLS 1.3, RFC 8449) or `max_fragment_length` (TLS 1.2, sizes
+  512-4096) extension the client then sends; otherwise connections to that
+  server fail with large records. Many servers (including OpenSSL-based ones)
+  ignore them, so test your targets before shipping a small receive buffer.
 
 ## 12. Versioning and compatibility
 

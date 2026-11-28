@@ -92,7 +92,7 @@ static void test_req_no_keepalive(void) {
 static void test_req_gzip(void) {
     int st;
     char *h = build("GET", "https://h/", NULL, 0, false, 0, false, true, &st);
-    CHECK(h && strstr(h, "Accept-Encoding: gzip, deflate\r\n"));
+    CHECK(h && strstr(h, "Accept-Encoding: gzip, deflate"));
     free(h);
     wtls_http_header hd[] = {{"accept-encoding", "identity"}};
     h = build("GET", "https://h/", hd, 1, false, 0, false, true, &st);

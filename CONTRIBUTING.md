@@ -69,7 +69,7 @@ CI runs all of this except the hardware tests on every push.
 - Secrets are wiped with `mbedtls_platform_zeroize()`. Code that handles
   secret data must stay constant-time (`tools/check_ct.cmake` checks the
   X25519 code).
-- Generated files (`src/gen/ca_bundle.c`, `src/accel/*.inc`) are regenerated
+- Generated files (`src/gen/ca_bundle.c`, `src/accel/*.inc`, `tests/common/wycheproof_*.inc`) are regenerated
   with the scripts in `tools/`, never edited by hand.
 - Add tests for bug fixes and new features: `tests/common/` is shared by the
   host and Wii runners.
@@ -78,6 +78,10 @@ CI runs all of this except the hardware tests on every push.
   and the header comments when behaviour changes.
 
 ## Releasing (maintainers)
+
+When bumping the Mbed TLS LTS release, check the configure-time patches first
+([docs/mbedtls-patches.md](docs/mbedtls-patches.md)); how the release is built, signed and
+verified is described in [docs/releasing.md](docs/releasing.md).
 
 1. Update the version in `CMakeLists.txt` (`project(libwiitls VERSION …)`) and
    `include/wiitls/wiitls.h` (`WTLS_VERSION` and `WTLS_VERSION_*`; the

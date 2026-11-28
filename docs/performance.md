@@ -57,4 +57,4 @@ speed, which is still well above Wi-Fi throughput.
 |---|---:|
 | `https_get.dol` (complete example program, HTTP client and gzip included) | 814 KiB |
 | Built-in Mozilla CA bundle (118 roots, parsed lazily) | in `.rodata` of `libwiitls.a` |
-| Per connection | about 2 × 16 KiB record buffers plus Mbed TLS state, on the heap |
+| Per connection | about 2 × 16 KiB record buffers plus Mbed TLS state, on the heap (`-DWTLS_SSL_OUT_CONTENT_LEN` / `-DWTLS_SSL_IN_CONTENT_LEN` reduce them, see usage.md section 11) |

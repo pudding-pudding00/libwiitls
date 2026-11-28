@@ -16,6 +16,7 @@
 #include "check.h"
 #include "env.h"
 #include "hw_net.h"
+#include "plat/plat.h"
 #include "suites.h"
 
 WTLS_CHECK_DEFINE_COUNTERS;
@@ -73,24 +74,50 @@ static void video_init(void) {
     if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
 }
 
+static const char *g_logip, *g_suite = "selftest";
+static int g_logport = 4405;
+
+static void parse_arg(const char *a) {
+    if (!strncmp(a, "logip=", 6)) g_logip = a + 6;
+    else if (!strncmp(a, "logport=", 8)) g_logport = atoi(a + 8);
+    else if (!strncmp(a, "suite=", 6)) g_suite = a + 6;
+    else if (!strncmp(a, "server=", 7)) g_env.server_host = a + 7;
+    else if (!strncmp(a, "pctime=", 7)) g_env.pc_time = strtoll(a + 7, NULL, 10);
+    else if (!strncmp(a, "iters=", 6)) g_env.soak_iters = (unsigned)strtoul(a + 6, NULL, 10);
+}
+
+/* Dolphin boots a DOL without arguments, but its sockets are host sockets:
+ * without logip, connect to the PC's loopback and take the arguments from
+ * the first line the log listener sends ("ARGS k=v k=v ...\n", tools/hwtest.py
+ * --dolphin). */
+static void args_from_log(void) {
+    static char line[512];
+    size_t n = 0;
+    while (n < sizeof line - 1) {
+        s32 r = net_recv(g_log_fd, line + n, 1, 0);
+        if (r <= 0 || line[n] == '\n') break;
+        n++;
+    }
+    line[n] = '\0';
+    if (strncmp(line, "ARGS ", 5) != 0) return;
+    for (char *tok = strtok(line + 5, " "); tok; tok = strtok(NULL, " ")) parse_arg(tok);
+}
+
 int main(int argc, char **argv) {
     video_init();
     printf("libwiitls hardware test runner\n");
 
-    const char *logip = NULL, *suite = "selftest";
-    int logport = 4405;
-    for (int i = 0; i < argc; i++) { /* wiiload may put the first argument in argv[0] */
-        if (!strncmp(argv[i], "logip=", 6)) logip = argv[i] + 6;
-        else if (!strncmp(argv[i], "logport=", 8)) logport = atoi(argv[i] + 8);
-        else if (!strncmp(argv[i], "suite=", 6)) suite = argv[i] + 6;
-        else if (!strncmp(argv[i], "server=", 7)) g_env.server_host = argv[i] + 7;
-        else if (!strncmp(argv[i], "pctime=", 7)) g_env.pc_time = strtoll(argv[i] + 7, NULL, 10);
-        else if (!strncmp(argv[i], "iters=", 6)) g_env.soak_iters = (unsigned)strtoul(argv[i] + 6, NULL, 10);
-    }
+    for (int i = 0; i < argc; i++) parse_arg(argv[i]); /* wiiload may put the first argument in argv[0] */
     g_env.is_hw = true;
 
     s32 r = hw_net_init();
-    if (r >= 0 && logip) g_log_fd = hw_log_connect(logip, logport);
+    if (r >= 0 && g_logip) {
+        g_log_fd = hw_log_connect(g_logip, g_logport);
+    } else if (r >= 0 && wtls_plat_is_dolphin()) {
+        g_log_fd = hw_log_connect("127.0.0.1", g_logport);
+        if (g_log_fd >= 0) args_from_log();
+    }
+    const char *suite = g_suite;
 
     wtls_hw_printf("suite=%s server=%s pctime=%lld log=%s\n", suite,
                    g_env.server_host ? g_env.server_host : "-", (long long)g_env.pc_time,
@@ -98,7 +125,7 @@ int main(int argc, char **argv) {
 
     int found = 0;
     if (r >= 0) {
-        const char *p = !strcmp(suite, "all") ? "time,plat,crypto,tls,http,soak,realworld" : suite;
+        const char *p = !strcmp(suite, "all") ? "time,plat,crypto,tls,log,alloc,sig,ws,httpasync,http,soak,realworld" : suite;
         while (*p) {
             const char *comma = strchr(p, ',');
             size_t len = comma ? (size_t)(comma - p) : strlen(p);

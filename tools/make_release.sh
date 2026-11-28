@@ -2,7 +2,7 @@
 # Builds the prebuilt Wii release package:
 #   dist/libwiitls-<version>-wii/  and  dist/libwiitls-<version>-wii.zip
 #
-# Run in a devkitPro shell (DEVKITPRO/DEVKITPPC set, cmake, zip):
+# Run in a devkitPro shell (DEVKITPRO/DEVKITPPC set, cmake, zip, python3, git):
 #   tools/make_release.sh
 #
 # A fresh build directory with the default options is used, so the package
@@ -30,10 +30,13 @@ if [ -d build-host/_deps/zlib-src ]; then
     FETCH+=(-DFETCHCONTENT_SOURCE_DIR_ZLIB="$ROOT/build-host/_deps/zlib-src")
 fi
 
+# Reproducible package: build time and file times come from the last commit.
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
+
 rm -rf "$BUILD" "$OUT" "dist/$NAME.zip"
 cmake -S . -B "$BUILD" -G "Unix Makefiles" \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Wii.cmake" \
-    -DWTLS_BUILD_HWTEST=OFF -DWTLS_BUILD_BENCH=OFF -DWTLS_BUILD_EXAMPLES=ON \
+    -DWTLS_BUILD_HWTEST=OFF -DWTLS_BUILD_BENCH=OFF -DWTLS_BUILD_EXAMPLES=ON -DWTLS_REPRODUCIBLE=ON \
     "${FETCH[@]}" >/dev/null
 cmake --build "$BUILD" -j8 >/dev/null # includes tools/check_ct.cmake
 
@@ -119,5 +122,6 @@ test -f "$CMAKE_CHK/build/pkg_check.dol"
 rm -rf "$CMAKE_CHK"
 echo "package self-check: Makefile and find_package(wiitls) link against the package"
 
-(cd dist && rm -f "$NAME.zip" && cmake -E tar cf "$NAME.zip" --format=zip "$NAME")
+python3 tools/gen_sbom.py --out "dist/$NAME.sbom.spdx.json" >/dev/null
+bash tools/deterministic_zip.sh "dist/$NAME" "dist/$NAME.zip"
 echo "dist/$NAME.zip"

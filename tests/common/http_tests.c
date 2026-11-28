@@ -965,7 +965,7 @@ static void http_gzip_offered(void) {
     wtls_http_response *r = get("/headers");
     if (!r) return;
     int last = 1;
-    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip, deflate\r\n") != NULL);
+    CHECK(strstr(body_str(r, &last), "Accept-Encoding: gzip, deflate") != NULL);
     wtls_http_close(r);
     r = gz_open("/headers", true, NULL, 0);
     if (!r) return;
@@ -1001,13 +1001,13 @@ static void http_gzip_own_accept_encoding_raw(void) {
 
 static void http_gzip_unknown_encoding(void) {
     wtls_http_pool_flush();
-    expect_open_err("/encoding?name=br", WTLS_ERR_HTTP);
+    expect_open_err("/encoding?name=compress", WTLS_ERR_HTTP); /* br and zstd are known with their build options */
     wtls_http_response *r = get("/encoding?name=identity");
     if (!r) return;
     int last = 1;
     CHECK(strcmp(body_str(r, &last), "raw") == 0);
     wtls_http_close(r);
-    r = gz_open("/encoding?name=br", true, NULL, 0); /* not offered: passed through */
+    r = gz_open("/encoding?name=compress", true, NULL, 0); /* not offered: passed through */
     if (!r) return;
     CHECK(strcmp(body_str(r, &last), "raw") == 0);
     wtls_http_close(r);
@@ -2122,6 +2122,359 @@ static void http_proxy_plain_and_connect(void) {
     CHECK_EQ_INT(wtls_http_fetch(&req, 1024, &res), WTLS_ERR_ARG);
 }
 
+/* ---- br / zstd Content-Encoding ------------------------------------------ */
+
+#if WTLS_BROTLI || WTLS_ZSTD
+static int read_pattern(const char *file, const char *enc, size_t repeat_len, size_t want_len, wtls_http_info *info,
+                        bool *pattern_ok) {
+    char path[160];
+    snprintf(path, sizeof path, "/fixture?f=%s&enc=%s", file, enc);
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, path);
+    req.no_keepalive = true;
+    wtls_http_response *r = NULL;
+    int st = wtls_http_open(&r, &req);
+    *pattern_ok = false;
+    if (st != WTLS_OK) return st;
+    wtls_http_get_info(r, info);
+    size_t total = 0;
+    bool ok = true;
+    uint8_t buf[3000];
+    int k;
+    while ((k = wtls_http_read(r, buf, sizeof buf)) > 0) {
+        for (int i = 0; i < k; i++) ok &= buf[i] == (uint8_t)((total + (size_t)i) % repeat_len % 251);
+        total += (size_t)k;
+    }
+    wtls_http_close(r);
+    *pattern_ok = ok && total == want_len;
+    return k;
+}
+#endif
+
+#if WTLS_BROTLI
+static void http_brotli_decodes(void) {
+    wtls_http_pool_flush();
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000.br", "br", 1000000, 1000, &info, &ok), 0);
+    CHECK(ok && info.br && !info.gzip && !info.zstd);
+    CHECK_EQ_INT(read_pattern("pattern100000.br", "br", 1000000, 100000, &info, &ok), 0);
+    CHECK(ok);
+}
+
+static void http_brotli_window_too_big_limit(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern100000_bigwindow.br", "br", 1000000, 100000, &info, &ok), WTLS_ERR_HTTP_LIMIT);
+}
+
+static void http_brotli_truncated_is_io_error(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000_cut.br", "br", 1000000, 1000, &info, &ok), WTLS_ERR_IO);
+}
+#endif
+
+#if WTLS_ZSTD
+static void http_zstd_decodes(void) {
+    wtls_http_pool_flush();
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000.zst", "zstd", 1000000, 1000, &info, &ok), 0);
+    CHECK(ok && info.zstd && !info.gzip && !info.br);
+    CHECK_EQ_INT(read_pattern("pattern100000.zst", "zstd", 1000000, 100000, &info, &ok), 0);
+    CHECK(ok);
+    /* two frames back to back are one body */
+    CHECK_EQ_INT(read_pattern("pattern2x1000.zst", "zstd", 1000, 2000, &info, &ok), 0);
+    CHECK(ok);
+}
+
+static void http_zstd_window_too_big_limit(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern100000_bigwindow.zst", "zstd", 1000000, 100000, &info, &ok), WTLS_ERR_HTTP_LIMIT);
+}
+
+static void http_zstd_truncated_and_corrupt(void) {
+    wtls_http_info info;
+    bool ok;
+    CHECK_EQ_INT(read_pattern("pattern1000_cut.zst", "zstd", 1000000, 1000, &info, &ok), WTLS_ERR_IO);
+    int rc = read_pattern("pattern1000_corrupt.zst", "zstd", 1000000, 1000, &info, &ok);
+    CHECK(rc != 0 || !ok); /* damaged data never passes as the original */
+}
+#endif
+
+#if WTLS_BROTLI || WTLS_ZSTD
+static void http_accept_encoding_lists_codecs(void) {
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/headers");
+    req.no_keepalive = true;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 4096, &res), WTLS_OK);
+    CHECK(res.body && contains_ci(res.body, "accept-encoding: gzip, deflate"));
+#if WTLS_BROTLI
+    CHECK(res.body && contains_ci(res.body, ", br"));
+#endif
+#if WTLS_ZSTD
+    CHECK(res.body && contains_ci(res.body, "zstd"));
+#endif
+    wtls_http_result_free(&res);
+}
+#endif
+
+/* ---- total deadline and retries ------------------------------------------- */
+
+static int flaky_count(const char *id) {
+    char path[80];
+    snprintf(path, sizeof path, "/flaky-count?id=%s", id);
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, path);
+    req.no_keepalive = true;
+    wtls_http_result res;
+    int n = -1;
+    if (wtls_http_fetch(&req, 64, &res) == WTLS_OK) {
+        n = atoi(res.body);
+        wtls_http_result_free(&res);
+    }
+    return n;
+}
+
+static void http_retry_io_error_then_ok(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true; /* every attempt on a fresh connection: no stale-socket retry mixed in */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r1&fails=2");
+    req.max_retries = 2;
+    req.retry_backoff_ms = 20;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK(res.body && strcmp(res.body, "ok") == 0);
+    wtls_http_result_free(&res);
+    CHECK_EQ_INT(flaky_count("r1"), 3);
+    /* one retry is not enough for two failures */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r2&fails=2");
+    req.max_retries = 1;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_IO);
+    CHECK_EQ_INT(flaky_count("r2"), 2);
+    /* default: no retries */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=r3&fails=1");
+    req.max_retries = 0;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_IO);
+    CHECK_EQ_INT(flaky_count("r3"), 1);
+}
+
+static void http_retry_never_post(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true;
+    req.method = "POST";
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=p1&fails=1");
+    req.body = "x";
+    req.body_len = 1;
+    req.max_retries = 3;
+    req.retry_backoff_ms = 10;
+    wtls_http_result res;
+    CHECK(wtls_http_fetch(&req, 64, &res) != WTLS_OK);
+    CHECK_EQ_INT(flaky_count("p1"), 1); /* a POST is not repeated */
+}
+
+/* Winsock retries the SYN to a closed port for about a second before it reports the refusal. */
+#if defined(_WIN32)
+#define REFUSED_ONE_MS 3000
+#else
+#define REFUSED_ONE_MS 150
+#endif
+
+static void http_retry_connect_refused_backs_off(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_CLOSED, "/hello");
+    req.max_retries = 2;
+    req.retry_backoff_ms = 100; /* 75-125 ms, then 150-250 ms */
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(dt >= 200 && dt < 2000 + 3 * REFUSED_ONE_MS);
+    req.max_retries = 0;
+    t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_CONNECT);
+    CHECK(wtls_plat_now_ms() - t0 < REFUSED_ONE_MS);
+}
+
+static void http_retry_503_retry_after(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.no_keepalive = true; /* every attempt on a fresh connection: no stale-socket retry mixed in */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s1&fails=1&mode=503&ra=1");
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK); /* not asked to retry: the 503 is the answer */
+    CHECK_EQ_INT(res.status, 503);
+    wtls_http_result_free(&res);
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s2&fails=1&mode=503&ra=1");
+    req.max_retries = 1;
+    req.retry_on_503 = true;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 200);
+    CHECK(wtls_plat_now_ms() - t0 >= 900); /* waited the Retry-After second */
+    wtls_http_result_free(&res);
+    /* no time left for the wait: the 503 is returned */
+    req.url = url_of("http", P_HTTP_PLAIN, "/flaky?id=s3&fails=5&mode=503&ra=30");
+    req.total_timeout_ms = 2000;
+    t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    CHECK_EQ_INT(res.status, 503);
+    CHECK(wtls_plat_now_ms() - t0 < 1500);
+    wtls_http_result_free(&res);
+}
+
+static void http_total_timeout_covers_retries(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_CLOSED, "/hello");
+    req.max_retries = 5;
+    req.retry_backoff_ms = 1000;
+    req.total_timeout_ms = 300;
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    CHECK(wtls_plat_now_ms() - t0 < 700);
+}
+
+static void http_total_timeout_slow_body(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/slowbody?ms=2500");
+    req.total_timeout_ms = 500;
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(dt >= 450 && dt < 1500);
+    /* the same budget is plenty for a fast body */
+    req.url = url_of("http", P_HTTP_PLAIN, "/hello");
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_OK);
+    wtls_http_result_free(&res);
+}
+
+static void http_total_timeout_slow_head(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/slowhead");
+    req.total_timeout_ms = 400; /* the default header timeout is 15 s */
+    wtls_http_result res;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_http_fetch(&req, 64, &res), WTLS_ERR_TIMEOUT);
+    CHECK(wtls_plat_now_ms() - t0 < 1500);
+}
+
+/* ---- proxy authentication and SOCKS5 ------------------------------------ */
+
+static void fetch_via(const char *proxy, const char *target, int *status, int *rc, char *body, size_t cap) {
+    wtls_http_request req = {0};
+    req.url = target;
+    req.proxy_url = proxy;
+    wtls_http_result res;
+    *rc = wtls_http_fetch(&req, 1024, &res);
+    *status = *rc == WTLS_OK ? res.status : res.status;
+    body[0] = '\0';
+    if (*rc == WTLS_OK) {
+        snprintf(body, cap, "%.*s", (int)(res.body_len < cap - 1 ? res.body_len : cap - 1), res.body);
+        wtls_http_result_free(&res);
+    }
+}
+
+static void http_proxy_authentication(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "http://%s:4446", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 407); /* plain request: the proxy's answer is the response */
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT); /* CONNECT refused with 407 */
+    /* credentials in the URL, percent-encoded ("p@ss w0rd") */
+    snprintf(proxy, sizeof proxy, "http://proxyuser:p%%40ss%%20w0rd@%s:4446", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    CHECK(strcmp(body, "hello") == 0);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    snprintf(proxy, sizeof proxy, "http://proxyuser:wrong@%s:4446", g_env.server_host);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
+static void http_proxy_url_forms_rejected(void) {
+    char body[8];
+    int status, rc;
+    static const char *const bad[] = {"socks5://", "socks4://h:1080", "http://u@:80", "http://:p@h:80", "http://h:80/path",
+                                      "socks5://h:99999", "http://u:p%zz@h:80", "http://u:p%4@h:80", "ftp://h"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        fetch_via(bad[i], url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+        if (rc != WTLS_ERR_ARG) TLOG("  proxy url %s -> %d\n", bad[i], rc);
+        CHECK_EQ_INT(rc, WTLS_ERR_ARG);
+    }
+}
+
+static int socks_atyp(void) {
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/socks-last");
+    wtls_http_result res;
+    int atyp = -1;
+    if (wtls_http_fetch(&req, 1024, &res) == WTLS_OK) {
+        const char *p = strstr(res.body, "'atyp': ");
+        if (p) atyp = atoi(p + 8);
+        wtls_http_result_free(&res);
+    }
+    return atyp;
+}
+
+static void http_socks5_connect(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "socks5h://%s:4447", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(status, 200);
+    CHECK(strcmp(body, "hello") == 0);
+    uint32_t ip; /* socks5h: the proxy gets the name; an address (the Wii runner) still goes as IPv4 */
+    CHECK_EQ_INT(socks_atyp(), wtls_plat_parse_ipv4(g_env.server_host, &ip) ? 1 : 3);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK); /* https through the tunnel, verified against the target name */
+    CHECK(strcmp(body, "hello") == 0);
+    snprintf(proxy, sizeof proxy, "socks5://%s:4447", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK_EQ_INT(socks_atyp(), 1); /* socks5: resolved here, an IPv4 address goes out */
+    /* a port the proxy refuses */
+    fetch_via(proxy, url_of("http", 4431, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
+static void http_socks5_authentication(void) {
+    wtls_http_pool_flush();
+    char proxy[200], body[64];
+    int status, rc;
+    snprintf(proxy, sizeof proxy, "socks5h://%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT); /* the proxy requires a user name */
+    snprintf(proxy, sizeof proxy, "socks5h://sockuser:s0cks%%3Apw@%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    CHECK(strcmp(body, "hello") == 0);
+    fetch_via(proxy, url("/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_OK);
+    snprintf(proxy, sizeof proxy, "socks5h://sockuser:nope@%s:4448", g_env.server_host);
+    fetch_via(proxy, url_of("http", P_HTTP_PLAIN, "/hello"), &status, &rc, body, sizeof body);
+    CHECK_EQ_INT(rc, WTLS_ERR_CONNECT);
+}
+
 #if WTLS_HTTP2
 static void http2_get_and_info(void) {
     wtls_http_pool_flush();
@@ -2170,6 +2523,29 @@ static void http2_get_and_info(void) {
         CHECK_EQ_INT((long long)wtls_http_content_length(r), 0);
         wtls_http_close(r);
     }
+}
+
+static void http2_trailers_keep_the_hpack_table_in_step(void) {
+    wtls_http_pool_flush();
+    wtls_http_request req = {0};
+    req.url = url_of("https", P_H2, "/trailers?n=100");
+    wtls_http_response *r = open_req(&req);
+    if (!r) return;
+    int last = -1;
+    CHECK_EQ_INT((int)strlen(body_str(r, &last)), 100);
+    CHECK_EQ_INT(last, 0);
+    wtls_http_close(r);
+    /* the same connection: the next head refers to the dynamic table entry the trailers made */
+    req.url = url_of("https", P_H2, "/dynref");
+    r = open_req(&req);
+    if (!r) return;
+    wtls_http_info info;
+    CHECK_EQ_INT(wtls_http_get_info(r, &info), WTLS_OK);
+    CHECK(info.http2 && info.reused_connection);
+    const char *t = wtls_http_get_header(r, "x-trailer");
+    CHECK(t && strcmp(t, "t1") == 0);
+    CHECK(strcmp(body_str(r, &last), "ok") == 0);
+    wtls_http_close(r);
 }
 
 static void http2_reuse_and_goaway(void) {
@@ -2261,9 +2637,13 @@ static void http2_flow_upload_expect_gzip_cont(void) {
     req.body_cb = h2_up_cb;
     req.body_ctx = &up;
     req.body_len = up.total;
-    CHECK_EQ_INT(wtls_http_fetch(&req, 256u * 1024u, &res), WTLS_OK);
+    int up_rc = wtls_http_fetch(&req, 256u * 1024u, &res);
+    CHECK_EQ_INT(up_rc, WTLS_OK);
+    if (up_rc != WTLS_OK) TLOG("  200 KiB upload: %d after %u bytes from body_cb\n", up_rc, (unsigned)up.sent);
     CHECK_EQ_INT((int)res.body_len, (int)up.total);
-    CHECK(res.body[0] == 'A' && res.body[up.total - 1] == (char)('A' + ((up.total - 1) % 26)));
+    /* a failed fetch leaves no body: compare only what is there */
+    CHECK(res.body_len == up.total && res.body[0] == 'A' &&
+          res.body[up.total - 1] == (char)('A' + ((up.total - 1) % 26)));
     wtls_http_result_free(&res);
 
     /* Streaming unknown-length upload (body_chunked=true without Content-Length) */
@@ -2322,6 +2702,72 @@ static void http2_flow_upload_expect_gzip_cont(void) {
 }
 #endif
 
+/* ---- cookie jar --------------------------------------------------------- */
+
+static void fetch_with_jar(const char *u, wtls_cookie_jar *jar, bool no_h2, char *out, size_t cap) {
+    wtls_http_request req = {0};
+    req.url = u;
+    req.cookie_jar = jar;
+    req.no_h2 = no_h2;
+    wtls_http_result res;
+    int st = wtls_http_fetch(&req, 0, &res);
+    CHECK_EQ_INT(st, WTLS_OK);
+    out[0] = '\0';
+    if (st == WTLS_OK) {
+        snprintf(out, cap, "%.*s", (int)(res.body_len < cap - 1 ? res.body_len : cap - 1), res.body);
+        wtls_http_result_free(&res);
+    }
+}
+
+static void http_cookie_jar_roundtrip(void) {
+    wtls_http_pool_flush();
+    wtls_cookie_jar *jar = wtls_cookie_jar_new(0);
+    char body[2048];
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/setcookie?c=sid%3Dabc%3B+Path%3D%2F&c2=theme%3Ddark"), jar, true, body, sizeof body);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 2);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "cookie: sid=abc; theme=dark") != NULL || strstr(body, "Cookie: sid=abc; theme=dark") != NULL);
+    /* a Cookie header of your own wins */
+    wtls_http_header h[] = {{"Cookie", "mine=1"}};
+    wtls_http_request req = {0};
+    req.url = url_of("http", P_HTTP_PLAIN, "/headers");
+    req.cookie_jar = jar;
+    req.headers = h;
+    req.n_headers = 1;
+    wtls_http_result res;
+    CHECK_EQ_INT(wtls_http_fetch(&req, 0, &res), WTLS_OK);
+    CHECK(res.body && strstr(res.body, "mine=1") != NULL && strstr(res.body, "sid=abc") == NULL);
+    wtls_http_result_free(&res);
+    wtls_cookie_jar_clear(jar);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "sid=abc") == NULL);
+    wtls_cookie_jar_free(jar);
+}
+
+static void http_cookie_jar_secure_and_redirect(void) {
+    wtls_http_pool_flush();
+    wtls_cookie_jar *jar = wtls_cookie_jar_new(0);
+    char body[2048];
+    /* set over https: a Secure cookie is stored and only sent back over https */
+    fetch_with_jar(url_of("https", P_HTTP, "/setcookie?c=tok%3D1%3B+Secure"), jar, true, body, sizeof body);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 1);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "tok=1") == NULL);
+    fetch_with_jar(url_of("https", P_HTTP, "/headers"), jar, true, body, sizeof body);
+    CHECK(strstr(body, "tok=1") != NULL);
+    /* the same host name on another port shares host-only cookies (cookies ignore ports); a cookie
+     * set by an intermediate redirect hop is already sent on the next hop */
+    wtls_cookie_jar_clear(jar);
+    char target[160];
+    snprintf(target, sizeof target, "/headers");
+    char u[400];
+    snprintf(u, sizeof u, "/cookie-redirect?c=hop%%3D1&to=%s", target);
+    fetch_with_jar(url_of("http", P_HTTP_PLAIN, u), jar, true, body, sizeof body);
+    CHECK(strstr(body, "hop=1") != NULL);
+    CHECK_EQ_INT((int)wtls_cookie_jar_count(jar), 1);
+    wtls_cookie_jar_free(jar);
+}
+
 void wtls_suite_http(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -2333,6 +2779,8 @@ void wtls_suite_http(void) {
         return;
     }
     RUN(http_get_hello);
+    RUN(http_cookie_jar_roundtrip);
+    RUN(http_cookie_jar_secure_and_redirect);
     RUN(http_len_big);
     RUN(http_chunked);
     RUN(http_close_delimited);
@@ -2378,6 +2826,30 @@ void wtls_suite_http(void) {
     RUN(http_open_streaming_progress);
     RUN(http_expect_100_continue);
     RUN(http_proxy_plain_and_connect);
+#if WTLS_BROTLI
+    RUN(http_brotli_decodes);
+    RUN(http_brotli_window_too_big_limit);
+    RUN(http_brotli_truncated_is_io_error);
+#endif
+#if WTLS_ZSTD
+    RUN(http_zstd_decodes);
+    RUN(http_zstd_window_too_big_limit);
+    RUN(http_zstd_truncated_and_corrupt);
+#endif
+#if WTLS_BROTLI || WTLS_ZSTD
+    RUN(http_accept_encoding_lists_codecs);
+#endif
+    RUN(http_retry_io_error_then_ok);
+    RUN(http_retry_never_post);
+    RUN(http_retry_connect_refused_backs_off);
+    RUN(http_retry_503_retry_after);
+    RUN(http_total_timeout_covers_retries);
+    RUN(http_total_timeout_slow_body);
+    RUN(http_total_timeout_slow_head);
+    RUN(http_proxy_authentication);
+    RUN(http_proxy_url_forms_rejected);
+    RUN(http_socks5_connect);
+    RUN(http_socks5_authentication);
     RUN(http_net_reset_flushes_pool);
     RUN(http_spki_pin_ca_and_mismatch);
     RUN(http_spki_pin_pool_and_redirect);
@@ -2429,6 +2901,7 @@ void wtls_suite_http(void) {
 #endif
 #if WTLS_HTTP2
     RUN(http2_get_and_info);
+    RUN(http2_trailers_keep_the_hpack_table_in_step);
     RUN(http2_reuse_and_goaway);
     RUN(http2_flow_upload_expect_gzip_cont);
 #endif

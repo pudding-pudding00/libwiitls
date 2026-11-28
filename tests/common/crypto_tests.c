@@ -87,6 +87,15 @@ static void test_x25519_generated_pairs_agree(void) {
     psa_destroy_key(y);
 }
 
+#if defined(WTLS_ACCEL_X25519) || defined(WTLS_ACCEL_P256)
+static uint32_t xorshift32(uint32_t *s) {
+    *s ^= *s << 13;
+    *s ^= *s >> 17;
+    *s ^= *s << 5;
+    return *s;
+}
+#endif
+
 #if defined(WTLS_ACCEL_X25519)
 /* The 32-bit-limb X25519 (src/accel), called directly. */
 #include "accel/wtls_x25519.h"
@@ -152,12 +161,6 @@ static void test_x25519_fast_rfc7748_6_1(void) {
     CHECK_MEM(out, k_shared, 32);
 }
 
-static uint32_t xorshift32(uint32_t *s) {
-    *s ^= *s << 13;
-    *s ^= *s >> 17;
-    *s ^= *s << 5;
-    return *s;
-}
 
 static void same_as_everest(const uint8_t k[32], const uint8_t u[32]) {
     uint8_t kc[32], uc[32], want[32], out[32];
@@ -545,6 +548,96 @@ static void test_p256_matches_builtin(void) {
 }
 #endif /* WTLS_ACCEL_P256 */
 
+/* ---- Project Wycheproof vectors (tools/gen_wycheproof.py) ---------------- */
+
+#include "wycheproof_p256.inc"
+#include "wycheproof_x25519.inc"
+
+static size_t wp_unhex(uint8_t *out, size_t cap, const char *hex) {
+    size_t n = strlen(hex) / 2;
+    if (n > cap) return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned b = 0;
+        sscanf(hex + 2 * i, "%2x", &b);
+        out[i] = (uint8_t)b;
+    }
+    return n;
+}
+
+/* Every vector must give the expected shared secret through the PSA path
+ * (what TLS uses) and, with the accelerator, through the direct call. Only
+ * "acceptable" vectors (low-order and non-canonical points) may be refused
+ * by PSA; they must never produce a different secret. */
+static void test_wycheproof_x25519(void) {
+    const size_t n = sizeof k_wp_x25519 / sizeof k_wp_x25519[0];
+    TLOG("  %u X25519 vectors\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t priv[32], pub[32], want[32], out[32];
+        bool parsed = wp_unhex(priv, 32, k_wp_x25519[i].priv) == 32 && wp_unhex(pub, 32, k_wp_x25519[i].pub) == 32 &&
+                      wp_unhex(want, 32, k_wp_x25519[i].shared) == 32;
+        CHECK(parsed);
+        if (!parsed) continue;
+#if defined(WTLS_ACCEL_X25519)
+        wtls_x25519(out, priv, pub);
+        if (memcmp(out, want, 32) != 0) TLOG("  direct call differs, tcId %d\n", k_wp_x25519[i].tc);
+        CHECK_MEM(out, want, 32);
+#endif
+        psa_key_id_t id = import_x25519(priv);
+        size_t olen = 0;
+        psa_status_t st = psa_raw_key_agreement(PSA_ALG_ECDH, id, pub, 32, out, sizeof out, &olen);
+        if (st == PSA_SUCCESS) {
+            bool same = olen == 32 && memcmp(out, want, 32) == 0;
+            if (!same) TLOG("  PSA differs, tcId %d\n", k_wp_x25519[i].tc);
+            CHECK(same);
+        } else {
+            if (k_wp_x25519[i].result != 2) TLOG("  PSA refused a valid vector, tcId %d\n", k_wp_x25519[i].tc);
+            CHECK_EQ_INT(k_wp_x25519[i].result, 2);
+        }
+        psa_destroy_key(id);
+    }
+}
+
+/* ECDSA P-256 / SHA-256: valid vectors verify, invalid ones are rejected, on
+ * the PSA path; with the accelerator also the direct call and (host only, the
+ * builtin is slow on the Wii) the builtin oracle must agree. */
+static void test_wycheproof_p256_sha256(void) {
+    const size_t n = sizeof k_wp_p256 / sizeof k_wp_p256[0];
+    TLOG("  %u ECDSA P-256 vectors\n", (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t pub[65], sig[64], hash[32];
+        static uint8_t msg[1024];
+        size_t hl = 0;
+        size_t mlen = wp_unhex(msg, sizeof msg, k_wp_p256[i].msg);
+        bool parsed = wp_unhex(pub, 65, k_wp_p256[i].pub) == 65 && wp_unhex(sig, 64, k_wp_p256[i].sig) == 64 &&
+                      (mlen > 0 || k_wp_p256[i].msg[0] == 0);
+        CHECK(parsed);
+        if (!parsed) continue;
+        CHECK_EQ_INT(psa_hash_compute(PSA_ALG_SHA_256, msg, mlen, hash, sizeof hash, &hl), PSA_SUCCESS);
+        const bool want = k_wp_p256[i].result == 1;
+
+        psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+        psa_set_key_type(&a, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+        psa_set_key_usage_flags(&a, PSA_KEY_USAGE_VERIFY_HASH);
+        psa_set_key_algorithm(&a, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+        psa_key_id_t id = 0;
+        CHECK_EQ_INT(psa_import_key(&a, pub, sizeof pub, &id), PSA_SUCCESS);
+        bool got = psa_verify_hash(id, PSA_ALG_ECDSA(PSA_ALG_SHA_256), hash, hl, sig, sizeof sig) == PSA_SUCCESS;
+        psa_destroy_key(id);
+        if (got != want) TLOG("  PSA verify differs, tcId %d\n", k_wp_p256[i].tc);
+        CHECK(got == want);
+#if defined(WTLS_ACCEL_P256)
+        bool ours = wtls_p256_verify(pub, hash, hl, sig) == PSA_SUCCESS;
+        if (ours != want) TLOG("  accelerator differs, tcId %d\n", k_wp_p256[i].tc);
+        CHECK(ours == want);
+#if !defined(GEKKO)
+        bool ref = builtin_p256_verify(pub, hash, hl, sig) == 0;
+        if (ref != ours) TLOG("  builtin disagrees, tcId %d\n", k_wp_p256[i].tc);
+        CHECK(ref == ours);
+#endif
+#endif
+    }
+}
+
 void wtls_suite_crypto(void) {
     CHECK_EQ_INT(wtls_init(), WTLS_OK);
 #if defined(WTLS_ACCEL_X25519)
@@ -562,6 +655,8 @@ void wtls_suite_crypto(void) {
     RUN(test_p256_identity);
     RUN(test_p256_matches_builtin);
 #endif
+    RUN(test_wycheproof_x25519);
+    RUN(test_wycheproof_p256_sha256);
     RUN(test_x25519_rfc7748_alice);
     RUN(test_x25519_rfc7748_bob);
     RUN(test_x25519_generated_pairs_agree);

@@ -126,10 +126,50 @@ static void test_hpack_encode_request(void) {
     CHECK_EQ_INT(wtls_hpack_encode_request("GET", &u, bad, 1, false, 0, false, false, &blk, &blen), WTLS_ERR_ARG);
 }
 
+/* A literal with incremental indexing whose name is an index into the dynamic
+ * table, and whose insertion evicts exactly that entry: the new entry must be
+ * built from a copy of the name, not from the memory eviction frees (found by
+ * fuzz_hpack as a heap-use-after-free; visible without a sanitizer only
+ * through the checks below). */
+static void test_hpack_indexed_name_evicted_by_insert(void) {
+    uint8_t blk[128];
+    size_t n = 0;
+    blk[n++] = 0x3f; /* dynamic table size update to 100: 31 + 69 */
+    blk[n++] = 0x45;
+    blk[n++] = 0x88; /* :status 200 */
+    blk[n++] = 0x40; /* literal with indexing, new name "aaaa", value "bbbb": cost 40 */
+    blk[n++] = 4;
+    memcpy(blk + n, "aaaa", 4);
+    n += 4;
+    blk[n++] = 4;
+    memcpy(blk + n, "bbbb", 4);
+    n += 4;
+    blk[n++] = 0x40 | 62; /* literal with indexing, name = dynamic entry 1 ("aaaa") */
+    blk[n++] = 60;        /* value: cost 4 + 60 + 32 = 96, so 40 + 96 > 100 evicts "aaaa" */
+    memset(blk + n, 'c', 60);
+    n += 60;
+
+    wtls_hpack_ctx ctx;
+    wtls_hpack_init(&ctx, WTLS_HPACK_DEFAULT_TABLE);
+    wtls_http_head head;
+    char *arena = NULL;
+    CHECK_EQ_INT(wtls_hpack_decode_head(&ctx, blk, n, &head, &arena), WTLS_OK);
+    CHECK_EQ_INT((int)head.n_fields, 2);
+    CHECK_EQ_INT(head.status, 200);
+    CHECK(strcmp(head.fields[1].name, "aaaa") == 0);
+    CHECK_EQ_INT((int)strlen(head.fields[1].value), 60);
+    CHECK_EQ_INT((int)ctx.count, 1); /* only the new entry survived */
+    CHECK(ctx.count == 1 && strcmp(ctx.entries[0].name, "aaaa") == 0);
+    CHECK(ctx.count == 1 && ctx.entries[0].value_len == 60 && ctx.entries[0].value[59] == 'c');
+    free(arena);
+    wtls_hpack_free(&ctx);
+}
+
 int main(void) {
     RUN(test_hpack_integers);
     RUN(test_hpack_huffman_vectors);
     RUN(test_hpack_dynamic_table);
     RUN(test_hpack_encode_request);
+    RUN(test_hpack_indexed_name_evicted_by_insert);
     return CHECK_DONE();
 }

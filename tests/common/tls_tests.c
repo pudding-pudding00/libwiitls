@@ -444,6 +444,60 @@ static void test_nonblocking_poll_then_read(void) {
     wtls_close(c);
 }
 
+/* A non-blocking write that answered WANT_WRITE, then a read before the retry: the read processes the
+ * TLS 1.3 NewSessionTickets, which flushes the pending record behind the writer's back. The retry must not
+ * send that record a second time: the server checks every byte of the stream. */
+static void test_nonblocking_write_retry_after_read(void) {
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL); /* nothing read yet: the tickets wait */
+    if (!c) return;
+    const size_t total = g_env.is_hw ? 2u * 1024u * 1024u : 16u * 1024u * 1024u, piece = 40000;
+    static uint8_t pat[40000 + 251];
+    for (size_t i = 0; i < sizeof pat; i++) pat[i] = (uint8_t)(i % 251);
+    char cmd[48];
+    snprintf(cmd, sizeof cmd, "SINK %lu 700\n", (unsigned long)total); /* the server reads after 700 ms */
+    if (!send_str(c, cmd)) {
+        wtls_close(c);
+        return;
+    }
+    CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
+    size_t off = 0, waits = 0;
+    uint64_t end = wtls_plat_now_ms() + 30000, longest = 0;
+    while (off < total && wtls_plat_now_ms() < end) {
+        size_t n = total - off < piece ? total - off : piece;
+        uint64_t w0 = wtls_plat_now_ms();
+        int k = wtls_write(c, pat + off % 251, n);
+        if (wtls_plat_now_ms() - w0 > longest) longest = wtls_plat_now_ms() - w0;
+        if (k < 0 && k != WTLS_WANT_WRITE && k != WTLS_WANT_READ) {
+            CHECK_EQ_INT(k, 0);
+            break;
+        }
+        if (k > 0) off += (size_t)k;
+        if (k != (int)n) { /* WANT_*, or a part: either way a record may be waiting to go out */
+            wtls_plat_poll(wtls_get_fd(c), false, true, 5000);
+            if (waits++ == 0) {
+                wtls_plat_sleep_ms(200); /* room for the whole pending record */
+                char b[16];
+                CHECK_EQ_INT(wtls_read(c, b, sizeof b), WTLS_WANT_READ);
+            }
+        }
+    }
+    TLOG("  incomplete writes: %lu, longest non-blocking write: %lu ms\n", (unsigned long)waits, (unsigned long)longest);
+    /* IOS decides whether the send buffer ever looks full; on the host a run without that proves nothing. */
+    if (waits == 0 && g_env.is_hw) SKIP("the socket never refused data: the retry path did not run");
+    else CHECK(waits > 0);
+    CHECK_EQ_INT((long)off, (long)total);
+    CHECK_EQ_INT(wtls_set_nonblocking(c, false), WTLS_OK);
+    char line[64], want[48];
+    snprintf(want, sizeof want, "SUNK %lu", (unsigned long)total);
+    int r = read_line(c, line, sizeof line);
+    CHECK(r >= 0);
+    if (r >= 0 && strcmp(line, want) != 0) {
+        TLOG("  got \"%s\", want \"%s\"\n", line, want);
+        CHECK(strcmp(line, want) == 0);
+    }
+    wtls_close(c);
+}
+
 static void test_pending_counts_buffered(void) {
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
     if (!c) return;
@@ -932,6 +986,97 @@ static void test_spki_pin_resumption_isolated(void) {
     }
 }
 
+/* ---- extended pin list (spki_pins_ext) ---------------------------------- */
+
+static void test_pin_ext_only_match(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa)) return;
+    wtls_options o = {0};
+    o.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ecdsa;
+    o.n_spki_pins_ext = 1;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_RSA, &o), WTLS_ERR_CERT); /* a different key: pinning is active */
+}
+
+static void test_pin_ext_sixth_of_six_matches(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa)) return;
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    memcpy(ext[WTLS_SPKI_MAX_PINS_EXT - 1], pin_ecdsa, sizeof pin_ecdsa); /* the sixth pin overall */
+    wtls_options o = {0};
+    memset(o.spki_pins, 0xAA, sizeof o.spki_pins);
+    o.n_spki_pins = WTLS_SPKI_MAX_PINS;
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (c) wtls_close(c);
+}
+
+static void test_pin_ext_none_match_cert_error(void) {
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    wtls_options o = {0};
+    memset(o.spki_pins, 0xAA, sizeof o.spki_pins);
+    o.n_spki_pins = WTLS_SPKI_MAX_PINS;
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CERT);
+    CHECK(c == NULL);
+    CHECK(wtls_last_verify_flags() & MBEDTLS_X509_BADCERT_OTHER);
+}
+
+static void test_pin_ext_bad_arguments(void) {
+    uint8_t ext[WTLS_SPKI_MAX_PINS_EXT + 1][WTLS_SPKI_SHA256_LEN];
+    memset(ext, 0xBB, sizeof ext);
+    wtls_options o = {0};
+    o.spki_pins_ext = ext;
+    o.n_spki_pins_ext = WTLS_SPKI_MAX_PINS_EXT + 1;
+    wtls_conn *c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+    o.spki_pins_ext = NULL; /* a count without an array */
+    o.n_spki_pins_ext = 1;
+    c = (wtls_conn *)1;
+    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_ARG);
+    CHECK(c == NULL);
+}
+
+static void test_pin_ext_resumption_isolated(void) {
+    uint8_t pin_ecdsa[WTLS_SPKI_SHA256_LEN];
+    uint8_t pin_ca[WTLS_SPKI_SHA256_LEN];
+    if (!fetch_spki("ecdsa", pin_ecdsa) || !fetch_spki("test-ca", pin_ca)) return;
+    wtls_scache_clear();
+    wtls_options o_ca = {0};
+    o_ca.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ca;
+    o_ca.n_spki_pins_ext = 1;
+    wtls_options o_leaf = {0};
+    o_leaf.spki_pins_ext = (const uint8_t(*)[WTLS_SPKI_SHA256_LEN])pin_ecdsa;
+    o_leaf.n_spki_pins_ext = 1;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (c) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    }
+    wtls_conn *d = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_leaf);
+    if (d) {
+        wtls_conn_info info;
+        wtls_get_info(d, &info);
+        CHECK(!info.resumed); /* another extended pin set must not reuse the ticket */
+        wtls_close(d);
+    }
+    wtls_conn *e = open_tls(g_env.server_host, P_TLS13_ECDSA, &o_ca);
+    if (e) {
+        wtls_conn_info info;
+        wtls_get_info(e, &info);
+        CHECK(info.resumed);
+        wtls_close(e);
+    }
+}
+
 static void test_reset_trusted_cas(void) {
     /* First confirm test_ca is currently trusted (even with cached tickets cleared). */
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
@@ -996,6 +1141,148 @@ static void test_nonblocking_connect_start_step(void) {
     if (bad && bad != (wtls_conn *)1) wtls_close(bad);
 }
 
+/* ---- asynchronous DNS ------------------------------------------------------ */
+
+static uint32_t s_dns_ip;
+static uint32_t s_dns_delay_ms;
+
+/* A name, not the server address: an address never reaches the resolver (on the Wii the server is given as
+ * one). The certificate is for localhost, and the hook below maps every name to the test server. */
+#define DNS_NAME "localhost"
+
+/* Resolver hook: every name is the test server, after a delay. */
+static int slow_dns(const char *host, uint32_t *addrs, size_t cap, size_t *count) {
+    (void)host;
+    (void)cap;
+    wtls_plat_sleep_ms(s_dns_delay_ms);
+    addrs[0] = s_dns_ip;
+    *count = 1;
+    return WTLS_OK;
+}
+
+static bool dns_test_setup(uint32_t delay_ms) {
+    if (wtls_plat_resolve(g_env.server_host, &s_dns_ip) != WTLS_OK) return false;
+    s_dns_delay_ms = delay_ms;
+    wtls_dns_clear();
+    wtls_dns_set_resolver_all(slow_dns);
+    return true;
+}
+
+static void dns_test_teardown(void) {
+    wtls_dns_set_resolver_all(NULL);
+    wtls_dns_clear();
+}
+
+static void test_connect_start_async_dns_nonblocking(void) {
+    if (!dns_test_setup(500)) return;
+    wtls_options o = {0};
+    o.async_dns = true;
+    wtls_conn *c = NULL;
+    uint64_t t0 = wtls_plat_now_ms();
+    wtls_status st = wtls_connect_start(&c, DNS_NAME, P_TLS13_ECDSA, &o);
+    CHECK(wtls_plat_now_ms() - t0 < 200); /* the lookup takes 500 ms */
+    CHECK_EQ_INT(st, WTLS_WANT_READ);
+    CHECK(c != NULL);
+    if (c) CHECK_EQ_INT(wtls_get_fd(c), -1); /* nothing to poll while the name is being resolved */
+    int steps = 0;
+    while (c && (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) && steps++ < 5000) {
+        int fd = wtls_get_fd(c);
+        if (fd >= 0) wtls_plat_poll(fd, st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 5);
+        else wtls_plat_sleep_ms(5);
+        st = wtls_connect_step(c);
+    }
+    CHECK_EQ_INT(st, WTLS_OK);
+    CHECK(wtls_plat_now_ms() - t0 >= 450);
+    if (c && st == WTLS_OK) {
+        expect_line(c, "PING\n", "PING");
+        wtls_close(c);
+    } else if (c) {
+        wtls_close(c);
+    }
+    dns_test_teardown();
+}
+
+static void test_connect_start_default_resolves_inline(void) {
+    if (!dns_test_setup(120)) return;
+    wtls_options o = {0};
+    wtls_conn *c = NULL;
+    uint64_t t0 = wtls_plat_now_ms();
+    wtls_status st = wtls_connect_start(&c, DNS_NAME, P_TLS13_ECDSA, &o);
+    CHECK(wtls_plat_now_ms() - t0 >= 100); /* as in 1.0: the call waits for the lookup */
+    CHECK(st == WTLS_WANT_READ || st == WTLS_WANT_WRITE || st == WTLS_OK);
+    if (c && st != WTLS_OK) CHECK(wtls_get_fd(c) >= 0);
+    int steps = 0;
+    while (c && (st == WTLS_WANT_READ || st == WTLS_WANT_WRITE) && steps++ < 5000) {
+        wtls_plat_poll(wtls_get_fd(c), st == WTLS_WANT_READ, st == WTLS_WANT_WRITE, 5);
+        st = wtls_connect_step(c);
+    }
+    CHECK_EQ_INT(st, WTLS_OK);
+    if (c) wtls_close(c);
+    dns_test_teardown();
+}
+
+static uint64_t s_abort_at;
+
+static bool abort_at_time_cb(void *ctx) {
+    (void)ctx;
+    return wtls_plat_now_ms() >= s_abort_at;
+}
+
+static void test_connect_abort_during_dns(void) {
+    if (!dns_test_setup(1500)) return;
+    wtls_options o = {0};
+    o.abort_cb = abort_at_time_cb;
+    s_abort_at = wtls_plat_now_ms() + 100;
+    wtls_conn *c = (wtls_conn *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
+    CHECK(c == NULL);
+    CHECK(wtls_plat_now_ms() - t0 < 400); /* 1.0 waited for the whole lookup */
+    wtls_plat_sleep_ms(1600); /* let the abandoned lookup finish: it must not leak into the next test */
+    dns_test_teardown();
+}
+
+static void test_connect_dns_timeout(void) {
+    if (!dns_test_setup(2000)) return;
+    wtls_options o = {0};
+    o.dns_timeout_ms = 300;
+    wtls_conn *c = (wtls_conn *)1;
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
+    uint64_t dt = wtls_plat_now_ms() - t0;
+    CHECK(c == NULL);
+    CHECK(dt >= 280 && dt < 900);
+    wtls_plat_sleep_ms(1800);
+    dns_test_teardown();
+}
+
+/* Lookups that timed out keep their job slots until the resolver returns. With every slot taken that way, the next
+ * connect is a DNS failure, not WTLS_ERR_NOMEM: no memory is short. */
+static void test_connect_dns_slots_busy_is_dns_error(void) {
+    if (!dns_test_setup(800)) return;
+    wtls_options o = {0};
+    o.dns_timeout_ms = 30;
+    wtls_conn *c = (wtls_conn *)1;
+    for (int i = 0; i < 4; i++) CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_DNS);
+    CHECK(c == NULL);
+    wtls_plat_sleep_ms(4 * 800 + 300); /* the Wii's one resolver thread runs the abandoned lookups one by one */
+    dns_test_teardown();
+}
+
+static void test_connect_dns_uses_cache_after_first(void) {
+    if (!dns_test_setup(300)) return;
+    wtls_options o = {0};
+    wtls_conn *c = NULL;
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_OK); /* resolves, caches on success */
+    if (c) wtls_close(c);
+    uint64_t t0 = wtls_plat_now_ms();
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_OK);
+    CHECK(wtls_plat_now_ms() - t0 < 250); /* no second lookup */
+    if (c) wtls_close(c);
+    dns_test_teardown();
+}
+
 void wtls_suite_tls(void) {
     int r = wtls_init();
     CHECK_EQ_INT(r, WTLS_OK);
@@ -1028,6 +1315,7 @@ void wtls_suite_tls(void) {
     RUN(test_handshake_profile);
     RUN(test_nonblocking_read_wants_read);
     RUN(test_nonblocking_poll_then_read);
+    RUN(test_nonblocking_write_retry_after_read);
     RUN(test_pending_counts_buffered);
     RUN(test_set_nonblocking_null_is_arg_error);
     RUN(test_host_extra_dots_rejected);
@@ -1048,8 +1336,19 @@ void wtls_suite_tls(void) {
     RUN(test_multi_ip_fallback_and_net_reset);
     RUN(test_spki_pin_leaf_and_ca);
     RUN(test_spki_pin_resumption_isolated);
+    RUN(test_pin_ext_only_match);
+    RUN(test_pin_ext_sixth_of_six_matches);
+    RUN(test_pin_ext_none_match_cert_error);
+    RUN(test_pin_ext_bad_arguments);
+    RUN(test_pin_ext_resumption_isolated);
     RUN(test_reset_trusted_cas);
     RUN(test_nonblocking_connect_start_step);
+    RUN(test_connect_start_async_dns_nonblocking);
+    RUN(test_connect_start_default_resolves_inline);
+    RUN(test_connect_abort_during_dns);
+    RUN(test_connect_dns_timeout);
+    RUN(test_connect_dns_slots_busy_is_dns_error);
+    RUN(test_connect_dns_uses_cache_after_first);
     if (!g_env.is_hw) RUN(test_hostname_normalization); /* needs the name "localhost" */
     else TLOG("SKIP host-only test_hostname_normalization\n");
     wtls_shutdown();
