@@ -10,6 +10,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- **Retried connects could run out of DNS lookup slots:** a connect that gave up on a running lookup (an error, a
+  timeout) left it holding one of the four slots until the resolver answered, and the next attempt started a lookup
+  of its own. Quick retries to the same host then failed with `WTLS_ERR_DNS`. A new lookup of that host now takes
+  the abandoned one back. This made `test_alloc_fail_nth_connect` fail on macOS, where `localhost` resolves slowly.
 - **A non-blocking `wtls_write` could lose data:** when a record had gone out only in part (`WTLS_WANT_WRITE`)
   and the retry passed more data than that record held, the call counted up to a full record as sent although
   only the pending one went out. The peer then waited for bytes that never came. This made
