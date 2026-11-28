@@ -14,8 +14,10 @@ this page explains what the release machinery does so that it does not depend on
    `src/gen/ca_bundle.c` and `data/cacert.pem.sha256` with `tools/gen_ca_bundle.py`.
 4. **Hardware:** `tools/hwtest.py --suite all` and the benchmark on a Wii (see
    [CONTRIBUTING.md](../CONTRIBUTING.md#hardware-reports)), results into the release notes.
-5. **Tag** `vx.y.z` and push it. `release.yml` then runs CI, builds the package with
-   `tools/make_release.sh` (devkitPro container), and publishes the GitHub release only if every job passed.
+5. **Tag** `vx.y.z` on main and push it. `release.yml` first runs `tools/release_gate.sh`: the commit must be on
+   main, and the CI that its push to main started must have passed (the gate waits up to 90 minutes for it). It
+   then runs CI again, builds the package with `tools/make_release.sh` (devkitPro container), and publishes the
+   GitHub release only if every job passed.
 
 ## What the release contains
 
