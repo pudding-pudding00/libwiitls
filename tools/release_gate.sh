@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release gate, run by release.yml before anything is published: the tagged commit must be on main, and
-# every workflow run that its push to main started (the CI) must have finished successfully. Waits while
+# every workflow run that its push to main started (CI, CodeQL) must have finished successfully. Waits while
 # those runs are still going, as they are when a tag is pushed right after a merge.
 #
 # Usage: tools/release_gate.sh <commit> [wait-minutes, default 90]
@@ -17,9 +17,9 @@ if ! git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
   exit 1
 fi
 
-# The workflow runs started by pushing this commit to main. The release workflow's own runs are
-# left out: it is the one asking.
-RUNS='[.workflow_runs[] | select(.event == "push" and .head_branch == "main"
+# The workflow runs started by pushing this commit to main: CI ("push") and CodeQL code scanning
+# ("dynamic"). The release workflow's own runs are left out: it is the one asking.
+RUNS='[.workflow_runs[] | select((.event == "push" or .event == "dynamic") and .head_branch == "main"
                                 and .path != ".github/workflows/release.yml")]'
 runs() { gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --jq "$RUNS | $1"; }
 

@@ -18,8 +18,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 ### Changed
 
 - **Releases only from main, and only when its checks passed:** `release.yml` now starts with a gate
-  (`tools/release_gate.sh`). The tagged commit must be on main, and the CI run that its push to main started
-  must have succeeded. The gate waits for that run if it is still going.
+  (`tools/release_gate.sh`). The tagged commit must be on main, and every run that its push to main started
+  (CI and CodeQL) must have succeeded. The gate waits for those runs if they are still going.
 
 ## [1.1.0] - 2026-11-28
 

@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  # The tagged commit must be on main, and the CI its push to main started must have passed
+  # The tagged commit must be on main, and every run its push to main started (CI, CodeQL) must have passed
   # (waits for it when the tag follows a merge right away).
   gate:
     runs-on: ubuntu-latest

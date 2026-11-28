@@ -15,7 +15,8 @@ this page explains what the release machinery does so that it does not depend on
 4. **Hardware:** `tools/hwtest.py --suite all` and the benchmark on a Wii (see
    [CONTRIBUTING.md](../CONTRIBUTING.md#hardware-reports)), results into the release notes.
 5. **Tag** `vx.y.z` on main and push it. `release.yml` first runs `tools/release_gate.sh`: the commit must be on
-   main, and the CI that its push to main started must have passed (the gate waits up to 90 minutes for it). It
+   main, and every run that its push to main started (CI, CodeQL) must have passed (the gate waits up to 90
+   minutes for them). It
    then runs CI again, builds the package with `tools/make_release.sh` (devkitPro container), and publishes the
    GitHub release only if every job passed.
 
