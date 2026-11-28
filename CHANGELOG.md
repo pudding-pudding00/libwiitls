@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-28
+
 ### Changed
 
 - **Security – no TLS in Dolphin by default:** in Dolphin the timebase jitter of an IOS round trip is deterministic
@@ -18,6 +20,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Fixed
 
+- **`tools/hwtest.py --suite all` stopped after 120 s:** `--timeout` limited the whole run, which now takes
+  longer. It is now how long the runner may stay silent.
+- **A failed 200 KiB HTTP/2 upload crashed the test runner** instead of failing the test: the check read the
+  body of a response that had none.
 - **HTTP/2 was ten times slower than HTTP/1.1 on the Wii:** the client wrote each frame, and each frame's header
   and payload, with its own `send`. IOS does not allow `TCP_NODELAY`, so Nagle held every small write until the
   server's delayed ACK came back, ~62 ms per sequential request. Both HTTP/2 engines now gather a request's frames
@@ -217,5 +223,7 @@ zlib 1.3.1.
 - HTTP/2: following a redirect no longer leaks the previous response's header
   buffer.
 
+[Unreleased]: https://github.com/pudding-pudding00/libwiitls/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0
