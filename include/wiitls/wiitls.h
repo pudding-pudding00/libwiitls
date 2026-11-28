@@ -128,9 +128,9 @@ typedef struct {
     bool async_dns;                 /**< (1.1) wtls_connect_start(): resolve host names without blocking. A name
                                          that is not cached then makes the call return WTLS_WANT_READ with
                                          wtls_get_fd() == -1 until the lookup is done: call wtls_connect_step()
-                                         again after a few milliseconds (there is nothing to poll yet). Needs a
-                                         helper thread (host builds); on the Wii the lookup still runs inside the
-                                         call. wtls_connect() always resolves this way, which is what lets it
+                                         again after a few milliseconds (there is nothing to poll yet). The lookup
+                                         runs on a helper thread (on the Wii one resolver thread, started on
+                                         first use, 16 KiB stack). wtls_connect() always resolves this way, which is what lets it
                                          honour abort_cb and dns_timeout_ms during the lookup */
     uint32_t dns_timeout_ms;        /**< (1.1) 0 => wait as long as the resolver takes (as in 1.0); otherwise a
                                          lookup that is still running after this long fails with

@@ -44,6 +44,10 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ### Added
 
+- **Non-blocking DNS on the Wii:** `async_dns` in `wtls_connect_start()`, `wtls_http_start()`, and the abort and
+  `dns_timeout_ms` options of `wtls_connect()` now also work on the Wii. The lookups run on one resolver thread
+  (priority 80, 16 KiB stack), started on first use; before, the Wii still resolved inside the call. The DNS tests
+  of the `tls` and `httpasync` suites now run on the Wii and use a host name, since an address skips the resolver.
 - **Non-blocking start-up:** `wtls_init_start()` and `wtls_init_step(budget_ms)` collect the jitter entropy in time slices of 16 samples, so the budget holds to ~1.3 ms on the Wii (also before `net_init()`, e.g. next to `net_init_async()`) and finish like `wtls_init()`; the credited entropy is unchanged. New host test `test_init_step` (the host runs the jitter path with a test sampler), Wii timing in the `entropy` suite.
 - Bench: `http_16_small_seq_h1_wall`, `http_16_small_seq_wall` and `http_16_small_async_wall` time 16 small
   requests over HTTP/1.1, sequential HTTP/2 and multiplexed HTTP/2; `docs/benchmarks.md` has the Wii results

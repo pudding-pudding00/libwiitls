@@ -1146,6 +1146,10 @@ static void test_nonblocking_connect_start_step(void) {
 static uint32_t s_dns_ip;
 static uint32_t s_dns_delay_ms;
 
+/* A name, not the server address: an address never reaches the resolver (on the Wii the server is given as
+ * one). The certificate is for localhost, and the hook below maps every name to the test server. */
+#define DNS_NAME "localhost"
+
 /* Resolver hook: every name is the test server, after a delay. */
 static int slow_dns(const char *host, uint32_t *addrs, size_t cap, size_t *count) {
     (void)host;
@@ -1157,10 +1161,6 @@ static int slow_dns(const char *host, uint32_t *addrs, size_t cap, size_t *count
 }
 
 static bool dns_test_setup(uint32_t delay_ms) {
-    if (g_env.is_hw) {
-        SKIP("the Wii resolves inside the call (no helper thread yet)");
-        return false;
-    }
     if (wtls_plat_resolve(g_env.server_host, &s_dns_ip) != WTLS_OK) return false;
     s_dns_delay_ms = delay_ms;
     wtls_dns_clear();
@@ -1179,7 +1179,7 @@ static void test_connect_start_async_dns_nonblocking(void) {
     o.async_dns = true;
     wtls_conn *c = NULL;
     uint64_t t0 = wtls_plat_now_ms();
-    wtls_status st = wtls_connect_start(&c, g_env.server_host, P_TLS13_ECDSA, &o);
+    wtls_status st = wtls_connect_start(&c, DNS_NAME, P_TLS13_ECDSA, &o);
     CHECK(wtls_plat_now_ms() - t0 < 200); /* the lookup takes 500 ms */
     CHECK_EQ_INT(st, WTLS_WANT_READ);
     CHECK(c != NULL);
@@ -1207,7 +1207,7 @@ static void test_connect_start_default_resolves_inline(void) {
     wtls_options o = {0};
     wtls_conn *c = NULL;
     uint64_t t0 = wtls_plat_now_ms();
-    wtls_status st = wtls_connect_start(&c, g_env.server_host, P_TLS13_ECDSA, &o);
+    wtls_status st = wtls_connect_start(&c, DNS_NAME, P_TLS13_ECDSA, &o);
     CHECK(wtls_plat_now_ms() - t0 >= 100); /* as in 1.0: the call waits for the lookup */
     CHECK(st == WTLS_WANT_READ || st == WTLS_WANT_WRITE || st == WTLS_OK);
     if (c && st != WTLS_OK) CHECK(wtls_get_fd(c) >= 0);
@@ -1235,7 +1235,7 @@ static void test_connect_abort_during_dns(void) {
     s_abort_at = wtls_plat_now_ms() + 100;
     wtls_conn *c = (wtls_conn *)1;
     uint64_t t0 = wtls_plat_now_ms();
-    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_CANCELLED);
     CHECK(c == NULL);
     CHECK(wtls_plat_now_ms() - t0 < 400); /* 1.0 waited for the whole lookup */
     wtls_plat_sleep_ms(1600); /* let the abandoned lookup finish: it must not leak into the next test */
@@ -1248,7 +1248,7 @@ static void test_connect_dns_timeout(void) {
     o.dns_timeout_ms = 300;
     wtls_conn *c = (wtls_conn *)1;
     uint64_t t0 = wtls_plat_now_ms();
-    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_ERR_TIMEOUT);
     uint64_t dt = wtls_plat_now_ms() - t0;
     CHECK(c == NULL);
     CHECK(dt >= 280 && dt < 900);
@@ -1260,10 +1260,10 @@ static void test_connect_dns_uses_cache_after_first(void) {
     if (!dns_test_setup(300)) return;
     wtls_options o = {0};
     wtls_conn *c = NULL;
-    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_OK); /* resolves, caches on success */
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_OK); /* resolves, caches on success */
     if (c) wtls_close(c);
     uint64_t t0 = wtls_plat_now_ms();
-    CHECK_EQ_INT(wtls_connect(&c, g_env.server_host, P_TLS13_ECDSA, &o), WTLS_OK);
+    CHECK_EQ_INT(wtls_connect(&c, DNS_NAME, P_TLS13_ECDSA, &o), WTLS_OK);
     CHECK(wtls_plat_now_ms() - t0 < 250); /* no second lookup */
     if (c) wtls_close(c);
     dns_test_teardown();

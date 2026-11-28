@@ -414,10 +414,9 @@ milliseconds. Everything the blocking call does applies (redirects, cookies,
 `total_timeout_ms`, retries, gzip, the keep-alive pool). The request structure and what it
 points to must stay valid until the head is complete; `body_cb` is called from
 `wtls_http_step()` and must not block. Not supported: proxies, `expect_100_continue`,
-`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii two calls can still wait briefly: the host name lookup runs inside the call, and
-a send that is larger than the free space of IOS's ~4 KB socket buffer blocks until IOS has room
+`allow_upgrade` (`WTLS_ERR_UNSUPPORTED`). On the Wii one call can still wait briefly: a send that is larger than the free space of IOS's ~4 KB socket buffer blocks until IOS has room
 (measured: up to 650 ms while the server stopped reading; see `docs/ios-socket-behaviour.md`). So
-"never waits" holds on the host, and on the Wii for everything but those two cases; keep the UI
+"never waits" holds on the host, and on the Wii for everything but that case; keep the UI
 loop tolerant of an occasional stall of that size.
 
 #### HTTP/2 and several requests at once
@@ -557,9 +556,13 @@ Addresses are cached after the first successful connect as before. The blocking
 connect that is stuck in DNS (a change from 1.0, where the lookup could not be
 interrupted), and `opt.dns_timeout_ms` bounds the lookup (`WTLS_ERR_TIMEOUT`;
 0 keeps the old unlimited wait). `wtls_net_reset()` discards the answer of a
-lookup that was running during the reset. **On the Wii** there is no helper
-thread yet: the lookup still runs inside the call, exactly as in 1.0, and the
-abort and timeout options have no effect on it.
+lookup that was running during the reset. **On the Wii** the lookups run on
+one resolver thread (priority 80, 16 KiB stack from the heap), started on the
+first lookup that misses the cache and kept for the life of the program, since a
+libogc thread cannot be detached. Lookups go through it one after another (the
+IOS resolver is not reentrant anyway): a name that hangs in IOS holds up the
+names queued behind it, but every caller still gets its own `dns_timeout_ms` or
+abort.
 
 ## 8. Your own server / self-signed certificates
 

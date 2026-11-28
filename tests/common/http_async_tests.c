@@ -588,16 +588,14 @@ static int slow_dns(const char *host, uint32_t *addrs, size_t cap, size_t *count
 }
 
 static void test_async_start_returns_during_dns(void) {
-    if (g_env.is_hw) {
-        SKIP("the Wii resolves inside the call (no helper thread yet)");
-        return;
-    }
     if (wtls_plat_resolve(g_env.server_host, &s_dns_ip) != WTLS_OK) return;
     wtls_http_pool_flush();
     wtls_dns_clear();
     wtls_dns_set_resolver_all(slow_dns);
     wtls_http_request req = {0};
-    req.url = purl("/hello");
+    char url[64]; /* a name: an address (the server on the Wii) never reaches the resolver */
+    snprintf(url, sizeof url, "http://localhost:%u/hello", (unsigned)P_HTTP_PLAIN);
+    req.url = url;
     wtls_http_response *r = NULL;
     uint64_t t0 = wtls_plat_now_ms();
     int st = wtls_http_start(&r, &req);
