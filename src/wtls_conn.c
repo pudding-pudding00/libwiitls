@@ -661,6 +661,9 @@ static int write_record(wtls_conn *c, const unsigned char *p, size_t len) {
         c->write_pending = 0;
         return (int)n;
     }
+    /* The retry of a pending record: Mbed TLS reports the length it is given (up to a record), not what that record
+     * carried, so pass no more than the record held. */
+    if (c->write_pending && len > c->write_pending) len = c->write_pending;
     int r = mbedtls_ssl_write(&c->ssl, p, len);
     if (r > 0) {
         c->write_pending = 0;

@@ -498,6 +498,48 @@ static void test_nonblocking_write_retry_after_read(void) {
     wtls_close(c);
 }
 
+#if !defined(GEKKO)
+/* A record that went out only in part, then the retry with more data than that record holds (the caller appends
+ * the next piece). Mbed TLS answers such a retry with the length of the new buffer, up to a full record, not with
+ * what the pending record carried: the difference was counted as sent but never went out. Host only: the send
+ * hook makes the full send buffer happen at a known byte. */
+static void test_nonblocking_write_retry_with_more_data(void) {
+    wtls_options o = {0};
+    o.io_timeout_ms = 3000;
+    wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, &o);
+    if (!c) return;
+    expect_line(c, "PING\n", "PING"); /* reads the tickets now, so no read flushes the record behind our back */
+    static uint8_t pat[20000 + 251];
+    for (size_t i = 0; i < sizeof pat; i++) pat[i] = (uint8_t)(i % 251);
+    const size_t total = 20000, first = 1000;
+    char cmd[48];
+    snprintf(cmd, sizeof cmd, "SINK %lu 0\n", (unsigned long)total);
+    if (!send_str(c, cmd)) {
+        wtls_close(c);
+        return;
+    }
+    CHECK_EQ_INT(wtls_set_nonblocking(c, true), WTLS_OK);
+    wtls_plat_test_send_block_after = 500; /* half of the first record leaves */
+    CHECK_EQ_INT(wtls_write(c, pat, first), WTLS_WANT_WRITE);
+    wtls_plat_test_send_block_after = -1;
+    int k = wtls_write(c, pat, total); /* the same first bytes, and more */
+    CHECK(k >= (int)first); /* the pending record, and whatever fits after it */
+    size_t off = k > 0 ? (size_t)k : 0;
+    CHECK_EQ_INT(wtls_set_nonblocking(c, false), WTLS_OK);
+    while (off < total) {
+        int w = wtls_write(c, pat + off % 251, total - off);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    char line[64], want[48];
+    snprintf(want, sizeof want, "SUNK %lu", (unsigned long)total);
+    int r = read_line(c, line, sizeof line);
+    CHECK_EQ_INT(r >= 0 ? 0 : r, 0); /* the server waits for bytes that never came: timeout */
+    if (r >= 0) CHECK(strcmp(line, want) == 0);
+    wtls_close(c);
+}
+#endif
+
 static void test_pending_counts_buffered(void) {
     wtls_conn *c = open_tls(g_env.server_host, P_TLS13_ECDSA, NULL);
     if (!c) return;
@@ -1316,6 +1358,9 @@ void wtls_suite_tls(void) {
     RUN(test_nonblocking_read_wants_read);
     RUN(test_nonblocking_poll_then_read);
     RUN(test_nonblocking_write_retry_after_read);
+#if !defined(GEKKO)
+    RUN(test_nonblocking_write_retry_with_more_data);
+#endif
     RUN(test_pending_counts_buffered);
     RUN(test_set_nonblocking_null_is_arg_error);
     RUN(test_host_extra_dots_rejected);

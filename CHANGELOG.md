@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/) from 1.0.0 on.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-28
+
+### Fixed
+
+- **A non-blocking `wtls_write` could lose data:** when a record had gone out only in part (`WTLS_WANT_WRITE`)
+  and the retry passed more data than that record held, the call counted up to a full record as sent although
+  only the pending one went out. The peer then waited for bytes that never came. This made
+  `test_nonblocking_write_retry_after_read` fail now and then on macOS. Affects 1.0.0 to 1.1.0.
+
+### Changed
+
+- **Releases only from main, and only when its checks passed:** `release.yml` now starts with a gate
+  (`tools/release_gate.sh`). The tagged commit must be on main, and every run that its push to main started
+  (CI and CodeQL) must have succeeded. The gate waits for those runs if they are still going.
+
 ## [1.1.0] - 2026-11-28
 
 ### Changed
@@ -225,7 +240,8 @@ zlib 1.3.1.
 - HTTP/2: following a redirect no longer leaks the previous response's header
   buffer.
 
-[Unreleased]: https://github.com/pudding-pudding00/libwiitls/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/pudding-pudding00/libwiitls/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/pudding-pudding00/libwiitls/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/pudding-pudding00/libwiitls/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/pudding-pudding00/libwiitls/releases/tag/v1.0.0
